@@ -1,0 +1,92 @@
+nohup: ignoring input
+
+Glassnode Alpha Engine started (interval=1800s)
+============================================================
+
+============================================================
+[Backfill] 首次启动 — 回溯历史推文建立初始状态
+[Backfill] bulk_limit=2000, max_samples=200, batch_size=5
+============================================================
+[Backfill] 阶段1: 获取历史推文 ...
+[Fetcher] Bulk fetch: @glassnode (limit=2000, known=18)
+Error retrieving https://twitter.com/i/api/graphql/7jT5GT59P8IFjgxwqnEdQw/SearchTimeline?variables=%7B%22rawQuery%22%3A%22from%3Aglassnode%22%2C%22count%22%3A20%2C%22product%22%3A%22Latest%22%2C%22withDownvotePerspective%22%3Afalse%2C%22withReactionsMetadata%22%3Afalse%2C%22withReactionsPerspective%22%3Afalse%7D&features=%7B%22rweb_lists_timeline_redesign_enabled%22%3Afalse%2C%22blue_business_profile_image_shape_enabled%22%3Afalse%2C%22responsive_web_graphql_exclude_directive_enabled%22%3Atrue%2C%22verified_phone_label_enabled%22%3Afalse%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Afalse%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22tweetypie_unmention_optimization_enabled%22%3Atrue%2C%22vibe_api_enabled%22%3Atrue%2C%22responsive_web_edit_tweet_api_enabled%22%3Atrue%2C%22graphql_is_translatable_rweb_tweet_is_translatable_enabled%22%3Atrue%2C%22view_counts_everywhere_api_enabled%22%3Atrue%2C%22longform_notetweets_consumption_enabled%22%3Atrue%2C%22tweet_awards_web_tipping_enabled%22%3Afalse%2C%22freedom_of_speech_not_reach_fetch_enabled%22%3Afalse%2C%22standardized_nudges_misinfo%22%3Atrue%2C%22tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled%22%3Afalse%2C%22interactive_text_enabled%22%3Atrue%2C%22responsive_web_text_conversations_enabled%22%3Afalse%2C%22longform_notetweets_rich_text_read_enabled%22%3Afalse%2C%22longform_notetweets_inline_media_enabled%22%3Afalse%2C%22responsive_web_enhance_cards_enabled%22%3Afalse%2C%22responsive_web_twitter_blue_verified_badge_is_enabled%22%3Atrue%7D: blocked (404)
+4 requests to https://twitter.com/i/api/graphql/7jT5GT59P8IFjgxwqnEdQw/SearchTimeline?variables=%7B%22rawQuery%22%3A%22from%3Aglassnode%22%2C%22count%22%3A20%2C%22product%22%3A%22Latest%22%2C%22withDownvotePerspective%22%3Afalse%2C%22withReactionsMetadata%22%3Afalse%2C%22withReactionsPerspective%22%3Afalse%7D&features=%7B%22rweb_lists_timeline_redesign_enabled%22%3Afalse%2C%22blue_business_profile_image_shape_enabled%22%3Afalse%2C%22responsive_web_graphql_exclude_directive_enabled%22%3Atrue%2C%22verified_phone_label_enabled%22%3Afalse%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Afalse%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22tweetypie_unmention_optimization_enabled%22%3Atrue%2C%22vibe_api_enabled%22%3Atrue%2C%22responsive_web_edit_tweet_api_enabled%22%3Atrue%2C%22graphql_is_translatable_rweb_tweet_is_translatable_enabled%22%3Atrue%2C%22view_counts_everywhere_api_enabled%22%3Atrue%2C%22longform_notetweets_consumption_enabled%22%3Atrue%2C%22tweet_awards_web_tipping_enabled%22%3Afalse%2C%22freedom_of_speech_not_reach_fetch_enabled%22%3Afalse%2C%22standardized_nudges_misinfo%22%3Atrue%2C%22tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled%22%3Afalse%2C%22interactive_text_enabled%22%3Atrue%2C%22responsive_web_text_conversations_enabled%22%3Afalse%2C%22longform_notetweets_rich_text_read_enabled%22%3Afalse%2C%22longform_notetweets_inline_media_enabled%22%3Afalse%2C%22responsive_web_enhance_cards_enabled%22%3Afalse%2C%22responsive_web_twitter_blue_verified_badge_is_enabled%22%3Atrue%7D failed, giving up.
+Errors: blocked (404), blocked (404), blocked (404), blocked (404)
+[Fetcher] Bulk fetch error: ScraperException: 4 requests to https://twitter.com/i/api/graphql/7jT5GT59P8IFjgxwqnEdQw/SearchTimeline?variables=%7B%22rawQuery%22%3A%22f
+[Fetcher] 如果 snscrape 不可用，使用文件导入: python -m src.run --import tweets_backup.jsonl
+[Fetcher] Bulk fetch complete: 0 new tweets written
+[Backfill] snscrape 批量抓取: +0 条, 总计 18 条
+
+[Backfill] 阶段2: 从 18 条中智能采样 ≤200 条 ...
+[Backfill] 采样 18 条 (覆盖 18 条全量)
+
+[Backfill] 阶段3: 分 4 批分析 ...
+
+[Backfill] 批次 1/4 (5 推文) ...
+[Analyzer] Input: 2643 chars, 5 tweets
+[Analyzer] Got 1887 chars (finish_reason=stop)
+[Backfill]   cycle_position=BEAR_DEEP, conf=medium, quality=8
+[Backfill]   REGIME: BEAR → BEAR_DEEP (反弹被证实为对冲解除而非真实买盘，ETF流出、衍生品自满、国债收益率压制，熊市时间未到；但持有者迁移而非抛售、杠杆温和，底部信号仍在累积但未确认。)
+[Backfill]   Alpha: +0.0000 → +0.1000
+
+[Backfill] 批次 2/4 (5 推文) ...
+[Analyzer] Input: 3131 chars, 5 tweets
+[Analyzer] Empty response (finish_reason=length)
+[Analyzer] Retry 1/2 ...
+[Analyzer] Got 872 chars (finish_reason=length)
+[Analyzer] WARNING: Response truncated due to max_tokens limit
+[Analyzer] JSON parse error: Expecting ',' delimiter: line 28 column 6 (char 794) — {
+  "date": "2026-08-06",
+  "cycle_position": "BEAR_DEEP",
+  "cycle_confidence": "medium",
+  "regime_evidence": "期权持仓重建但低于2025峰值，基差与国债利差创历史（上次出现后不久为2022年底周期低点），订单簿下方出现耐心买盘，但美元走强和DVOL低迷表明底部尚未确认。",
+  "summary": "BTC衍生品定位回补但波动率低迷，基差劣势接近历史极值，下方买盘托底，熊市尾部信号增强。",
+  "evidence_scores": {
+    "profitability": 0.0,
+    "institutional": 0.0,
+    "onchain": 0.4,
+    "derivatives": 0.2,
+    "macro": -0.4
+  },
+  "signal_board": [
+    {
+      "category": "derivatives",
+      "name": "期权OI重建",
+      "signal": 0.
+[Analyzer] Retry 2/2 ...
+[Analyzer] Empty response (finish_reason=length)
+[Backfill]   分析失败，跳过本批
+
+[Backfill] 批次 3/4 (5 推文) ...
+[Analyzer] Input: 3218 chars, 5 tweets
+[Analyzer] Empty response (finish_reason=length)
+[Analyzer] Retry 1/2 ...
+[Analyzer] Empty response (finish_reason=length)
+[Analyzer] Retry 2/2 ...
+[Analyzer] Empty response (finish_reason=length)
+[Backfill]   分析失败，跳过本批
+
+[Backfill] 批次 4/4 (3 推文) ...
+[Analyzer] Input: 2799 chars, 3 tweets
+[Analyzer] Empty response (finish_reason=length)
+[Analyzer] Retry 1/2 ...
+[Analyzer] Got 1591 chars (finish_reason=stop)
+[Backfill]   cycle_position=BEAR_DEEP, conf=medium, quality=7
+[Backfill]   Alpha: +0.1000 → +0.2000
+
+[Backfill] 完成 — regime=BEAR_DEEP, alpha=+0.2000, analyses=2
+============================================================
+
+[Status] Regime=BEAR_DEEP | Alpha=+0.2000 | Analyses=2
+         Cooldown=1 | Stability=2
+
+--- Fetch ---
+[Fetcher] Trying RSS: https://nitter.net/glassnode/rss
+[Fetcher]   Got 18 items
+[Fetcher] 0 new tweets (total fetched: 18, known: 18)
+
+--- Idle (no new tweets) ---
+  Alpha: +0.2000 → +0.3000 (target=+0.50)
+
+[Main] Next check at 2026-08-06T09:00Z (in 30 min)
+

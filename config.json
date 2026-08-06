@@ -1,0 +1,119 @@
+{
+  "_note": "Glassnode Alpha Engine 配置文件",
+
+  "deepseek": {
+    "api_key": "sk-fafd0520b58c4f198d8146ccdec30b38",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "temperature": 0.3,
+    "max_tokens": 4096,
+    "timeout_seconds": 120
+  },
+
+  "fetcher": {
+    "username": "glassnode",
+    "max_tweets_per_fetch": 20,
+    "timeout_seconds": 20,
+    "rss_sources": [
+      "https://nitter.net/{user}/rss",
+      "https://nitter.poast.org/{user}/rss",
+      "https://nitter.privacydev.net/{user}/rss",
+      "https://rsshub.app/twitter/user/{user}",
+      "https://rss.rsshub.app/twitter/user/{user}"
+    ]
+  },
+
+  "alpha": {
+    "smoothing": {
+      "_note": "max_change_per_step: 每次仅调整仓位的百分比 (0.02 = 2%, 天极0.02). 每天最多一步.",
+      "max_change_per_step": 0.02,
+      "cooldown_cycles_after_regime_change": 10,
+      "min_cycles_for_extreme_alpha": 20
+    },
+    "evidence": {
+      "min_categories_for_regime_change": 3,
+      "min_total_score_for_regime_change": 2.0,
+      "decay_per_cycle": 0.01,
+      "stability_window": 5
+    },
+    "confidence_gate": {
+      "low_confidence_blocks_regime_change": true,
+      "low_confidence_max_alpha_abs": 0.3
+    },
+    "regime_alpha_map": {
+      "_note": "确认制: 确认改变方向, 多次确认逐步积累仓位。中性(=0)是清仓翻转点, 不直接跳满仓。",
+      "BEAR_BOTTOM": 0.00,
+      "RECOVERY": 0.70,
+      "BULL": 1.00,
+      "DEEP_BULL": 0.30,
+      "BULL_COOLING": 0.00,
+      "BEAR": -1.00,
+      "BEAR_DEEP": -0.30
+    }
+  },
+
+  "knowledge": {
+    "distill": {
+      "schedule_day": "sunday",
+      "schedule_hour_utc": 0,
+      "memory_compress_threshold_chars": 10000,
+      "max_prediction_age_days": 30
+    },
+    "drift": {
+      "new_term_trigger_count": 5,
+      "deprecated_term_trigger_count": 10,
+      "quality_drop_trigger": 5,
+      "quality_drop_persistence": 3,
+      "auto_calibrate_new_terms": true,
+      "auto_calibrate_thresholds": false,
+      "require_confirm_regime_change": true,
+      "require_confirm_threshold_change": true
+    }
+  },
+
+  "tradesync": {
+    "_note": "交易指令输出配置。可以是 HTTP endpoint 或文件路径。",
+    "enabled": false,
+    "mode": "file",
+    "output_dir": "orders",
+    "http_endpoint": "",
+    "api_key": "",
+    "_output_format": "JSONL with {timestamp, alpha, direction, size_pct, limit, stop}"
+  },
+
+  "datafeed": {
+    "_note": "BTC 价格数据来源。通过 DataFeed 接口获取。",
+    "enabled": false,
+    "mode": "http",
+    "endpoint": "",
+    "symbol": "BTC/USDT",
+    "timeout_seconds": 10
+  },
+
+  "paths": {
+    "data_dir": "data",
+    "state_file": "state.json"
+  },
+
+  "schedule": {
+    "poll_interval_seconds": 86400,
+    "retry_on_fetch_failure": true,
+    "retry_delay_seconds": 120
+  },
+
+  "dingtalk": {
+    "enabled": true,
+    "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=63e160c26acc3dfe3e55be8a86f1a8aa5af3fc8f17b839b7de1af2a2a7b12af8",
+    "secret": "",
+    "_note": "钉钉机器人推送。secret 为加签密钥(可选)。"
+  },
+
+  "backfill": {
+    "_note": "首次启动回溯历史数据。bulk_fetch_limit 控制 snscrape 抓取上限。max_analysis_samples 控制分析采样数。",
+    "enabled": true,
+    "batch_size": 5,
+    "bulk_fetch_limit": 2000,
+    "max_analysis_samples": 200,
+    "max_total_tweets": 50
+  }
+}

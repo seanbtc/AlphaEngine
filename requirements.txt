@@ -1,0 +1,2 @@
+requests>=2.31.0
+# snscrape  (可选, 批量历史抓取: pip install snscrape)

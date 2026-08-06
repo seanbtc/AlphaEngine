@@ -1,0 +1,41 @@
+[
+  {
+    "date": "2026-08-06T08:21:17.476141Z",
+    "alpha": 0.1,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5
+  },
+  {
+    "date": "2026-08-06T08:21:18.462531Z",
+    "alpha": 0.2,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5,
+    "btc_price": null
+  },
+  {
+    "date": "2026-08-06T08:43:16.240271Z",
+    "alpha": 0.3,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5,
+    "btc_price": null
+  },
+  {
+    "date": "2026-08-06T08:55:53.992326Z",
+    "alpha": 0.1,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5
+  },
+  {
+    "date": "2026-08-06T09:00:56.767516Z",
+    "alpha": 0.2,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5
+  },
+  {
+    "date": "2026-08-06T09:00:57.729506Z",
+    "alpha": 0.3,
+    "regime": "BEAR_DEEP",
+    "target_alpha": 0.5,
+    "btc_price": null
+  }
+]
