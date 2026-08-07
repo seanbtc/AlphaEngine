@@ -27,6 +27,7 @@ class StateManager:
             "alpha": {
                 "current": 0.0,
                 "target": 0.0,
+                "regime_progress": 0.5,
                 "transition_progress": 0.0,
                 "last_change_at": datetime.utcnow().isoformat() + "Z",
                 "locked": False,
@@ -39,6 +40,7 @@ class StateManager:
             "runtime": {
                 "analysis_count": 0,
                 "last_analysis_at": "",
+                "last_deepseek_at": "",
                 "last_distill_at": "",
                 "last_calibration_at": "",
                 "uptime_started_at": datetime.utcnow().isoformat() + "Z",

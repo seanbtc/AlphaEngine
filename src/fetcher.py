@@ -59,6 +59,20 @@ class Fetcher:
         text = re.sub(r"<[^>]+>", "", text)
         return text.strip()
 
+    @staticmethod
+    def _is_retweet(content: str) -> bool:
+        """判断 nitter/rsshub 描述是否为转推 (纯转推或引用转推)."""
+        if not content:
+            return False
+        text = content.strip()
+        if re.match(r"^RT\s+@", text):
+            return True
+        if "转发自: @" in text:
+            return True
+        if re.search(r"—\s*https?://nitter\.[^/\s]+/status/\d+", text):
+            return True
+        return False
+
     def fetch(self) -> list[dict]:
         existing_ids = self._load_existing_ids()
         headers = {
@@ -91,6 +105,9 @@ class Fetcher:
                     desc = (it.findtext("description") or "").strip()
                     pub = (it.findtext("pubDate") or "").strip()
                     content = self._strip_html(desc or title)
+                    if self._is_retweet(content):
+                        print(f"[Fetcher]   skip retweet {tid}")
+                        continue
                     all_tweets.append({
                         "id": tid,
                         "date": pub,
@@ -138,6 +155,8 @@ class Fetcher:
                 for i, tweet in enumerate(sntwitter.TwitterUserScraper(self.username).get_items()):
                     tid = str(tweet.id)
                     if tid in existing_ids:
+                        continue
+                    if getattr(tweet, "retweetedTweet", None) is not None:
                         continue
                     existing_ids.add(tid)
                     obj = {
