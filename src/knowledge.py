@@ -222,6 +222,7 @@ class Knowledge:
         url = f"{self.analyzer.base_url}/chat/completions"
 
         try:
+            print(f"[API-CALL][distill] POST {self.analyzer.model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
             resp.raise_for_status()
             content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -271,6 +272,7 @@ class Knowledge:
         url = f"{self.analyzer.base_url}/chat/completions"
 
         try:
+            print(f"[API-CALL][compress] POST {self.analyzer.model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
             resp.raise_for_status()
             compressed = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")

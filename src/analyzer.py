@@ -78,6 +78,23 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 - Cycle Position Heatmap: 蓝色=投降(↑), 红色=过热(↓)
 - Accumulation Trend Score: 高=广泛积累(↑), 低=分布/观望(→↓)
 
+## 周期位置进度 (regime_progress)
+
+regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
+- 0.0 = 刚进入该位置, 证据刚刚满足
+- 1.0 = 该位置接近结束, 即将进入正向流程中的下一个位置
+
+参考锚点:
+- BEAR_BOTTOM: 0.2=底部信号刚出现, 1.0=底部已确认即将转入恢复
+- RECOVERY: 0.3=恢复初期仅个别确认, 1.0=多次确认即将进入 BULL
+- BULL: 0.5=牛市中期, 1.0=过热信号频现即将进入 DEEP_BULL
+- DEEP_BULL: 0.5=顶部迹象初现, 1.0=顶部确认即将进入 BULL_COOLING
+- BULL_COOLING: 0.3=转弱初期, 1.0=熊市确认即将进入 BEAR
+- BEAR: 0.5=熊市中期, 1.0=深熊信号即将进入 BEAR_DEEP
+- BEAR_DEEP: 0.2=刚转深熊仍重空, 0.8=底部信号频现临近熊底, 1.0=即将进入 BEAR_BOTTOM
+
+注意: 必须依据推文中底部/顶部确认信号的出现频率与强度判断进度, 不要编造数字。
+
 ## 证据评分 (evidence_scores)
 
 为每个维度打分 [-1.0 到 +1.0]:
@@ -102,6 +119,7 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
   "date": "YYYY-MM-DD",
   "cycle_position": "BEAR|BEAR_DEEP|...",
   "cycle_confidence": "high|medium|low",
+  "regime_progress": 0.6,
   "regime_evidence": "一句话说明为何是这个周期位置",
   "summary": "一句话总结核心信息",
   "evidence_scores": {
@@ -148,7 +166,7 @@ class Analyzer:
         self.model = cfg.get("model", "deepseek-v4-flash")
         self.base_url = cfg.get("base_url", "https://api.deepseek.com").rstrip("/")
         self.temperature = cfg.get("temperature", 0.3)
-        self.max_tokens = cfg.get("max_tokens", 4096)
+        self.max_tokens = cfg.get("max_tokens", 8192)
         self.timeout = int(cfg.get("timeout_seconds", 120) or 120)
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
@@ -167,7 +185,7 @@ class Analyzer:
         return "\n".join(lines)
 
     def analyze(self, new_tweets: list[dict], memory_context: str,
-                knowledge_base: str = "", retries: int = 2) -> dict | None:
+                knowledge_base: str = "", retries: int = 1) -> dict | None:
         if not self.api_key:
             print("[Analyzer] Cannot run: API key not configured")
             return None
@@ -219,6 +237,7 @@ class Analyzer:
         url = f"{self.base_url}/chat/completions"
 
         try:
+            print(f"[API-CALL][analyzer] POST {self.model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
             if resp.status_code != 200:
                 print(f"[Analyzer] HTTP {resp.status_code}: {resp.text[:200]}")

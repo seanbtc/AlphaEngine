@@ -10,9 +10,10 @@
     "last_changed_at": "2026-08-06T08:55:53.985837Z"
   },
   "alpha": {
-    "current": 0.3,
-    "target": 0.5,
-    "transition_progress": 0.33333333333333326,
+    "current": -0.2,
+    "target": -0.2,
+    "regime_progress": 0.4,
+    "transition_progress": 1.0,
     "last_change_at": "2026-08-06T09:00:57.724358Z",
     "locked": false,
     "lock_reason": ""

@@ -49,6 +49,19 @@ BULL_SIDE_REGIMES = ("BEAR_BOTTOM", "RECOVERY", "BULL", "DEEP_BULL")
 # 熊市侧 (alpha <= 0): 不为多
 BEAR_SIDE_REGIMES = ("BULL_COOLING", "BEAR", "BEAR_DEEP")
 
+# 正向流程: 当前 regime → 下一位置 (用于周期内进度插值)
+# BEAR_DEEP 临近熊底 → alpha 从 -0.3 向 0 靠拢, 而非先满仓空再翻多
+FORWARD_NEXT_REGIME = {
+    "INIT":         "BEAR",
+    "DEEP_BULL":    "BULL_COOLING",
+    "BULL":         "DEEP_BULL",
+    "BULL_COOLING": "BEAR",
+    "BEAR":         "BEAR_DEEP",
+    "BEAR_DEEP":    "BEAR_BOTTOM",
+    "BEAR_BOTTOM":  "RECOVERY",
+    "RECOVERY":     "BULL",
+}
+
 EVIDENCE_CATEGORIES = ["profitability", "institutional", "onchain", "derivatives", "macro"]
 
 
@@ -110,7 +123,28 @@ class AlphaEngine:
             return -1
         return 0
 
-    def execute_regime_change(self, new_regime: str) -> str:
+    def enforce_side_constraint(self) -> bool:
+        """右侧纪律兜底: 仓位符号与周期方向侧冲突时, 直接定位到目标 (不先归零爬坡). 返回是否修正.
+
+        熊市侧 (BULL_COOLING/BEAR/BEAR_DEEP) 不允许做多 (alpha>0),
+        牛市侧 (BEAR_BOTTOM/RECOVERY/BULL/DEEP_BULL) 不允许做空 (alpha<0).
+        例如深熊 (BEAR_DEEP) 却持有多单 → 直接平到当前目标 (如 -0.3 或按进度的 -0.18).
+        """
+        alpha = self.get_alpha()
+        regime = self.get_regime()
+        if (regime in BEAR_SIDE_REGIMES and alpha > 0) or \
+           (regime in BULL_SIDE_REGIMES and alpha < 0):
+            progress = self.sm.get("alpha.regime_progress", 0.5)
+            target = self.calculate_target_alpha(regime, progress)
+            now = datetime.utcnow().isoformat() + "Z"
+            self.sm.set("alpha.current", target)
+            self.sm.set("alpha.target", target)
+            self.sm.set("alpha.transition_progress", 1.0)
+            self.sm.set("alpha.last_change_at", now)
+            return True
+        return False
+
+    def execute_regime_change(self, new_regime: str, progress: float = 0.0) -> str:
         current = self.get_regime()
         now = datetime.utcnow().isoformat() + "Z"
         self.sm.set("regime.current", new_regime)
@@ -122,11 +156,20 @@ class AlphaEngine:
                     self.smoothing.get("cooldown_cycles_after_regime_change", 10))
         self.sm.set("alpha.locked", False)
         self.sm.set("alpha.lock_reason", "")
+        self.sm.set("alpha.regime_progress", progress)
+        target = self.calculate_target_alpha(new_regime, progress)
 
-        # 右侧纪律: 跨越零线 (牛↔熊) 时先平仓, 再向新方向建仓
+        # 右侧纪律: 跨越零线 (牛↔熊) 时先平仓, 再向新方向建仓;
+        # 同向变更 (如 BEAR→BEAR_DEEP) 直接定位到目标, 避免从 0 爬坡
         if self._side(new_regime) != self._side(current):
             self.sm.set("alpha.current", 0.0)
+            self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 0.0)
+        else:
+            self.sm.set("alpha.current", target)
+            self.sm.set("alpha.target", target)
+            self.sm.set("alpha.transition_progress", 1.0)
+        self.sm.set("alpha.last_change_at", now)
 
         self.sm.save(force=True)
         return new_regime
@@ -136,13 +179,29 @@ class AlphaEngine:
     def get_alpha(self) -> float:
         return self.sm.get_alpha()
 
-    def calculate_target_alpha(self, regime: str) -> float:
-        return float(self.alpha_map.get(regime, 0.0))
+    def calculate_target_alpha(self, regime: str, progress: float = None) -> float:
+        """计算目标 alpha.
+
+        progress=None 时返回该 regime 的基准 alpha;
+        progress 为周期内进度 (0~1) 时, 在当前位 alpha 与下一位置 alpha 之间线性插值:
+        例如 BEAR_DEEP (基准 -0.3, 下一位置 BEAR_BOTTOM=0), progress=0.8 → -0.06,
+        即深熊临近熊底时减空至接近中性, 而不是先做到 -0.3 再回头.
+        """
+        base = float(self.alpha_map.get(regime, 0.0))
+        if progress is None:
+            return base
+        nxt = FORWARD_NEXT_REGIME.get(regime)
+        if nxt is None:
+            return base
+        nxt_alpha = float(self.alpha_map.get(nxt, base))
+        p = max(0.0, min(1.0, float(progress)))
+        return round(base + (nxt_alpha - base) * p, 4)
 
     def step_alpha(self) -> (float, bool):
-        """将 alpha 向 target 平滑推进一步。返回 (新alpha, 是否变化)."""
+        """将 alpha 向目标平滑推进一步。返回 (新alpha, 是否变化)."""
         current = self.get_alpha()
-        target = self.calculate_target_alpha(self.get_regime())
+        progress = self.sm.get("alpha.regime_progress", 0.5)
+        target = self.calculate_target_alpha(self.get_regime(), progress)
         max_step = self.smoothing.get("max_change_per_step", 0.10)
 
         if abs(current - target) < 0.005:

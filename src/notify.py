@@ -52,13 +52,15 @@ class DingTalk:
             f"原因: {reason}"
         )
 
-    def alpha_change(self, old: float, new: float, regime: str, btc_price=None):
+    def alpha_change(self, old: float, new: float, regime: str, btc_price=None, target: float = None):
         arrow = "🟢" if new > old else ("🔴" if new < old else "⚪")
         price_str = f" | BTC ${btc_price:,.0f}" if btc_price else ""
+        tgt = new if target is None else target
+        direction = "做多" if tgt > 0 else ("做空" if tgt < 0 else "观望")
         return self.send(
             f"{arrow} **Alpha 变更**\n\n"
             f"Regime: {regime}{price_str}\n"
-            f"Alpha: {old:+.4f} → {new:+.4f} (target={'做多' if new>0 else '做空' if new<0 else '观望'})"
+            f"Alpha: {old:+.4f} → {new:+.4f} (target: {tgt:+.2f} {direction})"
         )
 
     def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list):

@@ -2,11 +2,11 @@
   "_note": "Glassnode Alpha Engine 配置文件",
 
   "deepseek": {
-    "api_key": "sk-fafd0520b58c4f198d8146ccdec30b38",
+    "api_key": "sk-94974e3dbd1e4f5d9b9a733a79900b0e",
     "model": "deepseek-v4-flash",
     "base_url": "https://api.deepseek.com",
     "temperature": 0.3,
-    "max_tokens": 4096,
+    "max_tokens": 8192,
     "timeout_seconds": 120
   },
 
@@ -96,7 +96,9 @@
   },
 
   "schedule": {
+    "_note": "min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)",
     "poll_interval_seconds": 86400,
+    "min_analysis_interval_hours": 24,
     "retry_on_fetch_failure": true,
     "retry_delay_seconds": 120
   },

@@ -144,6 +144,8 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             print("[Backfill]   分析失败，跳过本批")
             continue
 
+        sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+
         cp = analysis.get("cycle_position", "BEAR")
         scores = analysis.get("evidence_scores", {})
         meta = analysis.get("meta", {})
@@ -153,6 +155,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         collected.append({
             "cp": cp,
             "scores": scores,
+            "progress": analysis.get("regime_progress", 0.5),
             "summary": analysis.get("summary", ""),
             "conf": analysis.get("cycle_confidence", "low"),
             "regime_evidence": analysis.get("regime_evidence", ""),
@@ -193,8 +196,10 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print(f"[Backfill] REGIME: {current} → {final_regime} ({rc['regime_evidence']})")
         dingtalk.regime_change(current, final_regime, rc["regime_evidence"], 0.0)
 
-    # 直接设 alpha 到目标 (回溯不走步进)
-    target = engine.calculate_target_alpha(final_regime)
+    # 直接设 alpha 到目标 (回溯不走步进), 按最后一批的周期内进度定位
+    progress = float(rc.get("progress", 0.5))
+    sm.set("alpha.regime_progress", progress)
+    target = engine.calculate_target_alpha(final_regime, progress)
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
@@ -302,18 +307,36 @@ def run_cycle(components: dict) -> bool:
 
     print_status(c)
 
+    # 0. 分析锁: 距上次成功 DeepSeek 分析不足 min_analysis_interval_hours 小时 → 本轮跳过抓取/分析
+    lock_hours = float(cfg.get("schedule", {}).get("min_analysis_interval_hours", 0) or 0)
+    locked = False
+    last_ds = sm.get("runtime.last_deepseek_at", "")
+    if lock_hours > 0 and last_ds:
+        try:
+            last_dt = datetime.fromisoformat(last_ds.replace("Z", "+00:00")).replace(tzinfo=None)
+            elapsed_h = (datetime.utcnow() - last_dt).total_seconds() / 3600
+            if elapsed_h < lock_hours:
+                locked = True
+                print(f"[Lock] 距上次 DeepSeek 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取")
+        except ValueError:
+            pass
+
     # 1. 获取价格
     btc_price = datafeed.get_price()
     if btc_price:
         print(f"[BTC] ${btc_price:,.2f}")
 
     # 2. 抓取新推文
+    new_tweets = []
     print("\n--- Fetch ---")
-    try:
-        new_tweets = fetcher.fetch()
-    except Exception as e:
-        print(f"[Fetch] Error: {e}")
-        new_tweets = []
+    if locked:
+        print("[Fetch] Skipped (analysis lock)")
+    else:
+        try:
+            new_tweets = fetcher.fetch()
+        except Exception as e:
+            print(f"[Fetch] Error: {e}")
+            new_tweets = []
 
     has_analysis = False
     analysis = None
@@ -324,6 +347,16 @@ def run_cycle(components: dict) -> bool:
         kb = knowledge.load_knowledge_base()
         ctx = memory.get_context_for_ai()
         analysis = analyzer.analyze(new_tweets, ctx, kb)
+
+        if analysis:
+            sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+
+            # 周期内进度 → 动态目标 (状态感知)
+            rp = analysis.get("regime_progress")
+            if rp is not None:
+                sm.set("alpha.regime_progress", float(rp))
+            progress = float(sm.get("alpha.regime_progress", 0.5))
+            print(f"  regime_progress: {progress:.2f}")
 
         if analysis:
             cp = analysis.get("cycle_position", "BEAR")
@@ -355,7 +388,7 @@ def run_cycle(components: dict) -> bool:
             ok, reason = engine.request_regime_change(cp, scores, conf,
                                                        meta.get("analysis_quality", 8))
             if ok and cp != current_regime:
-                new_regime = engine.execute_regime_change(cp)
+                new_regime = engine.execute_regime_change(cp, progress)
                 print(f"  [REGIME] {current_regime} → {new_regime}")
                 print(f"           原因: {regime_evidence}")
                 dingtalk.regime_change(current_regime, new_regime, regime_evidence, engine.get_alpha())
@@ -381,12 +414,34 @@ def run_cycle(components: dict) -> bool:
         sm.save()
         return False
 
+    # 6.5 右侧纪律兜底: 仓位符号与周期方向侧冲突 → 先平仓, 本轮不再步进
+    clamp_old = engine.get_alpha()
+    if engine.enforce_side_constraint():
+        clamp_new = engine.get_alpha()
+        clamp_target = engine.calculate_target_alpha(engine.get_regime(), progress)
+        print(f"  [SIDE-FIX] Alpha {clamp_old:+.4f} → {clamp_new:+.4f} "
+              f"(regime={engine.get_regime()} 方向冲突, 先平仓, 目标 {clamp_target:+.2f})")
+        memory.append_alpha({
+            "date": datetime.utcnow().isoformat() + "Z",
+            "alpha": clamp_new,
+            "regime": engine.get_regime(),
+            "target_alpha": clamp_target,
+            "btc_price": btc_price,
+            "note": "右侧纪律: 方向冲突平仓",
+        })
+        dingtalk.alpha_change(clamp_old, clamp_new, engine.get_regime(), btc_price, clamp_target)
+
     # 7. Alpha 推进一步 (仅在有新分析 + 非低置信时)
     old_alpha = engine.get_alpha()
     alpha_changed = False
     new_alpha = old_alpha
 
-    if conf == "low":
+    if clamp_old != engine.get_alpha():
+        # 已平仓, 本轮不步进, 下轮再向新方向建仓
+        print(f"  Alpha: 本轮已平仓至 {old_alpha:+.4f}, 下轮开始向目标建仓")
+        engine.tick_cooldown()
+        engine.tick_stability()
+    elif conf == "low":
         print(f"  Alpha: 保持不变 (置信度 low, 锁定)")
         engine.tick_cooldown()
         engine.tick_stability()
@@ -397,15 +452,16 @@ def run_cycle(components: dict) -> bool:
 
         if alpha_changed:
             print(f"  Alpha: {old_alpha:+.4f} → {new_alpha:+.4f} "
-                  f"(target={engine.calculate_target_alpha(engine.get_regime()):+.2f})")
+                  f"(target={engine.calculate_target_alpha(engine.get_regime(), progress):+.2f})")
             memory.append_alpha({
                 "date": datetime.utcnow().isoformat() + "Z",
                 "alpha": new_alpha,
                 "regime": engine.get_regime(),
-                "target_alpha": engine.calculate_target_alpha(engine.get_regime()),
+                "target_alpha": engine.calculate_target_alpha(engine.get_regime(), progress),
                 "btc_price": btc_price,
             })
-            dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price)
+            dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price,
+                                  engine.calculate_target_alpha(engine.get_regime(), progress))
 
     # 8. 发送交易指令
     if alpha_changed:
