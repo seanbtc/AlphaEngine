@@ -12,8 +12,10 @@
 
   "fetcher": {
     "username": "glassnode",
+    "usernames": ["glassnode", "cryptovizart", "n3ocortex"],
     "max_tweets_per_fetch": 20,
     "timeout_seconds": 20,
+    "retweet_whitelist": ["cryptovizart","n3ocortex"],
     "rss_sources": [
       "https://nitter.net/{user}/rss",
       "https://nitter.poast.org/{user}/rss",

@@ -3,6 +3,7 @@ DeepSeek AI 分析器 — 输出 cycle_position + 证据评分 + 元分析.
 """
 import json
 import re
+import time
 from datetime import datetime
 
 import requests
@@ -21,16 +22,30 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 | BEAR | 满仓做空 (-1.0) | 熊市确认 → 满仓做空 | 多次确认熊市, 多指标看跌共振, 下降趋势确认 |
 | BEAR_DEEP | 减空 (-0.3) | 深熊 → 减仓做空, 等底部 | 底部信号浮现但不完整, SEC进入历史底部区域但未触地板 |
 
-## 仓位纪律 (逐步确认, 缓慢加减仓)
+## 仓位纪律 (确认即定位, 跨零线先平仓)
 
-仓位管理不是"确认即满仓", 而是"确认改变方向, 多次确认逐步积累":
+仓位管理与 alpha 引擎联动, 遵循"状态感知"原则:
+- **同向变更** (如 BEAR→BEAR_DEEP): 确认后 alpha 直接定位到该位置的基准目标, 不做从 0 开始的爬坡
+- **跨零线变更** (牛↔熊): 先平仓归零, 再向新方向逐步建仓 (右侧纪律)
+- **周期内进度**: regime_progress 决定当前位置在"本位置基准 alpha"与"下一位置 alpha"之间的插值
+  例如 BEAR_DEEP 基准 -0.3, 下一位置 BEAR_BOTTOM=0:
+  progress=0.4 → 目标 -0.18 (深熊中期, 减空)
+  progress=0.8 → 目标 -0.06 (临近熊底, 接近中性)
 
-- **熊市底部**: 先清空做空仓位(=0), 不是立刻满仓做多
-- **牛市恢复**: 多次确认牛市中 → 慢慢建仓多单 (+0→+0.7→+1.0)
-- **牛市过热**: 随着过热信号出现 → 慢慢减仓多单 (+1.0→+0.3)
-- **牛顶确认**: 清仓多单(=0), 准备做空
-- **熊市确认**: 多次确认熊市中 → 慢慢加仓空单 (0→-0.7→-1.0)
-- **深熊**: 慢慢减仓做空 (-1.0→-0.3), 等待底部确认
+各位置的目标与插值方向:
+
+| 位置 | 基准 alpha | 下一位置 | 下一位置 alpha | 插值含义 |
+|------|-----------|---------|--------------|---------|
+| BEAR | -1.00 | BEAR_DEEP | -0.30 | 熊市深处走完 → 从满空减仓 |
+| BEAR_DEEP | -0.30 | BEAR_BOTTOM | 0.00 | 临近熊底 → 从减空回到中性 |
+| BEAR_BOTTOM | 0.00 | RECOVERY | +0.70 | 底部确认 → 从中性建仓做多 |
+| RECOVERY | +0.70 | BULL | +1.00 | 恢复确认充分 → 加仓至满仓 |
+| BULL | +1.00 | DEEP_BULL | +0.30 | 过热迹象 → 从满仓减仓 |
+| DEEP_BULL | +0.30 | BULL_COOLING | 0.00 | 顶部确认 → 从减多回到中性 |
+| BULL_COOLING | 0.00 | BEAR | -1.00 | 转熊确认 → 从中性建仓做空 |
+
+- 引擎 alpha 每日最多向目标移动 0.02, 目标随你每次输出的 regime_progress 逐日微调
+- 你的 regime_progress 判断直接影响 alpha 目标: 越接近 1.0 表示该位置越接近尾声
 
 ## 判定标准
 
@@ -138,7 +153,6 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
       "source": "tweet_id_xxx"
     }
   ],
-  "btc_price_estimate": null,
   "tweet_draft": "适合X发布的推文草稿 (≤277字符, 中文)",
   "position_narrative": "仓位策略叙述 (不公开, 仅内部参考) 如: 当前处于熊市深处, 底部信号浮现但未完整. 建议缓慢减少空仓, 等待熊底确认后翻多.",
   "risks": ["风险1"],
@@ -157,6 +171,8 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 - 当且仅当推文中有新术语或指标库遗漏时, 才填写 unrecognized_topics
 - tweet_draft 简洁有力, 中文, ≤277 字符
 - 所有判断必须引用推文中的具体内容
+- cycle_position、cycle_confidence、regime_progress、evidence_scores(5个维度)、summary、regime_evidence 为必需字段, 缺一不可
+- regime_progress 必须与 evidence_scores 方向一致: 底部信号越多越强, progress 越接近 1.0
 """
 
 
@@ -167,6 +183,7 @@ class Analyzer:
         self.base_url = cfg.get("base_url", "https://api.deepseek.com").rstrip("/")
         self.temperature = cfg.get("temperature", 0.3)
         self.max_tokens = cfg.get("max_tokens", 8192)
+        self.max_input_chars = int(cfg.get("max_input_chars", 30000) or 30000)
         self.timeout = int(cfg.get("timeout_seconds", 120) or 120)
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
@@ -196,9 +213,22 @@ class Analyzer:
         if knowledge_base:
             kb_section = f"\n## 当前知识库 (自动进化)\n\n{knowledge_base}\n"
 
+        mem_section = memory_context if memory_context else "(无历史数据)"
+
+        # 输入总长控制: 超限时按 知识库 → 新推文 → 记忆 顺序截断
+        budget = self.max_input_chars
+        if len(kb_section) > budget // 3:
+            kb_section = kb_section[:budget // 3] + "\n...(知识库过长, 已截断)\n"
+        remaining = budget - len(kb_section)
+        if len(tweets_text) > remaining // 2:
+            tweets_text = tweets_text[:remaining // 2] + "\n...(推文过长, 已截断)\n"
+        remaining2 = remaining - len(tweets_text)
+        if len(mem_section) > remaining2:
+            mem_section = mem_section[:remaining2] + "\n...(记忆过长, 已截断)\n"
+
         user_msg = f"""## 历史记忆上下文
 
-{memory_context if memory_context else "(无历史数据)"}
+{mem_section}
 
 {kb_section}
 ## 新推文
@@ -210,15 +240,49 @@ class Analyzer:
 
         for attempt in range(1 + retries):
             if attempt > 0:
-                print(f"[Analyzer] Retry {attempt}/{retries} ...")
+                wait = 2 ** attempt * 5  # 指数退避: 10s, 20s
+                print(f"[Analyzer] Retry {attempt}/{retries} (wait {wait}s) ...")
+                time.sleep(wait)
 
-            result = self._call_api(user_msg)
+            result, retryable = self._call_api(user_msg)
             if result is not None:
-                return result
+                if self._validate(result):
+                    return result
+                print("[Analyzer] VALIDATION failed, treating as failure")
+                retryable = True
+            if not retryable:
+                break
 
         return None
 
-    def _call_api(self, user_msg: str) -> dict | None:
+    @staticmethod
+    def _validate(result: dict) -> bool:
+        """校验 AI 输出必需字段, 防止残缺结果静默使用默认值."""
+        required = ["cycle_position", "cycle_confidence", "regime_progress",
+                    "evidence_scores", "summary", "regime_evidence"]
+        for k in required:
+            if k not in result:
+                print(f"[Analyzer] VALIDATION: missing required field '{k}'")
+                return False
+        scores = result.get("evidence_scores", {})
+        if len(scores) < 5:
+            print(f"[Analyzer] VALIDATION: evidence_scores incomplete ({len(scores)}/5)")
+            return False
+        try:
+            p = float(result["regime_progress"])
+            if not (0.0 <= p <= 1.0):
+                print(f"[Analyzer] VALIDATION: regime_progress out of range: {p}")
+                return False
+        except (TypeError, ValueError):
+            print(f"[Analyzer] VALIDATION: regime_progress not a number")
+            return False
+        if result["cycle_confidence"] not in ("high", "medium", "low"):
+            print(f"[Analyzer] VALIDATION: bad cycle_confidence: {result['cycle_confidence']}")
+            return False
+        return True
+
+    def _call_api(self, user_msg: str) -> (dict | None, bool):
+        """调用 DeepSeek API。返回 (解析结果, 是否可重试)."""
         payload = {
             "model": self.model,
             "messages": [
@@ -240,58 +304,67 @@ class Analyzer:
             print(f"[API-CALL][analyzer] POST {self.model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
             if resp.status_code != 200:
-                print(f"[Analyzer] HTTP {resp.status_code}: {resp.text[:200]}")
-                return None
+                retryable = resp.status_code in (429, 500, 502, 503, 504)
+                print(f"[Analyzer] HTTP {resp.status_code}: {resp.text[:200]} "
+                      f"(retryable={retryable})")
+                return None, retryable
             data = resp.json()
         except requests.RequestException as e:
             print(f"[Analyzer] API error: {e}")
-            return None
+            return None, True
 
         if "error" in data:
             print(f"[Analyzer] API returned error: {json.dumps(data['error'], ensure_ascii=False)[:200]}")
-            return None
+            return None, True
 
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         finish_reason = data.get("choices", [{}])[0].get("finish_reason", "unknown")
 
-        if not content:
-            print(f"[Analyzer] Empty response (finish_reason={finish_reason})")
-            return None
-
-        print(f"[Analyzer] Got {len(content)} chars (finish_reason={finish_reason})")
+        usage = data.get("usage", {})
+        print(f"[Analyzer] Got {len(content)} chars (finish_reason={finish_reason}) "
+              f"| tokens: in={usage.get('prompt_tokens', '?')} "
+              f"out={usage.get('completion_tokens', '?')} "
+              f"total={usage.get('total_tokens', '?')}")
         if finish_reason == "length":
             print(f"[Analyzer] WARNING: Response truncated due to max_tokens limit")
 
-        return self._parse_json(content)
+        result = self._parse_json(content)
+        return result, (result is None)
 
     @staticmethod
     def _parse_json(content: str) -> dict | None:
-        m = re.search(r"\{[\s\S]*\}", content)
-        if not m:
-            # 尝试修复截断的 JSON — 补齐右括号
-            repaired = content.strip()
-            opens = repaired.count("{") - repaired.count("}")
-            if opens > 0:
-                repaired += "\n" + "}" * opens
-                try:
-                    return json.loads(repaired)
-                except json.JSONDecodeError:
-                    pass
+        content = content.strip()
+        if not content:
+            print("[Analyzer] Empty response")
+            return None
+        # 1. 直接解析 — 模型可能输出纯 JSON (无围栏/无说明文字)
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        # 2. 从第一个 { 截取到末尾 — 支持 ```json 围栏或前后说明文字
+        start = content.find("{")
+        if start < 0:
             print(f"[Analyzer] No JSON in response ({len(content)} chars): {content[:300]}")
             return None
+        raw = content[start:]
         try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError as e:
-            # 再尝试修复
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        # 3. 修复截断: 去尾随逗号 + 按未闭合的 { [ 类型补全
+        repaired = re.sub(r",\s*([}\]])", r"\1", raw)
+        repaired = re.sub(r",\s*$", "", repaired.rstrip())
+        opens_braces = repaired.count("{") - repaired.count("}")
+        opens_brackets = repaired.count("[") - repaired.count("]")
+        if opens_braces > 0 or opens_brackets > 0:
+            if opens_brackets > 0:
+                repaired += "]" * opens_brackets
+            if opens_braces > 0:
+                repaired += "}" * opens_braces
             try:
-                raw = m.group(0)
-                opens = raw.count("{") - raw.count("}")
-                if opens > 0:
-                    raw += "\n" + "}" * opens
-                # 去掉尾随逗号
-                raw = re.sub(r",\s*([}\]])", r"\1", raw)
-                return json.loads(raw)
+                return json.loads(repaired)
             except json.JSONDecodeError:
                 pass
-            print(f"[Analyzer] JSON parse error: {e} — {m.group(0)[:500]}")
-            return None
+        print(f"[Analyzer] JSON parse error — {raw[:300]}")
+        return None

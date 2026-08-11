@@ -33,9 +33,11 @@ def _read_jsonl_tail(filepath: str, count: int) -> list[dict]:
 class Fetcher:
     def __init__(self, config: dict, data_dir: str):
         self.username = config.get("username", "glassnode")
+        self.usernames = config.get("usernames") or [self.username]
         self.max_tweets = config.get("max_tweets_per_fetch", 20)
         self.timeout = int(config.get("timeout_seconds", 20) or 20)
         self.rss_sources = config.get("rss_sources", [])
+        self.retweet_whitelist = {h.lower() for h in config.get("retweet_whitelist", [])}
         self.data_dir = data_dir
         self.tweets_file = os.path.join(data_dir, "tweets.jsonl")
 
@@ -59,19 +61,32 @@ class Fetcher:
         text = re.sub(r"<[^>]+>", "", text)
         return text.strip()
 
-    @staticmethod
-    def _is_retweet(content: str) -> bool:
-        """判断 nitter/rsshub 描述是否为转推 (纯转推或引用转推)."""
+    def _is_retweet(self, content: str) -> bool:
+        """判断 nitter/rsshub 描述是否为转推 (纯转推或引用转推).
+
+        白名单 (retweet_whitelist) 中的原作者转推保留, 其余剔除.
+        返回 True = 应过滤, False = 保留.
+        """
         if not content:
             return False
         text = content.strip()
-        if re.match(r"^RT\s+@", text):
-            return True
-        if "转发自: @" in text:
-            return True
-        if re.search(r"—\s*https?://nitter\.[^/\s]+/status/\d+", text):
-            return True
-        return False
+        handle = None
+        m = re.match(r"^RT\s+@([A-Za-z0-9_]+)", text)
+        if m:
+            handle = m.group(1)
+        elif "转发自: @" in text:
+            m2 = re.search(r"转发自: @([A-Za-z0-9_]+)", text)
+            if m2:
+                handle = m2.group(1)
+        else:
+            m3 = re.search(r"—\s*https?://nitter\.[^/\s]+/([A-Za-z0-9_]+)/status/\d+", text)
+            if m3:
+                handle = m3.group(1)
+        if handle is None:
+            return False  # 非转推, 保留
+        if handle.lower() in self.retweet_whitelist:
+            return False  # 白名单作者的转推, 保留
+        return True
 
     def fetch(self) -> list[dict]:
         existing_ids = self._load_existing_ids()
@@ -81,47 +96,60 @@ class Fetcher:
         }
 
         all_tweets = []
-        for template in self.rss_sources:
-            url = template.format(user=self.username)
-            print(f"[Fetcher] Trying RSS: {url}")
-            try:
-                resp = requests.get(url, headers=headers, timeout=self.timeout)
-                if resp.status_code != 200:
-                    print(f"[Fetcher]   HTTP {resp.status_code}")
-                    continue
-                root = ET.fromstring(resp.content)
-                items = root.findall(".//item")
-                if not items:
-                    print(f"[Fetcher]   No items")
-                    continue
-                print(f"[Fetcher]   Got {len(items)} items")
-                for it in items:
-                    link = (it.findtext("link") or "").strip()
-                    m = re.search(r"/status/(\d+)", link)
-                    if not m:
+        seen_ids = set()
+        any_source_ok = False
+        for user in self.usernames:
+            for template in self.rss_sources:
+                url = template.format(user=user)
+                print(f"[Fetcher] Trying RSS: {url}")
+                try:
+                    resp = requests.get(url, headers=headers, timeout=self.timeout)
+                    if resp.status_code != 200:
+                        print(f"[Fetcher]   HTTP {resp.status_code}")
                         continue
-                    tid = m.group(1)
-                    title = (it.findtext("title") or "").strip()
-                    desc = (it.findtext("description") or "").strip()
-                    pub = (it.findtext("pubDate") or "").strip()
-                    content = self._strip_html(desc or title)
-                    if self._is_retweet(content):
-                        print(f"[Fetcher]   skip retweet {tid}")
+                    root = ET.fromstring(resp.content)
+                    items = root.findall(".//item")
+                    if not items:
+                        print(f"[Fetcher]   No items")
                         continue
-                    all_tweets.append({
-                        "id": tid,
-                        "date": pub,
-                        "content": content,
-                        "url": f"https://x.com/{self.username}/status/{tid}",
-                        "fetched_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                all_tweets.sort(key=lambda t: t["id"])
-                break
-            except Exception as e:
-                print(f"[Fetcher]   Error: {type(e).__name__}")
-                continue
-        else:
+                    any_source_ok = True
+                    print(f"[Fetcher]   Got {len(items)} items")
+                    got = 0
+                    for it in items:
+                        link = (it.findtext("link") or "").strip()
+                        m = re.search(r"/status/(\d+)", link)
+                        if not m:
+                            continue
+                        tid = m.group(1)
+                        if tid in seen_ids:
+                            continue
+                        title = (it.findtext("title") or "").strip()
+                        desc = (it.findtext("description") or "").strip()
+                        pub = (it.findtext("pubDate") or "").strip()
+                        content = self._strip_html(desc or title)
+                        if self._is_retweet(content):
+                            print(f"[Fetcher]   skip retweet {tid}")
+                            continue
+                        seen_ids.add(tid)
+                        all_tweets.append({
+                            "id": tid,
+                            "date": pub,
+                            "content": content,
+                            "url": f"https://x.com/{user}/status/{tid}",
+                            "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                        got += 1
+                    print(f"[Fetcher]   +{got} unique tweets from this source")
+                except Exception as e:
+                    print(f"[Fetcher]   Error: {type(e).__name__}")
+                    continue
+        if not any_source_ok:
             print("[Fetcher] All RSS sources failed")
+        all_tweets.sort(key=lambda t: t["id"])
+        if len(all_tweets) > self.max_tweets:
+            print(f"[Fetcher] Capping to newest {self.max_tweets} tweets "
+                  f"(fetched {len(all_tweets)})")
+            all_tweets = all_tweets[-self.max_tweets:]
 
         new_tweets = [t for t in all_tweets if t["id"] not in existing_ids]
         if new_tweets:
@@ -156,8 +184,11 @@ class Fetcher:
                     tid = str(tweet.id)
                     if tid in existing_ids:
                         continue
-                    if getattr(tweet, "retweetedTweet", None) is not None:
-                        continue
+                    rt = getattr(tweet, "retweetedTweet", None)
+                    if rt is not None:
+                        orig = getattr(rt, "username", "") or ""
+                        if orig.lower() not in self.retweet_whitelist:
+                            continue
                     existing_ids.add(tid)
                     obj = {
                         "id": tid,
