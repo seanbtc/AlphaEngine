@@ -39,6 +39,7 @@ class StateManager:
             },
             "runtime": {
                 "analysis_count": 0,
+                "post_count": 0,
                 "last_analysis_at": "",
                 "last_deepseek_at": "",
                 "last_distill_at": "",

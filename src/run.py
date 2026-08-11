@@ -23,6 +23,33 @@ from src.datafeed import DataFeed
 from src.notify import DingTalk
 
 
+def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
+    """把编号帖子写入 Promo 桥文件 (JSONL)."""
+    promo_cfg = cfg.get("promo", {})
+    if not promo_cfg.get("enabled", False) or not post_text:
+        return
+    posts_file = promo_cfg.get("posts_file", "")
+    if not posts_file:
+        return
+    if not os.path.isabs(posts_file):
+        posts_file = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         posts_file))
+    try:
+        os.makedirs(os.path.dirname(posts_file), exist_ok=True)
+        with open(posts_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "post_no": post_no,
+                "content": post_text,
+                "cycle": cycle,
+                "alpha": alpha,
+            }, ensure_ascii=False) + "\n")
+        print(f"[Promo] 帖子 No.{post_no} 已写入 {posts_file}")
+    except Exception as e:
+        print(f"[Promo] 写帖子失败: {e}")
+
+
 def init_components(cfg: dict):
     data_dir = resolve_data_dir(cfg)
     os.makedirs(data_dir, exist_ok=True)
@@ -191,15 +218,16 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     current = engine.get_regime()
     rc = collected[-1]
 
-    if final_regime != current:
-        engine.execute_regime_change(final_regime)
-        print(f"[Backfill] REGIME: {current} → {final_regime} ({rc['regime_evidence']})")
-        dingtalk.regime_change(current, final_regime, rc["regime_evidence"], 0.0)
-
-    # 直接设 alpha 到目标 (回溯不走步进), 按最后一批的周期内进度定位
+    # 先按最后一批的周期内进度计算目标 alpha, 再执行变更 (回溯不走步进)
     progress = float(rc.get("progress", 0.5))
-    sm.set("alpha.regime_progress", progress)
     target = engine.calculate_target_alpha(final_regime, progress)
+
+    if final_regime != current:
+        engine.execute_regime_change(final_regime, progress)
+        print(f"[Backfill] REGIME: {current} → {final_regime} ({rc['regime_evidence']})")
+        dingtalk.regime_change(current, final_regime, rc["regime_evidence"], target)
+
+    sm.set("alpha.regime_progress", progress)
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
@@ -208,6 +236,19 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     sm.set("regime.stability_counter", 0)
 
     print(f"[Backfill] Alpha 直接设为 {target:+.4f} (regime={final_regime})")
+
+    # 回溯完成 → 输出编号帖子 (与正式分析一致的格式, 发钉钉 + 写 Promo 桥文件)
+    post_no = int(sm.get("runtime.post_count", 0)) + 1
+    post_text = dingtalk.analysis(
+        rc.get("summary", ""),
+        final_regime,
+        rc.get("conf", "medium"),
+        target,
+        rc.get("signal_board", []),
+        post_no=post_no,
+    )
+    sm.set("runtime.post_count", post_no)
+    _write_promo_post(cfg, post_text, post_no, final_regime, target)
 
     # 写一条综合 memory 条目
     memory.append_alpha({
@@ -288,6 +329,138 @@ def _smart_sample(tweets: list[dict], max_samples: int) -> list[dict]:
     result = key_tweets + sampled_regular
     result.sort(key=lambda t: t.get("id", ""))
     return result
+
+
+def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
+    """首次正式运行: 抓取尽量多的历史推文并分析, 确认当前市场状态与 alpha.
+
+    与 backfill 的区别: 不做分批投票重建初始状态, 而是按正常分析流程走一次 —
+    分批分析 (尽量多分析内容), 用最新批次的结果确认 regime (走过渡图校验),
+    并把 alpha 直接定位到当前目标值.
+    """
+    c = components
+    cfg = c["cfg"]
+    sm = c["state"]
+    fetcher = c["fetcher"]
+    memory = c["memory"]
+    analyzer = c["analyzer"]
+    engine = c["engine"]
+    evidence = c["evidence"]
+    knowledge = c["knowledge"]
+    dingtalk = c["dingtalk"]
+
+    backfill_cfg = cfg.get("backfill", {})
+    batch_size = backfill_cfg.get("batch_size", 10)
+    bulk_limit = backfill_cfg.get("bulk_fetch_limit", 2000)
+    max_samples = min(max_samples, backfill_cfg.get("max_analysis_samples", 200))
+
+    print(f"\n{'='*60}")
+    print("[首次分析] 抓取尽量多的历史推文, 确认当前市场状态与 alpha")
+    print("=" * 60)
+
+    # 1. 获取数据: snscrape 批量 > RSS > 文件
+    total = fetcher.count_tweets()
+    if total < 20:
+        bulk_count = fetcher.fetch_bulk(limit=bulk_limit)
+        total = fetcher.count_tweets()
+        print(f"[首次分析] snscrape 批量抓取: +{bulk_count} 条, 总计 {total} 条")
+    if total < 5:
+        print("[首次分析] RSS 补充抓取...")
+        fetcher.fetch()
+        total = fetcher.count_tweets()
+    if total == 0:
+        print("[首次分析] 无历史推文, 等待每日轮询抓取")
+        return False
+
+    # 2. 智能采样
+    all_tweets = fetcher.load_all_tweets()
+    all_tweets.sort(key=lambda t: t.get("id", ""))
+    samples = _smart_sample(all_tweets, max_samples)
+    print(f"[首次分析] 采样 {len(samples)} 条 (覆盖 {len(all_tweets)} 条全量)")
+
+    # 3. 分批分析 — 每批一次 DeepSeek, 用最后一批结果确认当前状态
+    batches = [samples[i:i+batch_size] for i in range(0, len(samples), batch_size)]
+    kb = knowledge.load_knowledge_base()
+    last_analysis = None
+    for bi, batch in enumerate(batches, 1):
+        print(f"[首次分析] 批次 {bi}/{len(batches)} ({len(batch)} 推文) ...")
+        ctx = memory.get_context_for_ai()
+        a = analyzer.analyze(batch, ctx, kb)
+        if a:
+            last_analysis = a
+            print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
+                  f"progress={a.get('regime_progress','?')}, "
+                  f"conf={a.get('cycle_confidence','?')}")
+            sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            sm.update_runtime()
+    if not last_analysis:
+        print("[首次分析] 分析失败, 等待每日轮询重试")
+        sm.save()
+        return False
+
+    # 4. 证据累积 + regime 变更
+    # 首次确认: 初始状态为默认值 (无历史连续性), 直接执行 AI 判定,
+    # 不走过渡图/证据共识校验 (否则 BEAR → BEAR_BOTTOM 等会被非法转换拦截)
+    cp = last_analysis.get("cycle_position", "BEAR")
+    conf = last_analysis.get("cycle_confidence", "low")
+    scores = last_analysis.get("evidence_scores", {})
+    meta = last_analysis.get("meta", {})
+    rp = last_analysis.get("regime_progress")
+    if rp is not None:
+        sm.set("alpha.regime_progress", float(rp))
+    progress = float(sm.get("alpha.regime_progress", 0.5))
+
+    for cat, score in scores.items():
+        evidence.update(cp, cat, float(score))
+
+    current = engine.get_regime()
+    if cp != current:
+        alpha_before = engine.get_alpha()
+        new_regime = engine.execute_regime_change(cp, progress)
+        print(f"[首次分析] REGIME: {current} → {new_regime}")
+        dingtalk.regime_change(current, new_regime,
+                               last_analysis.get("regime_evidence", ""),
+                               engine.get_alpha(),
+                               engine.calculate_target_alpha(new_regime, progress),
+                               old_alpha=alpha_before)
+    else:
+        print(f"[首次分析] Regime 保持 {cp}")
+
+    # 5. alpha 直接定位到当前目标 (首次不走步进)
+    target = engine.calculate_target_alpha(engine.get_regime(), progress)
+    sm.set("alpha.current", target)
+    sm.set("alpha.target", target)
+    sm.set("alpha.transition_progress", 1.0)
+    sm.set("alpha.last_change_at", datetime.utcnow().isoformat() + "Z")
+    sm.set("regime.cooldown_remaining", 0)
+    print(f"[首次分析] Alpha 定位为 {target:+.4f} "
+          f"(regime={engine.get_regime()}, progress={progress:.2f})")
+
+    # 6. 发编号帖子 (钉钉 + Promo 桥文件)
+    post_no = int(sm.get("runtime.post_count", 0)) + 1
+    post_text = dingtalk.analysis(
+        last_analysis.get("summary", ""), cp, conf, target,
+        last_analysis.get("signal_board", []), post_no=post_no)
+    sm.set("runtime.post_count", post_no)
+    _write_promo_post(cfg, post_text, post_no, cp, target)
+
+    # 7. memory 条目
+    memory.append_alpha({
+        "date": datetime.utcnow().isoformat() + "Z",
+        "alpha": target,
+        "regime": cp,
+        "target_alpha": target,
+    })
+    entry_parts = [f"**[首次分析] {cp} (alpha={target:+.4f})**"]
+    if last_analysis.get("summary"):
+        entry_parts.append(last_analysis["summary"])
+    entry_parts.append(f"Regime证据: {last_analysis.get('regime_evidence', '')}")
+    memory.append_entry("\n".join(entry_parts))
+
+    sm.save()
+    print(f"[首次分析] 完成 — regime={cp}, alpha={target:+.4f}, 帖子 No.{post_no}")
+    print("=" * 60)
+    return True
 
 
 def run_cycle(components: dict) -> bool:
@@ -388,10 +561,14 @@ def run_cycle(components: dict) -> bool:
             ok, reason = engine.request_regime_change(cp, scores, conf,
                                                        meta.get("analysis_quality", 8))
             if ok and cp != current_regime:
+                alpha_before = engine.get_alpha()
                 new_regime = engine.execute_regime_change(cp, progress)
                 print(f"  [REGIME] {current_regime} → {new_regime}")
                 print(f"           原因: {regime_evidence}")
-                dingtalk.regime_change(current_regime, new_regime, regime_evidence, engine.get_alpha())
+                dingtalk.regime_change(current_regime, new_regime, regime_evidence,
+                                       engine.get_alpha(),
+                                       engine.calculate_target_alpha(new_regime, progress),
+                                       old_alpha=alpha_before)
             elif cp != current_regime:
                 print(f"  [REGIME] 请求 {cp} 被拒绝: {reason}")
 
@@ -469,13 +646,18 @@ def run_cycle(components: dict) -> bool:
 
     # 9. 更新 memory (仅当有新分析)
     if has_analysis and analysis:
-        dingtalk.analysis(
+        post_no = int(sm.get("runtime.post_count", 0)) + 1
+        post_text = dingtalk.analysis(
             analysis.get("summary", ""),
             analysis.get("cycle_position", "?"),
             analysis.get("cycle_confidence", "?"),
             new_alpha,
             analysis.get("signal_board", []),
+            post_no=post_no,
         )
+        sm.set("runtime.post_count", post_no)
+        _write_promo_post(cfg, post_text, post_no,
+                          analysis.get("cycle_position", "?"), new_alpha)
 
         entry_parts = [f"**{analysis.get('summary', 'N/A')}**"]
         entry_parts.append(f"Regime: {analysis.get('cycle_position', '?')} → alpha → {new_alpha:+.4f}")
@@ -567,8 +749,11 @@ def main():
     print(f"\nGlassnode Alpha Engine started (interval={interval}s)")
     print("=" * 60)
 
-    # 首次启动回溯历史数据 (--backfill 强制重跑)
-    run_backfill(c, force=backfill_force)
+    # 首次启动: --backfill 才走历史回溯; 否则首次正式运行走全量分析确认状态
+    if backfill_force:
+        run_backfill(c, force=True)
+    elif c["state"].get("runtime.analysis_count", 0) == 0:
+        run_first_analysis(c)
 
     if once:
         run_cycle(c)

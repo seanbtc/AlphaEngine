@@ -43,12 +43,19 @@ class DingTalk:
 
     # ---- 模板 ----
 
-    def regime_change(self, fr: str, to: str, reason: str, alpha: float):
+    def regime_change(self, fr: str, to: str, reason: str, alpha: float, target: float = None,
+                      old_alpha: float = None):
         arrow = "🟩" if alpha > 0 else ("🟥" if alpha < 0 else "⬜")
+        if old_alpha is not None and old_alpha != alpha:
+            alpha_line = f"Alpha: {old_alpha:+.4f} → {alpha:+.4f}"
+        else:
+            alpha_line = f"Alpha: {alpha:+.4f}"
+        if target is not None:
+            alpha_line += f" (目标: {target:+.4f})"
         return self.send(
             f"{arrow} **Regime 变更**\n\n"
             f"{fr} → {to}\n"
-            f"Alpha: {alpha:+.4f}\n"
+            f"{alpha_line}\n"
             f"原因: {reason}"
         )
 
@@ -63,16 +70,31 @@ class DingTalk:
             f"Alpha: {old:+.4f} → {new:+.4f} (target: {tgt:+.2f} {direction})"
         )
 
-    def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list):
-        lines = [f"🧠 **Glassnode 分析**\n"]
-        lines.append(f"周期: {cycle} (置信: {conf}) | Alpha: {alpha:+.4f}")
+    def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list,
+                 post_no: int = None) -> str:
+        """发送分析通知。返回构建的帖子文本 (供 Promo 桥接复用)."""
+        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no)
+        self.send(text)
+        return text
+
+    def analysis_text(self, summary: str, cycle: str, conf: str, alpha: float,
+                      signals: list, post_no: int = None) -> str:
+        """构建分析帖子文本 — 无图标/无 markdown 加粗, 适合直接发布."""
+        header = f"周期: {cycle} (置信: {conf}) | Alpha: {alpha:+.4f}"
+        if post_no is not None:
+            header = f"No.{post_no} | {header}"
+        lines = [header + "\n"]
         if summary:
-            lines.append(f"\n{summary}")
+            lines.append(summary)
         if signals:
-            lines.append("\n**信号板**:")
-            for s in signals[:5]:
-                lines.append(f"- [{s.get('category','?')}] {s.get('name','?')}: {s.get('detail','')}")
-        return self.send("\n".join(lines))
+            lines.append("\n关键信号:")
+            for i, s in enumerate(signals[:5], 1):
+                name = s.get('name', '?')
+                cat = s.get('category', '')
+                detail = s.get('detail', '')
+                prefix = f"{i}. [{cat}] {name}" if cat else f"{i}. {name}"
+                lines.append(f"{prefix}: {detail}")
+        return "\n".join(lines)
 
     def alert(self, title: str, body: str = ""):
         return self.send(f"⚠️ **{title}**\n\n{body}" if body else f"⚠️ **{title}**")

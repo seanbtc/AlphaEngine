@@ -62,6 +62,11 @@ FORWARD_NEXT_REGIME = {
     "RECOVERY":     "BULL",
 }
 
+# 中性确认位: 目标固定为基准 alpha (0), 不做向下一位置的插值.
+# 熊底确认后应清仓等待 (=0), 牛市恢复 (RECOVERY) 确认后才建仓做多;
+# 牛顶确认后应清仓等待 (=0), 熊市确认 (BEAR) 后才建仓做空.
+NEUTRAL_REGIMES = ("INIT", "BEAR_BOTTOM", "BULL_COOLING")
+
 EVIDENCE_CATEGORIES = ["profitability", "institutional", "onchain", "derivatives", "macro"]
 
 
@@ -129,9 +134,13 @@ class AlphaEngine:
         熊市侧 (BULL_COOLING/BEAR/BEAR_DEEP) 不允许做多 (alpha>0),
         牛市侧 (BEAR_BOTTOM/RECOVERY/BULL/DEEP_BULL) 不允许做空 (alpha<0).
         例如深熊 (BEAR_DEEP) 却持有多单 → 直接平到当前目标 (如 -0.3 或按进度的 -0.18).
+        中性确认位 (BEAR_BOTTOM/BULL_COOLING) 除外: 残余仓位不强平,
+        由 step_alpha 逐步向 0 收敛 (确认制清仓过程).
         """
         alpha = self.get_alpha()
         regime = self.get_regime()
+        if regime in NEUTRAL_REGIMES:
+            return False
         if (regime in BEAR_SIDE_REGIMES and alpha > 0) or \
            (regime in BULL_SIDE_REGIMES and alpha < 0):
             progress = self.sm.get("alpha.regime_progress", 0.5)
@@ -186,9 +195,11 @@ class AlphaEngine:
         progress 为周期内进度 (0~1) 时, 在当前位 alpha 与下一位置 alpha 之间线性插值:
         例如 BEAR_DEEP (基准 -0.3, 下一位置 BEAR_BOTTOM=0), progress=0.8 → -0.06,
         即深熊临近熊底时减空至接近中性, 而不是先做到 -0.3 再回头.
+        中性确认位 (BEAR_BOTTOM/BULL_COOLING) 固定基准值, 不随进度插值:
+        熊底/牛顶确认后清仓等待, 下一位置确认后才变仓.
         """
         base = float(self.alpha_map.get(regime, 0.0))
-        if progress is None:
+        if progress is None or regime in NEUTRAL_REGIMES:
             return base
         nxt = FORWARD_NEXT_REGIME.get(regime)
         if nxt is None:

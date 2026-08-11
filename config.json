@@ -112,6 +112,12 @@
     "_note": "钉钉机器人推送。secret 为加签密钥(可选)。"
   },
 
+  "promo": {
+    "_note": "分析帖子输出给 Promo 发帖项目。posts_file 为 JSONL 桥文件 (相对项目根目录)。",
+    "enabled": true,
+    "posts_file": "../Promo/runtime/alphaengine_posts.jsonl"
+  },
+
   "backfill": {
     "_note": "首次启动回溯历史数据。bulk_fetch_limit 控制 snscrape 抓取上限。max_analysis_samples 控制分析采样数。",
     "enabled": true,

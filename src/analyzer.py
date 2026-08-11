@@ -38,11 +38,14 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 |------|-----------|---------|--------------|---------|
 | BEAR | -1.00 | BEAR_DEEP | -0.30 | 熊市深处走完 → 从满空减仓 |
 | BEAR_DEEP | -0.30 | BEAR_BOTTOM | 0.00 | 临近熊底 → 从减空回到中性 |
-| BEAR_BOTTOM | 0.00 | RECOVERY | +0.70 | 底部确认 → 从中性建仓做多 |
+| BEAR_BOTTOM | 0.00 | RECOVERY | +0.70 | 中性确认位, 固定 0, 不插值: 清仓等待, RECOVERY 确认后才建多 |
 | RECOVERY | +0.70 | BULL | +1.00 | 恢复确认充分 → 加仓至满仓 |
 | BULL | +1.00 | DEEP_BULL | +0.30 | 过热迹象 → 从满仓减仓 |
 | DEEP_BULL | +0.30 | BULL_COOLING | 0.00 | 顶部确认 → 从减多回到中性 |
-| BULL_COOLING | 0.00 | BEAR | -1.00 | 转熊确认 → 从中性建仓做空 |
+| BULL_COOLING | 0.00 | BEAR | -1.00 | 中性确认位, 固定 0, 不插值: 清仓等待, BEAR 确认后才做空 |
+
+注意: BEAR_BOTTOM 与 BULL_COOLING 是中性确认位, alpha 目标固定为 0,
+regime_progress 只反映离下一位置的远近, 不影响这两个位置的 alpha 目标。
 
 - 引擎 alpha 每日最多向目标移动 0.02, 目标随你每次输出的 regime_progress 逐日微调
 - 你的 regime_progress 判断直接影响 alpha 目标: 越接近 1.0 表示该位置越接近尾声
@@ -171,6 +174,7 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 - 当且仅当推文中有新术语或指标库遗漏时, 才填写 unrecognized_topics
 - tweet_draft 简洁有力, 中文, ≤277 字符
 - 所有判断必须引用推文中的具体内容
+- summary 和 signal_board 的 detail 必须包含具体数据 (持续时长/金额/百分比/具体价位/日期), 禁止模糊措辞 (如"有所回升""明显增强""资金流出"这种无数字表述, 应写"月度净流出 $5.46B 但降速放缓")
 - cycle_position、cycle_confidence、regime_progress、evidence_scores(5个维度)、summary、regime_evidence 为必需字段, 缺一不可
 - regime_progress 必须与 evidence_scores 方向一致: 底部信号越多越强, progress 越接近 1.0
 """
