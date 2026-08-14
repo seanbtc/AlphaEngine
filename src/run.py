@@ -9,7 +9,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.config_loader import load_config, resolve_data_dir
 from src.memory import Memory
@@ -490,7 +490,11 @@ def run_cycle(components: dict) -> bool:
             elapsed_h = (datetime.utcnow() - last_dt).total_seconds() / 3600
             if elapsed_h < lock_hours:
                 locked = True
-                print(f"[Lock] 距上次 DeepSeek 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取")
+                daily = cfg.get("schedule", {}).get("daily_time", "")
+                lock_msg = f"[Lock] 距上次 DeepSeek 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取"
+                if daily:
+                    lock_msg += f" (下次 {daily} 北京时间)"
+                print(lock_msg)
         except ValueError:
             pass
 
@@ -699,6 +703,29 @@ def run_cycle(components: dict) -> bool:
     return has_analysis
 
 
+def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
+    """计算距下次运行的秒数。
+
+    schedule.daily_time 指定每日运行时间 (北京时间, 如 "12:25");
+    未设置时回退到 poll_interval_seconds 固定间隔.
+    """
+    sched = cfg.get("schedule", {})
+    daily = str(sched.get("daily_time", "") or "").strip()
+    if not daily or ":" not in daily:
+        return float(sched.get("poll_interval_seconds", 86400))
+    try:
+        hh, mm = map(int, daily.split(":"))
+    except ValueError:
+        return float(sched.get("poll_interval_seconds", 86400))
+
+    tz_offset = float(sched.get("utc_offset_hours", 8))  # 默认北京时间 UTC+8
+    now_local = now_utc + timedelta(hours=tz_offset)
+    target_local = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target_local <= now_local:
+        target_local += timedelta(days=1)
+    return (target_local - now_local).total_seconds()
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
         print("Glassnode Alpha Engine")
@@ -746,7 +773,11 @@ def main():
 
     interval = int(cfg.get("schedule", {}).get("poll_interval_seconds", 1800))
 
-    print(f"\nGlassnode Alpha Engine started (interval={interval}s)")
+    daily_time = cfg.get("schedule", {}).get("daily_time", "")
+    if daily_time:
+        print(f"\nGlassnode Alpha Engine started (daily {daily_time} 北京时间)")
+    else:
+        print(f"\nGlassnode Alpha Engine started (interval={interval}s)")
     print("=" * 60)
 
     # 首次启动: --backfill 才走历史回溯; 否则首次正式运行走全量分析确认状态
@@ -759,6 +790,15 @@ def main():
         run_cycle(c)
         print("\nDone.")
         return
+
+    # 定时模式: 已有状态时, 启动后先对齐到下一个定时点再进入循环,
+    # 避免启动即空转触发 [Lock] 跳过
+    if daily_time and c["state"].get("runtime.analysis_count", 0) > 0:
+        wait = _seconds_until_next_run(cfg, datetime.utcnow())
+        next_dt = datetime.utcnow() + timedelta(seconds=wait)
+        print(f"[Main] 启动后等待至 {next_dt.isoformat(timespec='minutes')}Z "
+              f"(北京时间 {daily_time}, 约 {wait/3600:.2f} 小时后)")
+        time.sleep(wait)
 
     while True:
         try:
@@ -773,9 +813,15 @@ def main():
             import traceback
             traceback.print_exc()
 
-        next_check = (datetime.utcnow().isoformat(timespec="minutes") + "Z")
-        print(f"\n[Main] Next check at {next_check} (in {interval//60} min)\n")
-        time.sleep(interval)
+        wait = _seconds_until_next_run(cfg, datetime.utcnow())
+        next_dt = datetime.utcnow() + timedelta(seconds=wait)
+        next_str = next_dt.isoformat(timespec="minutes") + "Z"
+        daily = cfg.get("schedule", {}).get("daily_time", "")
+        if daily:
+            print(f"\n[Main] Next check at {next_str} (北京时间 {daily}, in {wait/60:.0f} min)\n")
+        else:
+            print(f"\n[Main] Next check at {next_str} (in {wait/60:.0f} min)\n")
+        time.sleep(wait)
 
 
 if __name__ == "__main__":

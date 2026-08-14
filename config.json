@@ -98,7 +98,8 @@
   },
 
   "schedule": {
-    "_note": "min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)",
+    "_note": "daily_time: 每日运行时间 (北京时间, 如 12:25)。poll_interval_seconds 为未设 daily_time 时的兜底间隔。min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)",
+    "daily_time": "12:25",
     "poll_interval_seconds": 86400,
     "min_analysis_interval_hours": 24,
     "retry_on_fetch_failure": true,
