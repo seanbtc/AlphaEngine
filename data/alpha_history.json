@@ -1,41 +1,22 @@
 [
   {
-    "date": "2026-08-06T08:21:17.476141Z",
-    "alpha": 0.1,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5
+    "date": "2026-08-11T03:53:48.991350Z",
+    "alpha": 0.0,
+    "regime": "BEAR_BOTTOM",
+    "target_alpha": 0.0
   },
   {
-    "date": "2026-08-06T08:21:18.462531Z",
-    "alpha": 0.2,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5,
+    "date": "2026-08-13T06:04:27.906670Z",
+    "alpha": -0.13,
+    "regime": "BEAR_BOTTOM",
+    "target_alpha": 0.0,
     "btc_price": null
   },
   {
-    "date": "2026-08-06T08:43:16.240271Z",
-    "alpha": 0.3,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5,
-    "btc_price": null
-  },
-  {
-    "date": "2026-08-06T08:55:53.992326Z",
-    "alpha": 0.1,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5
-  },
-  {
-    "date": "2026-08-06T09:00:56.767516Z",
-    "alpha": 0.2,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5
-  },
-  {
-    "date": "2026-08-06T09:00:57.729506Z",
-    "alpha": 0.3,
-    "regime": "BEAR_DEEP",
-    "target_alpha": 0.5,
+    "date": "2026-08-15T04:25:57.283359Z",
+    "alpha": -0.11,
+    "regime": "BEAR_BOTTOM",
+    "target_alpha": 0.0,
     "btc_price": null
   }
 ]

@@ -28,6 +28,7 @@ class StateManager:
                 "current": 0.0,
                 "target": 0.0,
                 "regime_progress": 0.5,
+                "deferred_build": False,
                 "transition_progress": 0.0,
                 "last_change_at": datetime.utcnow().isoformat() + "Z",
                 "locked": False,

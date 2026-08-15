@@ -166,15 +166,20 @@ class AlphaEngine:
         self.sm.set("alpha.locked", False)
         self.sm.set("alpha.lock_reason", "")
         self.sm.set("alpha.regime_progress", progress)
+        self.sm.set("alpha.deferred_build", False)
         target = self.calculate_target_alpha(new_regime, progress)
+        current_alpha = self.get_alpha()
 
-        # 右侧纪律: 跨越零线 (牛↔熊) 时先平仓, 再向新方向建仓;
-        # 同向变更 (如 BEAR→BEAR_DEEP) 直接定位到目标, 避免从 0 爬坡
-        if self._side(new_regime) != self._side(current):
+        # 分两步快速换仓: 仓位符号翻转 (空→多 或 多→空) 或跨零线 (牛↔熊) 时,
+        # 变更当天先平仓归零并置 deferred_build 标记,
+        # 次日 step_alpha 直接从 0 定位到目标 (而非 0.02/天爬坡)
+        if current_alpha * target < 0 or self._side(new_regime) != self._side(current):
             self.sm.set("alpha.current", 0.0)
             self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 0.0)
+            self.sm.set("alpha.deferred_build", True)
         else:
+            # 同向且同符号: 确认即定位
             self.sm.set("alpha.current", target)
             self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 1.0)
@@ -209,11 +214,23 @@ class AlphaEngine:
         return round(base + (nxt_alpha - base) * p, 4)
 
     def step_alpha(self) -> (float, bool):
-        """将 alpha 向目标平滑推进一步。返回 (新alpha, 是否变化)."""
+        """将 alpha 向目标推进。返回 (新alpha, 是否变化).
+
+        deferred_build 标记 (分两步换仓): 直接从 0 定位到目标, 不走 0.02 爬坡.
+        """
         current = self.get_alpha()
         progress = self.sm.get("alpha.regime_progress", 0.5)
         target = self.calculate_target_alpha(self.get_regime(), progress)
         max_step = self.smoothing.get("max_change_per_step", 0.10)
+        now = datetime.utcnow().isoformat() + "Z"
+
+        if self.sm.get("alpha.deferred_build", False):
+            self.sm.set("alpha.deferred_build", False)
+            self.sm.set("alpha.current", target)
+            self.sm.set("alpha.target", target)
+            self.sm.set("alpha.transition_progress", 1.0)
+            self.sm.set("alpha.last_change_at", now)
+            return target, True
 
         if abs(current - target) < 0.005:
             self.sm.set("alpha.target", target)
@@ -224,7 +241,6 @@ class AlphaEngine:
         step = max(-max_step, min(max_step, diff))
         new_alpha = round(current + step, 4)
 
-        now = datetime.utcnow().isoformat() + "Z"
         self.sm.set("alpha.current", new_alpha)
         self.sm.set("alpha.target", target)
         self.sm.set("alpha.last_change_at", now)

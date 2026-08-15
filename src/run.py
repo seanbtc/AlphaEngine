@@ -228,6 +228,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         dingtalk.regime_change(current, final_regime, rc["regime_evidence"], target)
 
     sm.set("alpha.regime_progress", progress)
+    sm.set("alpha.deferred_build", False)
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
@@ -428,6 +429,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
 
     # 5. alpha 直接定位到当前目标 (首次不走步进)
     target = engine.calculate_target_alpha(engine.get_regime(), progress)
+    sm.set("alpha.deferred_build", False)
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
@@ -517,6 +519,7 @@ def run_cycle(components: dict) -> bool:
 
     has_analysis = False
     analysis = None
+    regime_changed_this_cycle = False
 
     if new_tweets:
         # 3. 分析 (只在有新推文时)
@@ -567,6 +570,7 @@ def run_cycle(components: dict) -> bool:
             if ok and cp != current_regime:
                 alpha_before = engine.get_alpha()
                 new_regime = engine.execute_regime_change(cp, progress)
+                regime_changed_this_cycle = True
                 print(f"  [REGIME] {current_regime} → {new_regime}")
                 print(f"           原因: {regime_evidence}")
                 dingtalk.regime_change(current_regime, new_regime, regime_evidence,
@@ -620,6 +624,13 @@ def run_cycle(components: dict) -> bool:
     if clamp_old != engine.get_alpha():
         # 已平仓, 本轮不步进, 下轮再向新方向建仓
         print(f"  Alpha: 本轮已平仓至 {old_alpha:+.4f}, 下轮开始向目标建仓")
+        engine.tick_cooldown()
+        engine.tick_stability()
+    elif regime_changed_this_cycle:
+        # 分两步快速换仓: 变更日只平仓归零, 次日再由 step_alpha 直接定位到目标
+        target_alpha = engine.calculate_target_alpha(engine.get_regime(), progress)
+        print(f"  Alpha: 变更日平仓至 {old_alpha:+.4f} (deferred_build), "
+              f"次日定位到 {target_alpha:+.4f}")
         engine.tick_cooldown()
         engine.tick_stability()
     elif conf == "low":

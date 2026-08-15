@@ -61,6 +61,36 @@ class Fetcher:
         text = re.sub(r"<[^>]+>", "", text)
         return text.strip()
 
+    @staticmethod
+    def _extract_rt_handle(text: str):
+        """从转推内容中提取原作者 handle。返回 handle 或 None (非转推)."""
+        t = text.strip()
+        # 1. 纯转推: RT @user / rsshub 转发自: @user / nitter 英文 Reposted by
+        m = re.match(r"^RT\s+@([A-Za-z0-9_]+)", t)
+        if m:
+            return m.group(1)
+        m = re.search(r"转发自:?\s*@([A-Za-z0-9_]+)", t)
+        if m:
+            return m.group(1)
+        m = re.search(r"^Reposted\s+(by\s+)?@([A-Za-z0-9_]+)", t, re.IGNORECASE)
+        if m:
+            return m.group(2)
+        # 2. 引用转推 (nitter): 内嵌原作者链接, 以 "— https://..." 分隔
+        m = re.search(
+            r"—\s*https?://(?:nitter\.[^/\s]+|x\.com|twitter\.com)/"
+            r"([A-Za-z0-9_]+)/status/\d+", t)
+        if m:
+            return m.group(1)
+        # 3. 引用转推 (其他格式): "作者 (@handle)" 标记与同名 status 链接同时出现
+        m = re.search(r"\(@([A-Za-z0-9_]+)\)", t)
+        if m:
+            h = m.group(1)
+            if re.search(
+                rf"https?://(?:nitter\.[^/\s]+|x\.com|twitter\.com)/{re.escape(h)}/status/\d+",
+                t, re.IGNORECASE):
+                return h
+        return None
+
     def _is_retweet(self, content: str) -> bool:
         """判断 nitter/rsshub 描述是否为转推 (纯转推或引用转推).
 
@@ -69,19 +99,7 @@ class Fetcher:
         """
         if not content:
             return False
-        text = content.strip()
-        handle = None
-        m = re.match(r"^RT\s+@([A-Za-z0-9_]+)", text)
-        if m:
-            handle = m.group(1)
-        elif "转发自: @" in text:
-            m2 = re.search(r"转发自: @([A-Za-z0-9_]+)", text)
-            if m2:
-                handle = m2.group(1)
-        else:
-            m3 = re.search(r"—\s*https?://nitter\.[^/\s]+/([A-Za-z0-9_]+)/status/\d+", text)
-            if m3:
-                handle = m3.group(1)
+        handle = self._extract_rt_handle(content)
         if handle is None:
             return False  # 非转推, 保留
         if handle.lower() in self.retweet_whitelist:
