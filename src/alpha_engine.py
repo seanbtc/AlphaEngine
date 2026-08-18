@@ -62,9 +62,9 @@ FORWARD_NEXT_REGIME = {
     "RECOVERY":     "BULL",
 }
 
-# 中性确认位: 目标固定为基准 alpha (0), 不做向下一位置的插值.
-# 熊底确认后应清仓等待 (=0), 牛市恢复 (RECOVERY) 确认后才建仓做多;
-# 牛顶确认后应清仓等待 (=0), 熊市确认 (BEAR) 后才建仓做空.
+# 中性确认位: 仓位冻结观望, 不做插值/不强制清仓/不随进度收敛.
+# 熊底确认后保持现状等待 (RECOVERY 确认 → 翻多; 信号恶化 → 回深熊加空);
+# 牛顶确认后保持现状等待 (BEAR 确认 → 翻空; 信号增强 → 回 DEEP_BULL).
 NEUTRAL_REGIMES = ("INIT", "BEAR_BOTTOM", "BULL_COOLING")
 
 EVIDENCE_CATEGORIES = ["profitability", "institutional", "onchain", "derivatives", "macro"]
@@ -170,16 +170,22 @@ class AlphaEngine:
         target = self.calculate_target_alpha(new_regime, progress)
         current_alpha = self.get_alpha()
 
-        # 分两步快速换仓: 仓位符号翻转 (空→多 或 多→空) 或跨零线 (牛↔熊) 时,
-        # 变更当天先平仓归零并置 deferred_build 标记,
-        # 次日 step_alpha 直接从 0 定位到目标 (而非 0.02/天爬坡)
-        if current_alpha * target < 0 or self._side(new_regime) != self._side(current):
+        if new_regime in NEUTRAL_REGIMES:
+            # 进入中性确认位: 保留当前仓位, 冻结观望 (target=current),
+            # 不强制平仓/不收敛, 等 AI 确认方向 (RECOVERY→翻多; 信号恶化→回深熊)
+            self.sm.set("alpha.current", current_alpha)
+            self.sm.set("alpha.target", current_alpha)
+            self.sm.set("alpha.transition_progress", 0.0)
+        elif current_alpha * target < 0:
+            # 仓位符号翻转 (空→多 或 多→空): 分两步快速换仓,
+            # 变更当天先平仓归零并置 deferred_build 标记,
+            # 次日 step_alpha 直接从 0 定位到目标 (而非 0.02/天爬坡)
             self.sm.set("alpha.current", 0.0)
             self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 0.0)
             self.sm.set("alpha.deferred_build", True)
         else:
-            # 同向且同符号: 确认即定位
+            # 同侧/跨侧同符号/空仓 (如 BEAR_BOTTOM→BEAR_DEEP 直接加空): 确认即定位
             self.sm.set("alpha.current", target)
             self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 1.0)
@@ -231,6 +237,12 @@ class AlphaEngine:
             self.sm.set("alpha.transition_progress", 1.0)
             self.sm.set("alpha.last_change_at", now)
             return target, True
+
+        if self.get_regime() in NEUTRAL_REGIMES:
+            # 中性确认位冻结: 保持现状观望, 仓位不随 progress 变化,
+            # 等 AI 确认方向后由 execute_regime_change 处理
+            self.sm.set("alpha.target", current)
+            return current, False
 
         if abs(current - target) < 0.005:
             self.sm.set("alpha.target", target)

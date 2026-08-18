@@ -6,45 +6,46 @@
     "started_at": "2026-08-11T03:53:48.196393Z",
     "entered_from": "BEAR",
     "cooldown_remaining": 0,
-    "stability_counter": 7,
+    "stability_counter": 9,
     "last_changed_at": "2026-08-11T03:53:48.196393Z"
   },
   "alpha": {
-    "current": -0.11,
-    "target": 0.0,
+    "current": -0.15,
+    "target": -0.15,
     "regime_progress": 0.6,
-    "transition_progress": 0.15384615384615388,
+    "deferred_build": false,
+    "transition_progress": 0.0,
     "last_change_at": "2026-08-15T04:25:57.283317Z",
     "locked": false,
     "lock_reason": ""
   },
   "evidence": {
     "accumulators": {
-      "BEAR_BOTTOM": 1.5499999999999998
+      "BEAR_BOTTOM": 1.0399999999999996
     },
     "by_category": {
       "profitability": {
-        "BEAR_BOTTOM": 0.6699999999999999
+        "BEAR_BOTTOM": 0.6599999999999999
       },
       "institutional": {
-        "BEAR_BOTTOM": 0.5499999999999999
+        "BEAR_BOTTOM": 0.23999999999999994
       },
       "onchain": {
-        "BEAR_BOTTOM": 0.45
+        "BEAR_BOTTOM": 0.74
       },
       "derivatives": {
-        "BEAR_BOTTOM": -0.1
+        "BEAR_BOTTOM": -0.19
       },
       "macro": {
-        "BEAR_BOTTOM": 0.0
+        "BEAR_BOTTOM": -0.4
       }
     }
   },
   "runtime": {
-    "analysis_count": 12,
-    "post_count": 3,
-    "last_analysis_at": "2026-08-15T04:25:58.037089Z",
-    "last_deepseek_at": "2026-08-15T04:25:57.281550Z",
+    "analysis_count": 14,
+    "post_count": 4,
+    "last_analysis_at": "2026-08-17T04:26:07.008982Z",
+    "last_deepseek_at": "2026-08-17T04:26:06.121288Z",
     "last_distill_at": "",
     "last_calibration_at": "",
     "uptime_started_at": "2026-08-11T03:48:41.228462Z"

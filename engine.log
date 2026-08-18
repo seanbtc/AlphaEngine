@@ -2,16 +2,18 @@ nohup: ignoring input
 
 Glassnode Alpha Engine started (daily 12:25 北京时间)
 ============================================================
-[Main] 启动后等待至 2026-08-15T04:25Z (北京时间 12:25, 约 20.60 小时后)
+[Main] 启动后等待至 2026-08-17T04:25Z (北京时间 12:25, 约 2.02 小时后)
 
-[Status] Regime=BEAR_BOTTOM | Alpha=-0.1300 | Analyses=11
-         Cooldown=0 | Stability=6
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1100 | Analyses=13
+         Cooldown=0 | Stability=8
 
 --- Fetch ---
 [Fetcher] Trying RSS: https://nitter.net/glassnode/rss
-[Fetcher]   Got 15 items
+[Fetcher]   Got 19 items
+[Fetcher]   skip retweet 2089057786928021872
+[Fetcher]   skip retweet 2088659105749795269
 [Fetcher]   skip retweet 2088196902630101050
-[Fetcher]   +14 unique tweets from this source
+[Fetcher]   +16 unique tweets from this source
 [Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
 [Fetcher]   HTTP 403
 [Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
@@ -39,13 +41,7 @@ Glassnode Alpha Engine started (daily 12:25 北京时间)
 [Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
 [Fetcher]   Error: ConnectionError
 [Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
-[Fetcher]   Got 15 items
-[Fetcher]   skip retweet 2088282715179122883
-[Fetcher]   skip retweet 2087531174365151530
-[Fetcher]   skip retweet 2087258673890349121
-[Fetcher]   skip retweet 2085031132215611632
-[Fetcher]   skip retweet 2084722633808187895
-[Fetcher]   +6 unique tweets from this source
+[Fetcher]   HTTP 404
 [Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
 [Fetcher]   HTTP 403
 [Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
@@ -54,21 +50,24 @@ Glassnode Alpha Engine started (daily 12:25 北京时间)
 [Fetcher]   HTTP 404
 [Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
 [Fetcher]   Error: ConnectionError
-[Fetcher] Capping to newest 20 tweets (fetched 33)
-[Fetcher] 5 new tweets (total fetched: 20, known: 27)
+[Fetcher] Capping to newest 20 tweets (fetched 29)
+[Fetcher] 3 new tweets (total fetched: 20, known: 32)
+[Fetcher]   NEW: https://x.com/glassnode/status/2088674219101970840 | Sat, 15 Aug 2026 | $BTC trading volume has contracted across every venue: spot,
+[Fetcher]   NEW: https://x.com/cryptovizart/status/2088958972644487492 | Sun, 16 Aug 2026 | On a monthly basis, the Bitcoin market is still bleeding.   
+[Fetcher]   NEW: https://x.com/glassnode/status/2089202451216044332 | Mon, 17 Aug 2026 | Consumer Confidence recently hit an all-time low as the stoc
 
 --- Analyze ---
-[Analyzer] Input: 2439 chars, 5 tweets
-[API-CALL][analyzer] POST deepseek-v4-flash 2026-08-15T04:25:08.692239Z
-[Analyzer] Got 2185 chars (finish_reason=stop) | tokens: in=4007 out=5843 total=9850
+[Analyzer] Input: 3207 chars, 3 tweets
+[API-CALL][analyzer] POST deepseek-v4-flash 2026-08-17T04:25:07.569719Z
+[Analyzer] Got 2024 chars (finish_reason=stop) | tokens: in=4554 out=7140 total=11694
   regime_progress: 0.60
   cycle_position: BEAR_BOTTOM (confidence: medium)
-  evidence_scores: {"profitability": 0.4, "institutional": 0.0, "onchain": 0.6, "derivatives": -0.1, "macro": 0.0}
+  evidence_scores: {"profitability": 0.0, "institutional": -0.3, "onchain": 0.3, "derivatives": -0.1, "macro": -0.4}
   quality: 8
 
 --- Alpha Engine ---
-  Alpha: -0.1300 → -0.1100 (target=+0.00)
-[Promo] 帖子 No.3 已写入 /home/ubuntu/Promo/runtime/alphaengine_posts.jsonl
+  Alpha: -0.1100 → -0.0900 (target=+0.00)
+[Promo] 帖子 No.4 已写入 /home/ubuntu/Promo/runtime/alphaengine_posts.jsonl
 
-[Main] Next check at 2026-08-16T04:25Z (北京时间 12:25, in 1439 min)
+[Main] Next check at 2026-08-18T04:25Z (北京时间 12:25, in 1439 min)
 

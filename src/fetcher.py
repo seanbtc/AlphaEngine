@@ -177,6 +177,9 @@ class Fetcher:
                     f.write(json.dumps(tweet, ensure_ascii=False) + "\n")
         print(f"[Fetcher] {len(new_tweets)} new tweets "
               f"(total fetched: {len(all_tweets)}, known: {len(existing_ids)})")
+        for t in new_tweets:
+            snippet = (t.get("content", "") or "").replace("\n", " ")[:60]
+            print(f"[Fetcher]   NEW: {t.get('url','?')} | {t.get('date','?')[:16]} | {snippet}")
         return new_tweets
 
     # ---- 批量历史抓取 (snscrape) ----

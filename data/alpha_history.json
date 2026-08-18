@@ -18,5 +18,12 @@
     "regime": "BEAR_BOTTOM",
     "target_alpha": 0.0,
     "btc_price": null
+  },
+  {
+    "date": "2026-08-17T04:26:06.124573Z",
+    "alpha": -0.09,
+    "regime": "BEAR_BOTTOM",
+    "target_alpha": 0.0,
+    "btc_price": null
   }
 ]

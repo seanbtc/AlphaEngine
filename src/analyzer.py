@@ -38,14 +38,16 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 |------|-----------|---------|--------------|---------|
 | BEAR | -1.00 | BEAR_DEEP | -0.30 | 熊市深处走完 → 从满空减仓 |
 | BEAR_DEEP | -0.30 | BEAR_BOTTOM | 0.00 | 临近熊底 → 从减空回到中性 |
-| BEAR_BOTTOM | 0.00 | RECOVERY | +0.70 | 中性确认位, 固定 0, 不插值: 清仓等待, RECOVERY 确认后才建多 |
+| BEAR_BOTTOM | 0.00 | RECOVERY | +0.70 | 中性确认位: 仓位冻结观望, 等待方向确认 (RECOVERY→翻多; 信号恶化→回深熊) |
 | RECOVERY | +0.70 | BULL | +1.00 | 恢复确认充分 → 加仓至满仓 |
 | BULL | +1.00 | DEEP_BULL | +0.30 | 过热迹象 → 从满仓减仓 |
 | DEEP_BULL | +0.30 | BULL_COOLING | 0.00 | 顶部确认 → 从减多回到中性 |
-| BULL_COOLING | 0.00 | BEAR | -1.00 | 中性确认位, 固定 0, 不插值: 清仓等待, BEAR 确认后才做空 |
+| BULL_COOLING | 0.00 | BEAR | -1.00 | 中性确认位: 仓位冻结观望, 等待方向确认 (BEAR→翻空; 信号增强→回 DEEP_BULL) |
 
-注意: BEAR_BOTTOM 与 BULL_COOLING 是中性确认位, alpha 目标固定为 0,
-regime_progress 只反映离下一位置的远近, 不影响这两个位置的 alpha 目标。
+注意: BEAR_BOTTOM 与 BULL_COOLING 是中性确认位, 引擎会**保持当前仓位冻结观望**,
+不强制清仓也不随 progress 收敛; progress 只反映离下一位置的远近,
+仓位变化完全由你的方向确认 (cycle_position) 驱动: 确认 RECOVERY → 翻多建仓,
+确认 BEAR_DEEP/BEAR → 回深熊加空。
 
 - 引擎 alpha 每日最多向目标移动 0.02, 目标随你每次输出的 regime_progress 逐日微调
 - 你的 regime_progress 判断直接影响 alpha 目标: 越接近 1.0 表示该位置越接近尾声

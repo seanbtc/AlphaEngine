@@ -1,2 +1,3 @@
 {"ts": "2026-08-13T06:04:27.905786Z", "quality": 6, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
 {"ts": "2026-08-15T04:25:57.281654Z", "quality": 8, "new_terms": ["GEX (Gamma Exposure)", "gamma cluster"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
+{"ts": "2026-08-17T04:26:06.121385Z", "quality": 8, "new_terms": ["DAT equities"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
