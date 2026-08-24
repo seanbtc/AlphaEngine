@@ -1,9 +1,10 @@
-"""推文抓取 — RSS 多源 + 批量历史 (snscrape) + 去重."""
+"""推文抓取 — RSS 多源 + 批量历史 (snscrape) + 本地网页兜底 + 去重."""
 import json
 import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 
 import requests
 
@@ -38,6 +39,12 @@ class Fetcher:
         self.timeout = int(config.get("timeout_seconds", 20) or 20)
         self.rss_sources = config.get("rss_sources", [])
         self.retweet_whitelist = {h.lower() for h in config.get("retweet_whitelist", [])}
+        self.web_fallback = config.get("web_fallback", True)
+        web_dir = config.get("web_dir", "web")
+        if not os.path.isabs(web_dir):
+            web_dir = os.path.normpath(
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), web_dir))
+        self.web_dir = web_dir
         self.data_dir = data_dir
         self.tweets_file = os.path.join(data_dir, "tweets.jsonl")
 
@@ -180,6 +187,140 @@ class Fetcher:
         for t in new_tweets:
             snippet = (t.get("content", "") or "").replace("\n", " ")[:60]
             print(f"[Fetcher]   NEW: {t.get('url','?')} | {t.get('date','?')[:16]} | {snippet}")
+
+        # 本地网页兜底: RSS 全失败 或 无新推文时, 解析 web/ 目录保存的 X 主页
+        if not any_source_ok or not new_tweets:
+            print("[Fetcher] RSS 无新数据, 尝试本地网页兜底 (web/)")
+            web_new = self.fetch_web()
+            known = {t["id"] for t in new_tweets}
+            for t in web_new:
+                if t["id"] not in known and t["id"] not in existing_ids:
+                    new_tweets.append(t)
+                    known.add(t["id"])
+        return new_tweets
+
+    # ---- 本地网页兜底 (web/ 目录保存的 X 主页) ----
+
+    @staticmethod
+    def _dedup(items: list) -> list:
+        seen = set()
+        out = []
+        for it in items:
+            if it not in seen:
+                seen.add(it)
+                out.append(it)
+        return out
+
+    @staticmethod
+    def _page_owner(html: str, filename: str) -> str:
+        """从保存网页注释或文件名推断主页所属账号 (小写)."""
+        m = re.search(r"saved from url=\([^)]*\)\s*https?://[^\s'\"]*"
+                      r"(?:x\.com|twitter\.com)/([A-Za-z0-9_]+)", html)
+        if m:
+            return m.group(1).lower()
+        m = re.search(r"\(@([A-Za-z0-9_]+)\)", filename)
+        if m:
+            return m.group(1).lower()
+        return ""
+
+    def _parse_articles(self, html: str) -> list[dict]:
+        """解析 X 主页 HTML 中每条 <article>, 返回主推文信息列表."""
+        tweets = []
+        for m in re.finditer(r"<article\b", html):
+            rest = html[m.start():]
+            end = rest.find("</article>")
+            if end < 0:
+                break
+            block = rest[:end]
+
+            parser = _SavedPageParser()
+            try:
+                parser.feed(block)
+            except Exception:
+                continue
+
+            ids = self._dedup(parser.status_ids)
+            if not ids or not parser.tweet_texts:
+                continue
+            tweets.append({
+                "id": ids[0],
+                "content": parser.tweet_texts[0],
+                "date": parser.times[0] if parser.times else "",
+                "author": parser.avatars[0].lower() if parser.avatars else "",
+            })
+        return tweets
+
+    def fetch_web(self) -> list[dict]:
+        """解析 web/ 目录保存的 X 主页 HTML, 提取推文写入 tweets.jsonl.
+
+        离线兜底: 抓不到在线数据时用. 返回新写入的推文列表.
+        """
+        if not self.web_fallback:
+            return []
+        if not os.path.isdir(self.web_dir):
+            print(f"[Fetcher] Web fallback: 目录不存在 {self.web_dir}")
+            return []
+
+        existing_ids = self._load_existing_ids()
+        tracked = {u.lower() for u in self.usernames}
+        all_tweets = []
+        seen = set()
+
+        for fn in sorted(os.listdir(self.web_dir)):
+            if not fn.lower().endswith(".html"):
+                continue
+            path = os.path.join(self.web_dir, fn)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    html = f.read()
+            except Exception as e:
+                print(f"[Fetcher] Web fallback: 读取 {fn} 失败: {e}")
+                continue
+            owner = self._page_owner(html, fn)
+            articles = self._parse_articles(html)
+            print(f"[Fetcher] Web fallback: {fn} owner=@{owner or '?'} articles={len(articles)}")
+            for art in articles:
+                tid = art["id"]
+                if tid in seen:
+                    continue
+                author = art["author"] or owner
+                # 页面主人以外账号的主推文 → 视为转推/引用:
+                # 仅白名单/跟踪账号保留, 其余剔除
+                if owner and author and author != owner:
+                    if author not in tracked and author not in self.retweet_whitelist:
+                        print(f"[Fetcher] Web fallback: skip 第三方转推 @{author} {tid}")
+                        continue
+                content = art["content"]
+                if self._is_retweet(content):
+                    print(f"[Fetcher] Web fallback: skip retweet {tid}")
+                    continue
+                seen.add(tid)
+                all_tweets.append({
+                    "id": tid,
+                    "date": art["date"],
+                    "content": content,
+                    "url": f"https://x.com/{author or owner}/status/{tid}",
+                    "author": author,
+                    "source": f"web/{fn}",
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                })
+
+        if not all_tweets:
+            print("[Fetcher] Web fallback: 无有效推文")
+            return []
+        all_tweets.sort(key=lambda t: t["id"])
+        new_tweets = [t for t in all_tweets if t["id"] not in existing_ids]
+        if new_tweets:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self.tweets_file, "a", encoding="utf-8") as f:
+                for tweet in new_tweets:
+                    f.write(json.dumps(tweet, ensure_ascii=False) + "\n")
+        print(f"[Fetcher] Web fallback: {len(new_tweets)} new tweets "
+              f"(parsed: {len(all_tweets)}, known: {len(existing_ids)})")
+        for t in new_tweets:
+            snippet = (t.get("content", "") or "").replace("\n", " ")[:60]
+            print(f"[Fetcher] Web fallback: NEW: {t.get('url','?')} | "
+                  f"{t.get('date','?')[:16]} | {snippet}")
         return new_tweets
 
     # ---- 批量历史抓取 (snscrape) ----
@@ -305,3 +446,57 @@ class Fetcher:
             return 0
         with open(self.tweets_file, "r", encoding="utf-8") as f:
             return sum(1 for _ in f)
+
+
+class _SavedPageParser(HTMLParser):
+    """解析保存的 X 主页 HTML 中单个 <article> 块的关键信息.
+
+    记录文档顺序出现的: 状态 ID、tweetText 全文 (处理嵌套 div)、时间、作者头像账号.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.status_ids: list[str] = []
+        self.tweet_texts: list[str] = []
+        self.times: list[str] = []
+        self.avatars: list[str] = []
+        self._tweettext_depth = 0
+        self._tweettext_buf: list[str] = []
+        self._in_time = False
+        self._time_val = ""
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        href = d.get("href", "")
+        m = re.search(r"/status/(\d+)", href)
+        if m:
+            self.status_ids.append(m.group(1))
+        testid = d.get("data-testid", "")
+        if testid == "tweetText":
+            self._tweettext_depth = 1
+            self._tweettext_buf = []
+        elif self._tweettext_depth and tag == "div":
+            self._tweettext_depth += 1
+        elif self._tweettext_depth and tag == "br":
+            self._tweettext_buf.append("\n")
+        if tag == "time" and not self._in_time:
+            self._in_time = True
+            self._time_val = d.get("datetime", "")
+        if testid.startswith("UserAvatar-Container-"):
+            self.avatars.append(testid[len("UserAvatar-Container-"):])
+
+    def handle_endtag(self, tag):
+        if self._tweettext_depth and tag == "div":
+            self._tweettext_depth -= 1
+            if self._tweettext_depth == 0:
+                text = "".join(self._tweettext_buf).strip()
+                if text:
+                    self.tweet_texts.append(text)
+        if tag == "time" and self._in_time:
+            self.times.append(self._time_val)
+            self._in_time = False
+            self._time_val = ""
+
+    def handle_data(self, data):
+        if self._tweettext_depth:
+            self._tweettext_buf.append(data)

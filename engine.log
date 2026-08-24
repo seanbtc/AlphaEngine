@@ -2,18 +2,31 @@ nohup: ignoring input
 
 Glassnode Alpha Engine started (daily 12:25 北京时间)
 ============================================================
-[Main] 启动后等待至 2026-08-17T04:25Z (北京时间 12:25, 约 2.02 小时后)
+[Main] 启动后等待至 2026-08-18T04:25Z (北京时间 12:25, 约 18.31 小时后)
 
-[Status] Regime=BEAR_BOTTOM | Alpha=-0.1100 | Analyses=13
-         Cooldown=0 | Stability=8
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=14
+         Cooldown=0 | Stability=9
+[Lock] 距上次 DeepSeek 分析 24.0h < 24h, 本轮跳过抓取 (下次 12:25 北京时间)
+
+--- Fetch ---
+[Fetch] Skipped (analysis lock)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-19T04:25Z (北京时间 12:25, in 1440 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=15
+         Cooldown=0 | Stability=10
 
 --- Fetch ---
 [Fetcher] Trying RSS: https://nitter.net/glassnode/rss
-[Fetcher]   Got 19 items
+[Fetcher]   Got 18 items
+[Fetcher]   skip retweet 2089664677177700620
+[Fetcher]   skip retweet 2089329552174522679
 [Fetcher]   skip retweet 2089057786928021872
 [Fetcher]   skip retweet 2088659105749795269
-[Fetcher]   skip retweet 2088196902630101050
-[Fetcher]   +16 unique tweets from this source
+[Fetcher]   +14 unique tweets from this source
 [Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
 [Fetcher]   HTTP 403
 [Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
@@ -41,7 +54,12 @@ Glassnode Alpha Engine started (daily 12:25 北京时间)
 [Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
 [Fetcher]   Error: ConnectionError
 [Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
-[Fetcher]   HTTP 404
+[Fetcher]   Got 16 items
+[Fetcher]   skip retweet 2089329552174522679
+[Fetcher]   skip retweet 2088282715179122883
+[Fetcher]   skip retweet 2087531174365151530
+[Fetcher]   skip retweet 2087258673890349121
+[Fetcher]   +9 unique tweets from this source
 [Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
 [Fetcher]   HTTP 403
 [Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
@@ -50,24 +68,221 @@ Glassnode Alpha Engine started (daily 12:25 北京时间)
 [Fetcher]   HTTP 404
 [Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
 [Fetcher]   Error: ConnectionError
-[Fetcher] Capping to newest 20 tweets (fetched 29)
-[Fetcher] 3 new tweets (total fetched: 20, known: 32)
-[Fetcher]   NEW: https://x.com/glassnode/status/2088674219101970840 | Sat, 15 Aug 2026 | $BTC trading volume has contracted across every venue: spot,
-[Fetcher]   NEW: https://x.com/cryptovizart/status/2088958972644487492 | Sun, 16 Aug 2026 | On a monthly basis, the Bitcoin market is still bleeding.   
-[Fetcher]   NEW: https://x.com/glassnode/status/2089202451216044332 | Mon, 17 Aug 2026 | Consumer Confidence recently hit an all-time low as the stoc
+[Fetcher] Capping to newest 20 tweets (fetched 36)
+[Fetcher] 10 new tweets (total fetched: 20, known: 35)
+[Fetcher]   NEW: https://x.com/glassnode/status/2089269688958411198 | Mon, 17 Aug 2026 | This is one of the cheapest times to buy volatility in years
+[Fetcher]   NEW: https://x.com/glassnode/status/2089295563942731848 | Mon, 17 Aug 2026 | bitcoin:native, normally the most volatile major asset, is q
+[Fetcher]   NEW: https://x.com/glassnode/status/2089340854724968726 | Mon, 17 Aug 2026 | bitcoin:native  holds near $63.6k as weak spot liquidity, ET
+[Fetcher]   NEW: https://x.com/n3ocortex/status/2089439304326025361 | Mon, 17 Aug 2026 | LTH capitulation running out of steam, loss momentum faded. 
+[Fetcher]   NEW: https://x.com/glassnode/status/2089442876346577346 | Mon, 17 Aug 2026 | bitcoin:native outperformed the stock market today.     This
+[Fetcher]   NEW: https://x.com/glassnode/status/2089442880255607037 | Mon, 17 Aug 2026 | In fact, BTC only outperformed the S&P500 on around one thir
+[Fetcher]   NEW: https://x.com/glassnode/status/2089687657727115513 | Tue, 18 Aug 2026 | $BTC has held Defensive for two weeks, 30/100 on the Glassno
+[Fetcher]   NEW: https://x.com/n3ocortex/status/2089737132948562071 | Tue, 18 Aug 2026 | Prior $BTC cycles bottomed between day 364 and 406 after the
+[Fetcher]   NEW: https://x.com/glassnode/status/2089739670242660761 | Tue, 18 Aug 2026 | Strong hands are buying bitcoin:native.    Bottoms are forme
+[Fetcher]   NEW: https://x.com/glassnode/status/2089821787949236243 | Tue, 18 Aug 2026 | Cryptos slowly starting to hold their own against stocks. Lo
 
 --- Analyze ---
-[Analyzer] Input: 3207 chars, 3 tweets
-[API-CALL][analyzer] POST deepseek-v4-flash 2026-08-17T04:25:07.569719Z
-[Analyzer] Got 2024 chars (finish_reason=stop) | tokens: in=4554 out=7140 total=11694
-  regime_progress: 0.60
+[Analyzer] Input: 5568 chars, 10 tweets
+[API-CALL][analyzer] POST deepseek-v4-flash 2026-08-19T04:25:08.599625Z
+[Analyzer] Got 2268 chars (finish_reason=length) | tokens: in=5567 out=8192 total=13759
+[Analyzer] WARNING: Response truncated due to max_tokens limit
+[Analyzer] JSON parse error — {
+  "date": "2026-08-18",
+  "cycle_position": "BEAR_BOTTOM",
+  "cycle_confidence": "medium",
+  "regime_progress": 0.5,
+  "regime_evidence": "LTH投降动能耗尽、亏损动量消退，信念买家持续吸筹（类似2022年底部），估值16/100处周期折价端，底部特征集齐；但ETF仍流出、flows仅30/100、day 316未到历史周期底部窗口（364-406），RECOVERY未确认。",
+  "summary": "BTC $63.6k：LTH投降动能耗尽、亏损
+[Analyzer] Retry 1/1 (wait 10s) ...
+[API-CALL][analyzer] POST deepseek-v4-flash 2026-08-19T04:26:24.123618Z
+[Analyzer] Got 2519 chars (finish_reason=stop) | tokens: in=5567 out=5449 total=11016
+  regime_progress: 0.70
   cycle_position: BEAR_BOTTOM (confidence: medium)
-  evidence_scores: {"profitability": 0.0, "institutional": -0.3, "onchain": 0.3, "derivatives": -0.1, "macro": -0.4}
+  evidence_scores: {"profitability": 0.4, "institutional": -0.2, "onchain": 0.7, "derivatives": 0.1, "macro": 0.2}
   quality: 8
 
 --- Alpha Engine ---
-  Alpha: -0.1100 → -0.0900 (target=+0.00)
-[Promo] 帖子 No.4 已写入 /home/ubuntu/Promo/runtime/alphaengine_posts.jsonl
+[Promo] 帖子 No.5 已写入 /home/ubuntu/Promo/runtime/alphaengine_posts.jsonl
 
-[Main] Next check at 2026-08-18T04:25Z (北京时间 12:25, in 1439 min)
+[Main] Next check at 2026-08-20T04:25Z (北京时间 12:25, in 1438 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=16
+         Cooldown=0 | Stability=11
+[Lock] 距上次 DeepSeek 分析 24.0h < 24h, 本轮跳过抓取 (下次 12:25 北京时间)
+
+--- Fetch ---
+[Fetch] Skipped (analysis lock)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-21T04:25Z (北京时间 12:25, in 1440 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=17
+         Cooldown=0 | Stability=12
+
+--- Fetch ---
+[Fetcher] Trying RSS: https://nitter.net/glassnode/rss
+[Fetcher]   HTTP 429
+[Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/glassnode
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/glassnode
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/cryptovizart/rss
+[Fetcher]   HTTP 429
+[Fetcher] Trying RSS: https://nitter.poast.org/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/cryptovizart/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/cryptovizart
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
+[Fetcher]   HTTP 429
+[Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/n3ocortex
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
+[Fetcher]   Error: ConnectionError
+[Fetcher] All RSS sources failed
+[Fetcher] 0 new tweets (total fetched: 0, known: 45)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-22T04:25Z (北京时间 12:25, in 1440 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=18
+         Cooldown=0 | Stability=13
+
+--- Fetch ---
+[Fetcher] Trying RSS: https://nitter.net/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/glassnode
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/glassnode
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/cryptovizart/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/cryptovizart
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/n3ocortex
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
+[Fetcher]   Error: ConnectionError
+[Fetcher] All RSS sources failed
+[Fetcher] 0 new tweets (total fetched: 0, known: 45)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-23T04:25Z (北京时间 12:25, in 1440 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=19
+         Cooldown=0 | Stability=14
+
+--- Fetch ---
+[Fetcher] Trying RSS: https://nitter.net/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/glassnode
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/glassnode
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/cryptovizart/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/cryptovizart
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/n3ocortex
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
+[Fetcher]   Error: ConnectionError
+[Fetcher] All RSS sources failed
+[Fetcher] 0 new tweets (total fetched: 0, known: 45)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-24T04:25Z (北京时间 12:25, in 1440 min)
+
+
+[Status] Regime=BEAR_BOTTOM | Alpha=-0.1500 | Analyses=20
+         Cooldown=0 | Stability=15
+
+--- Fetch ---
+[Fetcher] Trying RSS: https://nitter.net/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/glassnode/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/glassnode/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/glassnode
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/glassnode
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/cryptovizart/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/cryptovizart/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/cryptovizart
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/cryptovizart
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://nitter.net/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.poast.org/n3ocortex/rss
+[Fetcher]   HTTP 403
+[Fetcher] Trying RSS: https://nitter.privacydev.net/n3ocortex/rss
+[Fetcher]   Error: ConnectionError
+[Fetcher] Trying RSS: https://rsshub.app/twitter/user/n3ocortex
+[Fetcher]   HTTP 404
+[Fetcher] Trying RSS: https://rss.rsshub.app/twitter/user/n3ocortex
+[Fetcher]   Error: ConnectionError
+[Fetcher] All RSS sources failed
+[Fetcher] 0 new tweets (total fetched: 0, known: 45)
+
+--- Idle (no new tweets) ---
+
+[Main] Next check at 2026-08-25T04:25Z (北京时间 12:25, in 1440 min)
 
