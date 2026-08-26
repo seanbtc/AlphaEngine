@@ -71,16 +71,24 @@ class DingTalk:
         )
 
     def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list,
-                 post_no: int = None) -> str:
+                 post_no: int = None, engine_regime: str = None) -> str:
         """发送分析通知。返回构建的帖子文本 (供 Promo 桥接复用)."""
-        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no)
+        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no, engine_regime)
         self.send(text)
         return text
 
     def analysis_text(self, summary: str, cycle: str, conf: str, alpha: float,
-                      signals: list, post_no: int = None) -> str:
-        """构建分析帖子文本 — 无图标/无 markdown 加粗, 适合直接发布."""
-        header = f"周期: {cycle} (置信: {conf}) | Alpha: {alpha:+.4f}"
+                      signals: list, post_no: int = None, engine_regime: str = None) -> str:
+        """构建分析帖子文本 — 无图标/无 markdown 加粗, 适合直接发布.
+
+        cycle 为 AI 判定的周期位置; engine_regime 为引擎当前确认的周期.
+        两者不一致时并列显示 (AI判定 vs 引擎状态), 避免误导.
+        """
+        if engine_regime and engine_regime != cycle:
+            header = (f"周期判定: {cycle} (置信: {conf}) | 引擎: {engine_regime} | "
+                      f"Alpha: {alpha:+.4f}")
+        else:
+            header = f"周期: {cycle} (置信: {conf}) | Alpha: {alpha:+.4f}"
         if post_no is not None:
             header = f"No.{post_no} | {header}"
         lines = [header + "\n"]

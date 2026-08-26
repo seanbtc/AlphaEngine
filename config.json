@@ -38,6 +38,8 @@
     "evidence": {
       "min_categories_for_regime_change": 3,
       "min_total_score_for_regime_change": 2.0,
+      "high_conf_min_categories": 2,
+      "high_conf_min_total": 1.5,
       "decay_per_cycle": 0.01,
       "stability_window": 5
     },

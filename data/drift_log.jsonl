@@ -1,3 +1,6 @@
 {"ts": "2026-08-13T06:04:27.905786Z", "quality": 6, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
 {"ts": "2026-08-15T04:25:57.281654Z", "quality": 8, "new_terms": ["GEX (Gamma Exposure)", "gamma cluster"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
 {"ts": "2026-08-17T04:26:06.121385Z", "quality": 8, "new_terms": ["DAT equities"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
+{"ts": "2026-08-19T04:27:11.028192Z", "quality": 8, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
+{"ts": "2026-08-25T04:25:40.167100Z", "quality": 8, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "BEAR_BOTTOM"}
+{"ts": "2026-08-26T06:00:28.321789Z", "quality": 7, "new_terms": ["美元贬值叙事(dollar debasement narrative)", "Altcoin资金费率广度(85% above mean)"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}

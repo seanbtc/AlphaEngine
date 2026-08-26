@@ -247,6 +247,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         target,
         rc.get("signal_board", []),
         post_no=post_no,
+        engine_regime=final_regime,
     )
     sm.set("runtime.post_count", post_no)
     _write_promo_post(cfg, post_text, post_no, final_regime, target)
@@ -442,7 +443,8 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     post_no = int(sm.get("runtime.post_count", 0)) + 1
     post_text = dingtalk.analysis(
         last_analysis.get("summary", ""), cp, conf, target,
-        last_analysis.get("signal_board", []), post_no=post_no)
+        last_analysis.get("signal_board", []), post_no=post_no,
+        engine_regime=engine.get_regime())
     sm.set("runtime.post_count", post_no)
     _write_promo_post(cfg, post_text, post_no, cp, target)
 
@@ -669,6 +671,7 @@ def run_cycle(components: dict) -> bool:
             new_alpha,
             analysis.get("signal_board", []),
             post_no=post_no,
+            engine_regime=engine.get_regime(),
         )
         sm.set("runtime.post_count", post_no)
         _write_promo_post(cfg, post_text, post_no,

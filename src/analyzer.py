@@ -179,6 +179,8 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 - summary 和 signal_board 的 detail 必须包含具体数据 (持续时长/金额/百分比/具体价位/日期), 禁止模糊措辞 (如"有所回升""明显增强""资金流出"这种无数字表述, 应写"月度净流出 $5.46B 但降速放缓")
 - cycle_position、cycle_confidence、regime_progress、evidence_scores(5个维度)、summary、regime_evidence 为必需字段, 缺一不可
 - regime_progress 必须与 evidence_scores 方向一致: 底部信号越多越强, progress 越接近 1.0
+- 输出精炼以控制长度: signal_board 最多 5 条且 detail ≤60字; position_narrative ≤100字;
+  risks ≤2条; tweet_draft 可不输出 (省略该字段); 不要输出任何 JSON 以外的文字
 """
 
 
@@ -348,14 +350,16 @@ class Analyzer:
             return json.loads(content)
         except json.JSONDecodeError:
             pass
-        # 2. 从第一个 { 截取到末尾 — 支持 ```json 围栏或前后说明文字
+        # 2. 从第一个 { 开始, 用 raw_decode 解析第一个 JSON 值 —
+        #    容忍 ```json 围栏、前后说明文字、JSON 对象后的尾部文本
         start = content.find("{")
         if start < 0:
             print(f"[Analyzer] No JSON in response ({len(content)} chars): {content[:300]}")
             return None
         raw = content[start:]
         try:
-            return json.loads(raw)
+            obj, _ = json.JSONDecoder().raw_decode(raw)
+            return obj
         except json.JSONDecodeError:
             pass
         # 3. 修复截断: 去尾随逗号 + 按未闭合的 { [ 类型补全

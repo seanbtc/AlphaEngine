@@ -105,15 +105,22 @@ class AlphaEngine:
         if self.evidence_cfg.get("require_quality", False) and meta_quality < 5:
             return False, f"分析质量太低 ({meta_quality})，拒绝 regime 变更"
 
-        if not self._check_evidence_consensus(evidence_scores):
+        if not self._check_evidence_consensus(evidence_scores, confidence):
             return False, "证据共识不足"
 
         return True, ""
 
-    def _check_evidence_consensus(self, evidence_scores: dict) -> bool:
-        """检查是否有足够多的类别达成共识."""
+    def _check_evidence_consensus(self, evidence_scores: dict, confidence: str = "medium") -> bool:
+        """检查是否有足够多的类别达成共识.
+
+        按置信度分级门槛: high 置信放宽 (AI 已高度确认, 避免被总分卡住),
+        medium 用标准门槛, low 走低置信拒绝路径不会到这里.
+        """
         min_cats = self.evidence_cfg.get("min_categories_for_regime_change", 2)
         threshold = self.evidence_cfg.get("min_total_score_for_regime_change", 1.2)
+        if confidence == "high":
+            min_cats = self.evidence_cfg.get("high_conf_min_categories", 2)
+            threshold = self.evidence_cfg.get("high_conf_min_total", 1.5)
 
         total = sum(abs(v) for v in evidence_scores.values())
         significant = sum(1 for v in evidence_scores.values() if abs(v) >= 0.3)
