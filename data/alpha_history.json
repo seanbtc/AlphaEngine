@@ -25,5 +25,13 @@
     "regime": "BEAR_BOTTOM",
     "target_alpha": 0.0,
     "btc_price": null
+  },
+  {
+    "date": "2026-08-27T11:06:41.405719Z",
+    "alpha": 0.0,
+    "regime": "RECOVERY",
+    "target_alpha": 0.91,
+    "btc_price": null,
+    "note": "周期变更日先平仓, 次日开始建仓"
   }
 ]

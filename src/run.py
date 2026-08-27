@@ -633,6 +633,14 @@ def run_cycle(components: dict) -> bool:
         target_alpha = engine.calculate_target_alpha(engine.get_regime(), progress)
         print(f"  Alpha: 变更日平仓至 {old_alpha:+.4f} (deferred_build), "
               f"次日定位到 {target_alpha:+.4f}")
+        memory.append_alpha({
+            "date": datetime.utcnow().isoformat() + "Z",
+            "alpha": old_alpha,
+            "regime": engine.get_regime(),
+            "target_alpha": target_alpha,
+            "btc_price": btc_price,
+            "note": "周期变更日先平仓, 次日开始建仓",
+        })
         engine.tick_cooldown()
         engine.tick_stability()
     elif conf == "low":
