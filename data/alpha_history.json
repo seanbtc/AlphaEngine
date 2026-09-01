@@ -33,5 +33,12 @@
     "target_alpha": 0.91,
     "btc_price": null,
     "note": "周期变更日先平仓, 次日开始建仓"
+  },
+  {
+    "date": "2026-08-29T04:25:32.866019Z",
+    "alpha": 0.88,
+    "regime": "RECOVERY",
+    "target_alpha": 0.88,
+    "btc_price": null
   }
 ]

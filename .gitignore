@@ -5,4 +5,4 @@ __pycache__/
 .venv/
 venv/
 web/*_files/
-web/*_files/*
+web/
