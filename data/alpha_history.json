@@ -40,5 +40,12 @@
     "regime": "RECOVERY",
     "target_alpha": 0.88,
     "btc_price": null
+  },
+  {
+    "date": "2026-09-01T04:25:56.673463Z",
+    "alpha": 0.86,
+    "regime": "RECOVERY",
+    "target_alpha": 0.85,
+    "btc_price": null
   }
 ]

@@ -5,41 +5,41 @@
     "current": "RECOVERY",
     "started_at": "2026-08-27T11:06:41.405719Z",
     "entered_from": "BEAR_BOTTOM",
-    "cooldown_remaining": 5,
-    "stability_counter": 5,
+    "cooldown_remaining": 4,
+    "stability_counter": 6,
     "last_changed_at": "2026-08-27T11:06:41.405719Z"
   },
   "alpha": {
-    "current": 0.88,
-    "target": 0.88,
-    "regime_progress": 0.6,
+    "current": 0.86,
+    "target": 0.85,
+    "regime_progress": 0.5,
     "deferred_build": false,
-    "transition_progress": 1.0,
-    "last_change_at": "2026-08-29T04:25:32.865970Z",
+    "transition_progress": 0.6666666666666666,
+    "last_change_at": "2026-09-01T04:25:56.673414Z",
     "locked": false,
     "lock_reason": ""
   },
   "evidence": {
     "accumulators": {
       "BEAR_BOTTOM": 2.740000000000002,
-      "RECOVERY": 5.570000000000001
+      "RECOVERY": 5.970000000000001
     },
     "by_category": {
       "profitability": {
         "BEAR_BOTTOM": 1.4599999999999997,
-        "RECOVERY": 0.77
+        "RECOVERY": 1.07
       },
       "institutional": {
         "BEAR_BOTTOM": -0.36,
-        "RECOVERY": 1.67
+        "RECOVERY": 2.27
       },
       "onchain": {
         "BEAR_BOTTOM": 1.7399999999999998,
-        "RECOVERY": 1.3699999999999999
+        "RECOVERY": 1.17
       },
       "derivatives": {
         "BEAR_BOTTOM": 0.43,
-        "RECOVERY": 0.6699999999999999
+        "RECOVERY": 0.36999999999999994
       },
       "macro": {
         "BEAR_BOTTOM": -0.5,
@@ -48,10 +48,10 @@
     }
   },
   "runtime": {
-    "analysis_count": 29,
-    "post_count": 9,
-    "last_analysis_at": "2026-08-31T04:25:03.871324Z",
-    "last_deepseek_at": "2026-08-29T04:25:32.863812Z",
+    "analysis_count": 30,
+    "post_count": 10,
+    "last_analysis_at": "2026-09-01T04:25:57.532934Z",
+    "last_deepseek_at": "2026-09-01T04:25:56.671223Z",
     "last_distill_at": "",
     "last_calibration_at": "",
     "uptime_started_at": "2026-08-11T03:48:41.228462Z"
