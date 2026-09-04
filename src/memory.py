@@ -104,14 +104,17 @@ class Memory:
         """读取文件末尾 ~max_chars 字符, 不加载全文."""
         if not os.path.exists(filepath) or max_chars <= 0:
             return ""
-        with open(filepath, "r", encoding="utf-8") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            if size == 0:
-                return ""
-            buf_size = min(size, max_chars * 2 + 4096)
-            f.seek(max(0, size - buf_size))
-            raw = f.read()
-            if len(raw) <= max_chars:
-                return raw.strip()
-            return raw[-max_chars:].strip()
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if size == 0:
+                    return ""
+                buf_size = min(size, max_chars * 2 + 4096)
+                f.seek(max(0, size - buf_size))
+                raw = f.read()
+                if len(raw) <= max_chars:
+                    return raw.strip()
+                return raw[-max_chars:].strip()
+        except (OSError, IOError):
+            return ""
