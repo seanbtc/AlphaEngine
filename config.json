@@ -30,8 +30,9 @@
 
   "alpha": {
     "smoothing": {
-      "_note": "max_change_per_step: 每次仅调整仓位的百分比 (0.02 = 2%, 天极0.02). 每天最多一步.",
-      "max_change_per_step": 0.02,
+      "_note": "基于BTC 4年周期的alpha推进规则: min_daily_step=每日最小推进(无推文时也推进), max_change_per_step=每日最大推进上限. 动态步长=1/当前regime预期天数, 但不低于min_daily_step.",
+      "max_change_per_step": 0.05,
+      "min_daily_step": 0.015,
       "cooldown_cycles_after_regime_change": 10,
       "min_cycles_for_extreme_alpha": 20
     },

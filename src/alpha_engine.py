@@ -3,10 +3,23 @@ Alpha 引擎 — Regime 状态机 + 证据累积 + Alpha 平滑.
 
 AI 判断 → regime 生成 → target_alpha 映射 → 平滑输出
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # ---- Regime 定义 ----
+
+# BTC 4年周期 (~1461天) 各阶段预期持续时间 (天)
+# 基于历史数据: 牛市~1年, 熊市~1年, 底部/顶部确认~3-6个月
+# 总合: 180+90+365+90+90+365+90 = 1270天 (剩余为过渡/变动区间)
+REGIME_EXPECTED_DAYS = {
+    "BEAR_BOTTOM": 180,   # 熊底确认: ~6个月 (积累区)
+    "RECOVERY": 90,       # 恢复确认: ~3个月 (牛市初期)
+    "BULL": 365,          # 牛市确认: ~1年 (主升浪)
+    "DEEP_BULL": 90,      # 深牛/近顶: ~3个月 (牛市后期)
+    "BULL_COOLING": 90,   # 牛顶确认: ~3个月 (派发区)
+    "BEAR": 365,          # 熊市确认: ~1年 (主跌浪)
+    "BEAR_DEEP": 90,      # 深熊: ~3个月 (熊市后期)
+}
 
 REGIME_TRANSITIONS = {
     # regime → [possible_next_regimes]
@@ -229,12 +242,16 @@ class AlphaEngine:
     def step_alpha(self) -> (float, bool):
         """将 alpha 向目标推进。返回 (新alpha, 是否变化).
 
-        deferred_build 标记 (分两步换仓): 直接从 0 定位到目标, 不走 0.02 爬坡.
+        deferred_build 标记 (分两步换仓): 直接从 0 定位到目标, 不走爬坡.
+
+        步进规则基于 BTC 4年周期:
+        - 动态步长 = 1 / 当前regime预期天数 (确保在预期时间内从0走到目标)
+        - 最小步长: min_daily_step (保证即使无推文更新也能推进)
+        - 最大步长: max_change_per_step (防止单日过度调整)
         """
         current = self.get_alpha()
         progress = self.sm.get("alpha.regime_progress", 0.5)
         target = self.calculate_target_alpha(self.get_regime(), progress)
-        max_step = self.smoothing.get("max_change_per_step", 0.10)
         now = datetime.utcnow().isoformat() + "Z"
 
         if self.sm.get("alpha.deferred_build", False):
@@ -256,9 +273,60 @@ class AlphaEngine:
             self.sm.set("alpha.transition_progress", 1.0)
             return current, False
 
+        # 动态步长: 基于当前 regime 在4年周期中的预期持续时间
+        # 公式: 步长 = min(1/预期天数, 最大步长), 但不低于最小步长
+        regime = self.get_regime()
+        expected_days = REGIME_EXPECTED_DAYS.get(regime, 180)
+        min_step = self.smoothing.get("min_daily_step", 0.02)
+        max_step = self.smoothing.get("max_change_per_step", 0.10)
+        dynamic_step = max(min_step, min(1.0 / expected_days, max_step))
+
         diff = target - current
-        step = max(-max_step, min(max_step, diff))
+        step = max(-dynamic_step, min(dynamic_step, diff))
         new_alpha = round(current + step, 4)
+
+        self.sm.set("alpha.current", new_alpha)
+        self.sm.set("alpha.target", target)
+        self.sm.set("alpha.last_change_at", now)
+        self.sm.set("alpha.transition_progress", abs((new_alpha - current) / diff) if diff != 0 else 1.0)
+
+        return new_alpha, True
+
+    def tick_alpha(self) -> (float, bool):
+        """无新推文时的 alpha 时间推进。返回 (新alpha, 是否变化).
+
+        即使没有新推文分析, alpha 也按4年周期节奏向目标推进:
+        - 基于 regime 已持续时间计算进度增量
+        - 进度增量 = 1 / 预期天数 (每天推进一点)
+        - 更新 progress 后重新计算 target 并步进
+        """
+        regime = self.get_regime()
+        if regime in NEUTRAL_REGIMES:
+            return self.get_alpha(), False
+
+        # 更新 regime 内进度 (基于时间)
+        expected_days = REGIME_EXPECTED_DAYS.get(regime, 180)
+        progress_increment = 1.0 / expected_days
+        current_progress = self.sm.get("alpha.regime_progress", 0.5)
+        new_progress = min(1.0, current_progress + progress_increment)
+        self.sm.set("alpha.regime_progress", new_progress)
+
+        # 基于新进度计算 target 并步进
+        current = self.get_alpha()
+        target = self.calculate_target_alpha(regime, new_progress)
+        min_step = self.smoothing.get("min_daily_step", 0.02)
+        max_step = self.smoothing.get("max_change_per_step", 0.10)
+        dynamic_step = max(min_step, min(1.0 / expected_days, max_step))
+
+        if abs(current - target) < 0.005:
+            self.sm.set("alpha.target", target)
+            self.sm.set("alpha.transition_progress", 1.0)
+            return current, False
+
+        diff = target - current
+        step = max(-dynamic_step, min(dynamic_step, diff))
+        new_alpha = round(current + step, 4)
+        now = datetime.utcnow().isoformat() + "Z"
 
         self.sm.set("alpha.current", new_alpha)
         self.sm.set("alpha.target", target)

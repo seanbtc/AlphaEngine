@@ -592,11 +592,29 @@ def run_cycle(components: dict) -> bool:
             sm.save()
             return False
     else:
-        # 无新推文: 只做维护 —— 不调 alpha
+        # 无新推文: 基于4年周期时间推进 alpha (不依赖推文频率)
         print("\n--- Idle (no new tweets) ---")
+        old_alpha = engine.get_alpha()
+        new_alpha, alpha_changed = engine.tick_alpha()
         evidence.decay_all()
         engine.tick_cooldown()
         engine.tick_stability()
+
+        if alpha_changed:
+            progress = float(sm.get("alpha.regime_progress", 0.5))
+            target = engine.calculate_target_alpha(engine.get_regime(), progress)
+            print(f"  Alpha (time-based): {old_alpha:+.4f} → {new_alpha:+.4f} "
+                  f"(target={target:+.2f}, progress={progress:.2f})")
+            memory.append_alpha({
+                "date": datetime.utcnow().isoformat() + "Z",
+                "alpha": new_alpha,
+                "regime": engine.get_regime(),
+                "target_alpha": target,
+                "btc_price": btc_price,
+                "note": "时间推进: 无推文时按4年周期推进alpha",
+            })
+            dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price, target)
+
         sm.update_runtime()
         sm.save()
         return False
