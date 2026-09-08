@@ -1,8 +1,7 @@
-"""推文抓取 — RSS 多源 + 批量历史 (snscrape) + 本地网页兜底 + 去重."""
+"""推文抓取 — X 网页抓取 + 本地网页解析 + 批量历史 (snscrape) + 去重."""
 import json
 import os
 import re
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
@@ -37,7 +36,6 @@ class Fetcher:
         self.usernames = config.get("usernames") or [self.username]
         self.max_tweets = config.get("max_tweets_per_fetch", 20)
         self.timeout = int(config.get("timeout_seconds", 20) or 20)
-        self.rss_sources = config.get("rss_sources", [])
         self.retweet_whitelist = {h.lower() for h in config.get("retweet_whitelist", [])}
         self.web_fallback = config.get("web_fallback", True)
         web_dir = config.get("web_dir", "web")
@@ -47,6 +45,7 @@ class Fetcher:
         self.web_dir = web_dir
         self.data_dir = data_dir
         self.tweets_file = os.path.join(data_dir, "tweets.jsonl")
+        self._x_com_reachable = None
 
     def _load_existing_ids(self) -> set:
         ids = set()
@@ -113,67 +112,92 @@ class Fetcher:
             return False  # 白名单作者的转推, 保留
         return True
 
-    def fetch(self) -> list[dict]:
-        existing_ids = self._load_existing_ids()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        }
+    def _check_x_com(self) -> bool:
+        """检测 x.com 是否可达."""
+        try:
+            resp = requests.get("https://x.com", timeout=8,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            return resp.status_code == 200
+        except Exception:
+            return False
 
+    def _fetch_x_web(self, user: str) -> str:
+        """抓取 X 主页 HTML, 返回页面内容或空字符串."""
+        url = f"https://x.com/{user}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+            if resp.status_code == 200:
+                return resp.text
+            print(f"[Fetcher] x.com/{user} HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"[Fetcher] x.com/{user} Error: {type(e).__name__}: {str(e)[:80]}")
+        return ""
+
+    def fetch(self) -> list[dict]:
+        print("[Fetcher] === 开始抓取推文 ===")
+        existing_ids = self._load_existing_ids()
         all_tweets = []
         seen_ids = set()
-        any_source_ok = False
-        for user in self.usernames:
-            for template in self.rss_sources:
-                url = template.format(user=user)
-                print(f"[Fetcher] Trying RSS: {url}")
-                try:
-                    resp = requests.get(url, headers=headers, timeout=self.timeout)
-                    if resp.status_code != 200:
-                        print(f"[Fetcher]   HTTP {resp.status_code}")
-                        continue
-                    root = ET.fromstring(resp.content)
-                    items = root.findall(".//item")
-                    if not items:
-                        print(f"[Fetcher]   No items")
-                        continue
-                    any_source_ok = True
-                    print(f"[Fetcher]   Got {len(items)} items")
-                    got = 0
-                    for it in items:
-                        link = (it.findtext("link") or "").strip()
-                        m = re.search(r"/status/(\d+)", link)
-                        if not m:
-                            continue
-                        tid = m.group(1)
-                        if tid in seen_ids:
-                            continue
-                        title = (it.findtext("title") or "").strip()
-                        desc = (it.findtext("description") or "").strip()
-                        pub = (it.findtext("pubDate") or "").strip()
-                        content = self._strip_html(desc or title)
-                        if self._is_retweet(content):
-                            print(f"[Fetcher]   skip retweet {tid}")
-                            continue
-                        seen_ids.add(tid)
-                        all_tweets.append({
-                            "id": tid,
-                            "date": pub,
-                            "content": content,
-                            "url": f"https://x.com/{user}/status/{tid}",
-                            "fetched_at": datetime.now(timezone.utc).isoformat(),
-                        })
-                        got += 1
-                    print(f"[Fetcher]   +{got} unique tweets from this source")
-                except Exception as e:
-                    print(f"[Fetcher]   Error: {type(e).__name__}")
+        tracked = {u.lower() for u in self.usernames}
+
+        # 检测 x.com 可达性 (仅首次)
+        if self._x_com_reachable is None:
+            print("[Fetcher] 检测 x.com 可达性...")
+            self._x_com_reachable = self._check_x_com()
+            if self._x_com_reachable:
+                print("[Fetcher]   ✓ x.com 可达, 将直接读取网页内容")
+            else:
+                print("[Fetcher]   ✗ x.com 不可达, 将使用本地 web/ 目录")
+
+        # 尝试从 x.com 抓取
+        if self._x_com_reachable:
+            for user in self.usernames:
+                print(f"[Fetcher] 读取 https://x.com/{user} ...")
+                html = self._fetch_x_web(user)
+                if not html:
+                    print(f"[Fetcher]   ✗ 无法读取 {user} 的主页")
                     continue
-        if not any_source_ok:
-            print("[Fetcher] All RSS sources failed")
+                articles = self._parse_articles(html)
+                print(f"[Fetcher]   ✓ 解析到 {len(articles)} 条推文")
+                owner = user.lower()
+                for art in articles:
+                    tid = art["id"]
+                    if tid in seen_ids:
+                        continue
+                    author = art["author"] or owner
+                    if author != owner and author not in tracked and author not in self.retweet_whitelist:
+                        continue
+                    content = art["content"]
+                    if self._is_retweet(content):
+                        continue
+                    seen_ids.add(tid)
+                    all_tweets.append({
+                        "id": tid,
+                        "date": art["date"],
+                        "content": content,
+                        "url": f"https://x.com/{author}/status/{tid}",
+                        "author": author,
+                        "source": f"x.com/{user}",
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    })
+
+        # 兜底: x.com 无数据时读取本地 web/ 目录
+        if not all_tweets and self.web_fallback:
+            print("[Fetcher] --- 回退到本地网页 (web/) ---")
+            web_new = self.fetch_web()
+            for t in web_new:
+                if t["id"] not in seen_ids and t["id"] not in existing_ids:
+                    all_tweets.append(t)
+                    seen_ids.add(t["id"])
+
         all_tweets.sort(key=lambda t: t["id"])
         if len(all_tweets) > self.max_tweets:
-            print(f"[Fetcher] Capping to newest {self.max_tweets} tweets "
-                  f"(fetched {len(all_tweets)})")
             all_tweets = all_tweets[-self.max_tweets:]
 
         new_tweets = [t for t in all_tweets if t["id"] not in existing_ids]
@@ -182,21 +206,12 @@ class Fetcher:
             with open(self.tweets_file, "a", encoding="utf-8") as f:
                 for tweet in new_tweets:
                     f.write(json.dumps(tweet, ensure_ascii=False) + "\n")
-        print(f"[Fetcher] {len(new_tweets)} new tweets "
-              f"(total fetched: {len(all_tweets)}, known: {len(existing_ids)})")
+
+        print(f"[Fetcher] === 结果: {len(new_tweets)} 条新推文 "
+              f"(本次获取: {len(all_tweets)}, 已有: {len(existing_ids)}) ===")
         for t in new_tweets:
             snippet = (t.get("content", "") or "").replace("\n", " ")[:60]
-            print(f"[Fetcher]   NEW: {t.get('url','?')} | {t.get('date','?')[:16]} | {snippet}")
-
-        # 本地网页兜底: RSS 全失败 或 无新推文时, 解析 web/ 目录保存的 X 主页
-        if not any_source_ok or not new_tweets:
-            print("[Fetcher] RSS 无新数据, 尝试本地网页兜底 (web/)")
-            web_new = self.fetch_web()
-            known = {t["id"] for t in new_tweets}
-            for t in web_new:
-                if t["id"] not in known and t["id"] not in existing_ids:
-                    new_tweets.append(t)
-                    known.add(t["id"])
+            print(f"[Fetcher]   NEW: {t.get('url','?')} | {snippet}")
         return new_tweets
 
     # ---- 本地网页兜底 (web/ 目录保存的 X 主页) ----

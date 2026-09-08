@@ -123,7 +123,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     fetcher = c["fetcher"]
     memory = c["memory"]
 
-    # 1. 获取数据: snscrape > RSS > 文件
+    # 1. 获取数据: snscrape > 网页 > 文件
     print("[Backfill] 阶段1: 获取历史推文 ...")
     total = fetcher.count_tweets()
 
@@ -133,12 +133,12 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print(f"[Backfill] snscrape 批量抓取: +{bulk_count} 条, 总计 {total} 条")
 
     if total < 5:
-        print("[Backfill] RSS 补充抓取...")
+        print("[Backfill] 网页补充抓取...")
         fetcher.fetch()
         total = fetcher.count_tweets()
 
     if total == 0:
-        print("[Backfill] 无历史推文，跳过回溯 (改天 RSS/snscrape 可用时再跑)")
+        print("[Backfill] 无历史推文，跳过回溯 (改天 snscrape/网页 可用时再跑)")
         return False
 
     # 2. 智能采样
@@ -360,14 +360,14 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     print("[首次分析] 抓取尽量多的历史推文, 确认当前市场状态与 alpha")
     print("=" * 60)
 
-    # 1. 获取数据: snscrape 批量 > RSS > 文件
+    # 1. 获取数据: snscrape 批量 > 网页 > 文件
     total = fetcher.count_tweets()
     if total < 20:
         bulk_count = fetcher.fetch_bulk(limit=bulk_limit)
         total = fetcher.count_tweets()
         print(f"[首次分析] snscrape 批量抓取: +{bulk_count} 条, 总计 {total} 条")
     if total < 5:
-        print("[首次分析] RSS 补充抓取...")
+        print("[首次分析] 网页补充抓取...")
         fetcher.fetch()
         total = fetcher.count_tweets()
     if total == 0:
@@ -830,6 +830,16 @@ def main():
         run_cycle(c)
         print("\nDone.")
         return
+
+    # 启动时检测 x.com 可达性
+    fetcher = c["fetcher"]
+    if fetcher._x_com_reachable is None:
+        print("[Main] 检测 x.com 可达性...")
+        fetcher._x_com_reachable = fetcher._check_x_com()
+        if fetcher._x_com_reachable:
+            print("[Main]   ✓ x.com 可达, 将直接读取网页内容")
+        else:
+            print("[Main]   ✗ x.com 不可达, 将使用本地 web/ 目录")
 
     # 定时模式: 已有状态时, 启动后先对齐到下一个定时点再进入循环,
     # 避免启动即空转触发 [Lock] 跳过
