@@ -535,7 +535,7 @@ def run_cycle(components: dict) -> bool:
                 daily = cfg.get("schedule", {}).get("daily_time", "")
                 lock_msg = f"[Lock] 距上次 DeepSeek 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取"
                 if daily:
-                    lock_msg += f" (下次 {daily} 北京时间)"
+                    lock_msg += f" (下次 {_schedule_desc(cfg)})"
                 print(lock_msg)
         except ValueError:
             pass
@@ -792,11 +792,28 @@ def run_cycle(components: dict) -> bool:
     return has_analysis
 
 
-def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
-    """计算距下次运行的秒数。
+_WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
-    schedule.daily_time 指定每日运行时间 (北京时间, 如 "12:25");
-    未设置时回退到 poll_interval_seconds 固定间隔.
+
+def _schedule_desc(cfg: dict) -> str:
+    """格式化调度描述, 如 '周二/周四 12:25 北京时间' 或 '每天 12:25'."""
+    sched = cfg.get("schedule", {})
+    daily = str(sched.get("daily_time", "") or "").strip()
+    weekdays = [int(w) for w in (sched.get("weekdays") or []) if str(w).isdigit()]
+    if not daily:
+        return f"每 {int(sched.get('poll_interval_seconds', 86400))} 秒"
+    if weekdays:
+        names = "/".join(_WEEKDAY_NAMES[w] for w in sorted(weekdays) if 0 <= w <= 6)
+        return f"{names} {daily} 北京时间"
+    return f"每天 {daily} 北京时间"
+
+
+def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
+    """计算距下次运行的秒数.
+
+    schedule.daily_time 指定运行时间 (北京时间, 如 "12:25");
+    schedule.weekdays 限定星期 (0=周一...6=周日), 空/未设置=每天;
+    未设置 daily_time 时回退到 poll_interval_seconds 固定间隔.
     """
     sched = cfg.get("schedule", {})
     daily = str(sched.get("daily_time", "") or "").strip()
@@ -808,11 +825,19 @@ def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
         return float(sched.get("poll_interval_seconds", 86400))
 
     tz_offset = float(sched.get("utc_offset_hours", 8))  # 默认北京时间 UTC+8
+    weekdays = [int(w) for w in (sched.get("weekdays") or []) if str(w).isdigit()]
+
     now_local = now_utc + timedelta(hours=tz_offset)
-    target_local = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    if target_local <= now_local:
-        target_local += timedelta(days=1)
-    return (target_local - now_local).total_seconds()
+    # 从今天起最多看 7 天
+    for d in range(8):
+        candidate = now_local + timedelta(days=d)
+        if weekdays and candidate.weekday() not in weekdays:
+            continue
+        target = candidate.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if target > now_local:
+            return (target - now_local).total_seconds()
+    # 兜底: 找不到匹配星期 → 用固定间隔
+    return float(sched.get("poll_interval_seconds", 86400))
 
 
 def _run_test_ai(c: dict, urls_only: bool = False):
@@ -932,7 +957,7 @@ def main():
 
     daily_time = cfg.get("schedule", {}).get("daily_time", "")
     if daily_time:
-        print(f"\nGlassnode Alpha Engine started (daily {daily_time} 北京时间)")
+        print(f"\nGlassnode Alpha Engine started ({_schedule_desc(cfg)})")
     else:
         print(f"\nGlassnode Alpha Engine started (interval={interval}s)")
     print("=" * 60)
@@ -986,7 +1011,7 @@ def main():
         wait = _seconds_until_next_run(cfg, datetime.utcnow())
         next_dt = datetime.utcnow() + timedelta(seconds=wait)
         print(f"[Main] 启动后等待至 {next_dt.isoformat(timespec='minutes')}Z "
-              f"(北京时间 {daily_time}, 约 {wait/3600:.2f} 小时后)")
+              f"({_schedule_desc(cfg)}, 约 {wait/3600:.2f} 小时后)")
         time.sleep(wait)
 
     while True:
@@ -1007,7 +1032,7 @@ def main():
         next_str = next_dt.isoformat(timespec="minutes") + "Z"
         daily = cfg.get("schedule", {}).get("daily_time", "")
         if daily:
-            print(f"\n[Main] Next check at {next_str} (北京时间 {daily}, in {wait/60:.0f} min)\n")
+            print(f"\n[Main] Next check at {next_str} ({_schedule_desc(cfg)}, in {wait/60:.0f} min)\n")
         else:
             print(f"\n[Main] Next check at {next_str} (in {wait/60:.0f} min)\n")
         time.sleep(wait)
