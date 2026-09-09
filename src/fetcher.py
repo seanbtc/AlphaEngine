@@ -360,7 +360,10 @@ class Fetcher:
             mh = re.search(r"@\w+", text[:250])
             if mh:
                 text = text[mh.end():].strip()
-            text = re.sub(r"^(?:\d+[smhd]\s*)?[\s·.,•|:-]*", "", text).strip()
+                # @handle 之后通常是相对时间 (如 1h/2d), 一并清除 (含残留数字)
+                text = re.sub(r"^[\s·.,•|:-]*\d+[smhd]?[\s·.,•|:-]*", "", text).strip()
+            else:
+                text = re.sub(r"^[\s·.,•|:-]*", "", text).strip()
             text = re.sub(r"^(?:Replying\s+to\s+@[A-Za-z0-9_]+\.?)\s*", "", text,
                           flags=re.IGNORECASE).strip()
 
