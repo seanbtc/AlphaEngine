@@ -780,19 +780,26 @@ def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
     return (target_local - now_local).total_seconds()
 
 
-def _run_test_ai(c: dict):
+def _run_test_ai(c: dict, urls_only: bool = False):
     """测试模式: 读取推文 → 解析 → 发给 AI 分析 → 打印结果.
 
     不存历史记录、不写 tweets.jsonl、不发钉钉/Promo、不改状态.
+    urls_only=True 时只传推文 URL, 不传正文.
     """
     print("\n" + "=" * 60)
-    print("[Test-AI] 测试模式开始 (只读, 不保存任何数据)")
+    mode = "只传 URL" if urls_only else "传正文+URL"
+    print(f"[Test-AI] 测试模式开始 ({mode}, 只读, 不保存任何数据)")
     print("=" * 60)
 
     memory = c["memory"]
     analyzer = c["analyzer"]
     knowledge = c["knowledge"]
     fetcher = c["fetcher"]
+
+    # urls_only 模式: 临时关闭正文传输 (不落盘)
+    if urls_only:
+        analyzer.send_tweet_content = False
+        analyzer.vision_enabled = False
 
     # 1. 读取 x.com 推文 (不落盘)
     tweets = fetcher.preview_live()
@@ -831,12 +838,14 @@ def main():
         print("  python -m src.run --import <file.jsonl>  # 导入历史推文文件")
         print("  python -m src.run --bulk <limit>   # 批量抓取并退出")
         print("  python -m src.run --test-ai        # 测试: 读取推文→发给AI分析, 不存记录/不发帖")
+        print("  python -m src.run --test-ai-urls   # 测试: 只传推文URL, 不传正文")
         sys.exit(0)
 
     once = "--once" in sys.argv
     status_only = "--status" in sys.argv
     backfill_force = "--backfill" in sys.argv
     test_ai = "--test-ai" in sys.argv
+    test_ai_urls = "--test-ai-urls" in sys.argv
     import_file = None
     bulk_only = None
 
@@ -848,6 +857,10 @@ def main():
 
     cfg = load_config()
     c = init_components(cfg)
+
+    if test_ai_urls:
+        _run_test_ai(c, urls_only=True)
+        sys.exit(0)
 
     if test_ai:
         _run_test_ai(c)

@@ -201,6 +201,8 @@ class Analyzer:
         self.link_timeout = int(cfg.get("link_timeout_seconds", 15) or 15)
         self.link_max_chars = int(cfg.get("link_max_chars", 1500) or 1500)
         self._last_image_error = False
+        # 测试: false 时只传推文 URL, 不传正文
+        self.send_tweet_content = bool(cfg.get("send_tweet_content", True))
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
 
@@ -212,18 +214,21 @@ class Analyzer:
         tid = t.get("id", "")
         return f"https://x.com/i/web/status/{tid}" if tid else ""
 
-    @staticmethod
-    def _format_tweets(tweets: list[dict]) -> str:
+    def _format_tweets(self, tweets: list[dict]) -> str:
         if not tweets:
             return "(无新推文)"
         lines = []
         for i, t in enumerate(tweets[-20:], 1):  # 最多 20 条
             date_str = t.get("date", "?")[:16]
-            content = (t.get("content", "") or "").replace("\n", " ")
-            if len(content) > 500:
-                content = content[:500] + "..."
             url = Analyzer._tweet_url(t)
-            lines.append(f"{i}. [{date_str}] {url} [{t.get('id','?')}] {content}")
+            if self.send_tweet_content:
+                content = (t.get("content", "") or "").replace("\n", " ")
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                lines.append(f"{i}. [{date_str}] {url} [{t.get('id','?')}] {content}")
+            else:
+                # 只传 URL, 不传正文
+                lines.append(f"{i}. [{date_str}] {url}")
         return "\n".join(lines)
 
     def _fetch_page_text(self, url: str) -> str:
@@ -291,8 +296,9 @@ class Analyzer:
             print("[Analyzer] Cannot run: API key not configured")
             return None
 
-        # 抓取外链页面, 丰富推文内容
-        new_tweets = self._enrich_with_pages(new_tweets)
+        # 抓取外链页面, 丰富推文内容 (仅当传正文时才有意义)
+        if self.send_tweet_content:
+            new_tweets = self._enrich_with_pages(new_tweets)
         tweets_text = self._format_tweets(new_tweets)
 
         kb_section = ""
