@@ -855,9 +855,16 @@ def main():
             test_html = fetcher._fetch_x_web(fetcher.usernames[0])
             if test_html:
                 articles = fetcher._parse_articles(test_html)
+                if len(articles) == 0 and "<article" in test_html:
+                    lenient = fetcher._parse_articles_lenient(test_html)
+                    print(f"[Main]   标准解析 0 条, 宽松解析 {len(lenient)} 条")
+                    articles = lenient
                 print(f"[Main]   测试抓取结果: 解析到 {len(articles)} 条推文")
-                if len(articles) == 0:
-                    print("[Main]   ⚠ 网页可达但解析到 0 条推文, 可能需 JS 渲染")
+                if len(articles) > 0:
+                    print("[Main]   ✓ 网页解析成功, 后续将直接读取网页内容")
+                else:
+                    fetcher.debug_dump_first_article(test_html)
+                    print("[Main]   ⚠ 网页可达但解析到 0 条推文")
                     print("[Main]   将回退到本地 web/ 目录")
                     fetcher._x_com_reachable = False
             else:

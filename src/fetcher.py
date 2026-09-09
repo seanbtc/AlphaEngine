@@ -187,6 +187,13 @@ class Fetcher:
                     print(f"[Fetcher]   ✗ 无法读取 {user} 的主页")
                     continue
                 articles = self._parse_articles(html)
+                if len(articles) == 0 and "<article" in html:
+                    # 标准解析失败 (可能无 data-testid), 尝试宽松解析
+                    lenient = self._parse_articles_lenient(html)
+                    if lenient:
+                        print(f"[Fetcher]   ✓ 标准解析 0 条, 宽松解析 {len(lenient)} 条 "
+                              f"(无 data-testid, 用宽松解析)")
+                        articles = lenient
                 print(f"[Fetcher]   ✓ 解析到 {len(articles)} 条推文")
                 owner = user.lower()
                 for art in articles:
@@ -288,6 +295,77 @@ class Fetcher:
             })
         return tweets
 
+    @staticmethod
+    def debug_dump_first_article(html: str, max_chars: int = 3000) -> None:
+        """打印第一个 <article> 块的原始 HTML, 用于诊断解析失败原因."""
+        m = re.search(r"<article\b", html)
+        if not m:
+            print("[Fetcher]   [debug] 页面无 <article> 标签")
+            return
+        rest = html[m.start():]
+        end = rest.find("</article>")
+        if end < 0:
+            print("[Fetcher]   [debug] <article> 未闭合")
+            return
+        block = rest[:end]
+        # 压缩空白便于查看
+        block = re.sub(r"\s+", " ", block)
+        print(f"[Fetcher]   [debug] 第一个 <article> 块 ({len(block)} chars):")
+        print(f"[Fetcher]   [debug] {block[:max_chars]}")
+        print(f"[Fetcher]   [debug] --- 块结束 ---")
+
+    def _parse_articles_lenient(self, html: str) -> list[dict]:
+        """宽松解析: 不依赖 data-testid, 从 <article> 内直接提取.
+
+        适用于 X 实时返回的无 JS 版本 HTML (无 data-testid 属性).
+        """
+        tweets = []
+        for m in re.finditer(r"<article\b", html):
+            rest = html[m.start():]
+            end = rest.find("</article>")
+            if end < 0:
+                break
+            block = rest[:end]
+
+            # 提取 status id
+            status_ids = []
+            for sm in re.finditer(r'href="[^"]*/status/(\d+)"', block):
+                status_ids.append(sm.group(1))
+            if not status_ids:
+                continue
+            status_ids = self._dedup(status_ids)
+
+            # 提取时间 datetime 属性
+            times = re.findall(r'<time[^>]*datetime="([^"]*)"', block)
+            time_val = times[0] if times else ""
+
+            # 提取用户 handle (主页 URL /status 前段)
+            handles = re.findall(
+                r'href="/(?:[A-Za-z0-9_]+)/status/(\d+)"', block)
+            # 提取作者: 找 @handle 文本 或 avatar alt
+            avatars = re.findall(r'alt="([A-Za-z0-9_]+)"', block)
+            author = avatars[0] if avatars else ""
+
+            # 提取纯文本: 去掉所有标签和 script/style
+            text = re.sub(r"<script[^>]*>.*?</script>", "", block, flags=re.S)
+            text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S)
+            text = re.sub(r"<br\s*/?>", "\n", text)
+            text = re.sub(r"<[^>]+>", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            # 去掉常见噪音前缀 (时间戳 / 回复数等)
+            text = re.sub(r"^\d+[smhd]?", "", text).strip()
+
+            if not text:
+                continue
+
+            tweets.append({
+                "id": status_ids[0],
+                "content": text,
+                "date": time_val,
+                "author": author.lower(),
+            })
+        return tweets
+
     def fetch_web(self) -> list[dict]:
         """解析 web/ 目录保存的 X 主页 HTML, 提取推文写入 tweets.jsonl.
 
@@ -362,6 +440,7 @@ class Fetcher:
         return new_tweets
 
     # ---- 批量历史抓取 (snscrape) ----
+
 
     def fetch_bulk(self, limit: int = 2000) -> int:
         """使用 snscrape 批量抓取历史推文。返回新写入数量。"""
