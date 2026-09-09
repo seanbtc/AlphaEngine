@@ -424,6 +424,9 @@ class Analyzer:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        # 纯文本请求启用 JSON 模式, 强制直接输出 JSON (减少推理token浪费)
+        if not images:
+            payload["response_format"] = {"type": "json_object"}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -456,7 +459,8 @@ class Analyzer:
             print(f"[Analyzer] API returned error: {json.dumps(data['error'], ensure_ascii=False)[:200]}")
             return None, True
 
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        message = data.get("choices", [{}])[0].get("message", {})
+        content = message.get("content", "")
         finish_reason = data.get("choices", [{}])[0].get("finish_reason", "unknown")
 
         usage = data.get("usage", {})
@@ -466,6 +470,15 @@ class Analyzer:
               f"total={usage.get('total_tokens', '?')}")
         if finish_reason == "length":
             print(f"[Analyzer] WARNING: Response truncated due to max_tokens limit")
+
+        # 推理型模型: content 为空时检查 reasoning_content
+        if not content and message.get("reasoning_content"):
+            reasoning = message.get("reasoning_content", "")
+            print(f"[Analyzer] content 为空, reasoning_content {len(reasoning)} chars")
+            # 尝试从推理文本中提取 JSON
+            result = self._parse_json(reasoning)
+            if result:
+                return result, False
 
         result = self._parse_json(content)
         return result, (result is None)

@@ -6,7 +6,7 @@
     "model": "deepseek-v4-flash",
     "base_url": "https://api.deepseek.com",
     "temperature": 0.3,
-    "max_tokens": 8192,
+    "max_tokens": 16384,
     "timeout_seconds": 120,
     "max_input_chars": 30000,
     "_note_vision": "推文夹带图片时切换视觉模型读取图片; vision_enabled=false 则只用文本。引用外链页面抓取由 max_links_per_tweet 控制",

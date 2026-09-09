@@ -3,6 +3,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from html import unescape
 from html.parser import HTMLParser
 
 import requests
@@ -490,15 +491,17 @@ class Fetcher:
             img_alts = []
             image_urls = []
             for im in re.finditer(r'<img\b[^>]*\balt="([^"]*)"[^>]*>', block):
-                alt = im.group(1).strip()
+                alt = unescape(im.group(1)).strip()
                 if alt and not alt.startswith("@"):
                     img_alts.append(alt)
                 m_src = re.search(r'\bsrc="([^"]+)"', im.group(0))
-                if m_src and self._is_image_url(m_src.group(1)):
-                    image_urls.append(m_src.group(1))
+                if m_src:
+                    src = unescape(m_src.group(1))
+                    if self._is_image_url(src):
+                        image_urls.append(src)
             links = []
             for lm in re.finditer(r'<a\b[^>]*\bhref="([^"]*)"', block):
-                u = lm.group(1).strip()
+                u = unescape(lm.group(1)).strip()
                 if u.startswith("http") and \
                         not re.match(r"^https?://(?:[a-z0-9.-]*\.)?(x|twitter)\.com/", u):
                     links.append(u)
@@ -760,15 +763,15 @@ class _SavedPageParser(HTMLParser):
         m = re.search(r"/status/(\d+)", href)
         if m:
             self.status_ids.append(m.group(1))
-        if tag == "a" and self._is_external(href):
-            self.external_links.append(href)
+        if tag == "a" and self._is_external(unescape(href)):
+            self.external_links.append(unescape(href))
         if tag == "img":
             alt = d.get("alt", "")
             if alt and not alt.startswith("@"):
-                self.img_alts.append(alt)
+                self.img_alts.append(unescape(alt))
             src = d.get("src", "")
-            if self._is_image_url(src):
-                self.image_urls.append(src)
+            if self._is_image_url(unescape(src)):
+                self.image_urls.append(unescape(src))
         testid = d.get("data-testid", "")
         if testid == "tweetText":
             self._tweettext_depth = 1
