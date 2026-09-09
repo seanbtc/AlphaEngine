@@ -973,38 +973,6 @@ def main():
         print("\nDone.")
         return
 
-    # 启动时检测 x.com 可达性 + 测试抓取
-    fetcher = c["fetcher"]
-    if fetcher._x_com_reachable is None:
-        print("[Main] 检测 x.com 可达性...")
-        fetcher._x_com_reachable = fetcher._check_x_com()
-        if fetcher._x_com_reachable:
-            print("[Main]   ✓ x.com 可达, 测试抓取第一个用户...")
-            test_html = fetcher._fetch_x_web(fetcher.usernames[0])
-            if test_html:
-                articles = fetcher._parse_articles(test_html)
-                if len(articles) == 0 and "<article" in test_html:
-                    lenient = fetcher._parse_articles_lenient(
-                        test_html, owner=fetcher.usernames[0])
-                    print(f"[Main]   标准解析 0 条, 宽松解析 {len(lenient)} 条")
-                    articles = lenient
-                print(f"[Main]   测试抓取结果: 解析到 {len(articles)} 条推文")
-                if len(articles) > 0:
-                    print("[Main]   ✓ 网页解析成功, 后续将直接读取网页内容")
-                    for a in articles[:2]:
-                        snippet = (a.get("content", "") or "").replace("\n", " ")[:150]
-                        print(f"[Main]   [预览] {a.get('id')} | {snippet}")
-                else:
-                    fetcher.debug_dump_first_article(test_html)
-                    print("[Main]   ⚠ 网页可达但解析到 0 条推文")
-                    print("[Main]   将回退到本地 web/ 目录")
-                    fetcher._x_com_reachable = False
-            else:
-                print("[Main]   ✗ 测试抓取失败, 将使用本地 web/ 目录")
-                fetcher._x_com_reachable = False
-        else:
-            print("[Main]   ✗ x.com 不可达, 将使用本地 web/ 目录")
-
     # 定时模式: 已有状态时, 启动后先对齐到下一个定时点再进入循环,
     # 避免启动即空转触发 [Lock] 跳过
     if daily_time and c["state"].get("runtime.analysis_count", 0) > 0:

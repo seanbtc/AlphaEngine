@@ -138,25 +138,9 @@ class Fetcher:
         }
         try:
             resp = requests.get(url, headers=headers, timeout=self.timeout)
-            print(f"[Fetcher]   HTTP {resp.status_code}, 长度={len(resp.text)}, "
-                  f"最终URL={resp.url}")
             if resp.status_code != 200:
-                print(f"[Fetcher]   响应头 Content-Type: "
-                      f"{resp.headers.get('content-type', '?')}")
+                print(f"[Fetcher]   HTTP {resp.status_code}")
                 return ""
-
-            has_article = len(re.findall(r'<article', resp.text))
-            has_testid = len(re.findall(r'data-testid=', resp.text))
-            has_status = len(re.findall(r'/status/\d+', resp.text))
-            has_tweet = "tweet" in resp.text.lower()
-            print(f"[Fetcher]   <article>标签: {has_article}, "
-                  f"data-testid: {has_testid}, /status/链接: {has_status}, "
-                  f"含'tweet'文本: {has_tweet}")
-            if len(resp.text) > 100:
-                m = re.search(r'<title>([^<]*)</title>', resp.text)
-                if m:
-                    print(f"[Fetcher]   页面标题: {m.group(1).strip()}")
-
             return resp.text
         except Exception as e:
             print(f"[Fetcher]   Error: {type(e).__name__}: {str(e)[:120]}")
@@ -353,25 +337,6 @@ class Fetcher:
         if not parts:
             return ""
         return " | ".join(parts)
-
-    @staticmethod
-    def debug_dump_first_article(html: str, max_chars: int = 3000) -> None:
-        """打印第一个 <article> 块的原始 HTML, 用于诊断解析失败原因."""
-        m = re.search(r"<article\b", html)
-        if not m:
-            print("[Fetcher]   [debug] 页面无 <article> 标签")
-            return
-        rest = html[m.start():]
-        end = rest.find("</article>")
-        if end < 0:
-            print("[Fetcher]   [debug] <article> 未闭合")
-            return
-        block = rest[:end]
-        # 压缩空白便于查看
-        block = re.sub(r"\s+", " ", block)
-        print(f"[Fetcher]   [debug] 第一个 <article> 块 ({len(block)} chars):")
-        print(f"[Fetcher]   [debug] {block[:max_chars]}")
-        print(f"[Fetcher]   [debug] --- 块结束 ---")
 
     def _parse_articles_lenient(self, html: str, owner: str = "") -> list[dict]:
         """宽松解析: 不依赖 data-testid, 从 <article> 内直接提取.
