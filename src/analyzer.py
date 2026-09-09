@@ -9,6 +9,9 @@ from datetime import datetime
 
 import requests
 
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
 SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你的唯一任务是分析 @glassnode 的推文，输出当前 BTC 市场所处的周期位置（cycle_position）以及每个维度的证据评分。
 
 ## 周期位置定义 (确认制 — 多次确认逐步调整仓位)
@@ -191,7 +194,7 @@ class Analyzer:
         self.model = cfg.get("model", "deepseek-v4-flash")
         self.base_url = cfg.get("base_url", "https://api.deepseek.com").rstrip("/")
         self.temperature = cfg.get("temperature", 0.3)
-        self.max_tokens = cfg.get("max_tokens", 8192)
+        self.max_tokens = cfg.get("max_tokens", 16384)
         self.max_input_chars = int(cfg.get("max_input_chars", 30000) or 30000)
         self.timeout = int(cfg.get("timeout_seconds", 120) or 120)
         # 视觉/链接增强配置
@@ -206,6 +209,7 @@ class Analyzer:
         self.send_tweet_content = bool(cfg.get("send_tweet_content", True))
         # 非 BTC 主题推文过滤 (降噪)
         self.filter_non_btc = bool(cfg.get("filter_non_btc", True))
+        self._image_cache: dict[str, str] = {}  # URL → base64 data URL (重试时避免重复下载)
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
 
@@ -239,8 +243,7 @@ class Analyzer:
         if not re.match(r"^https?://", url):
             return ""
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "User-Agent": _UA,
             "Accept-Language": "en-US,en;q=0.9",
         }
         try:
@@ -264,35 +267,39 @@ class Analyzer:
     def _download_image_data_url(self, url: str) -> str | None:
         """下载图片并转为 base64 data URL (供视觉模型读取).
 
-        返回 data:image/{mime};base64,... 或 None (失败).
+        返回 data:image/{mime};base64,... 或 None (失败). 结果按 URL 缓存.
         """
+        if url in self._image_cache:
+            return self._image_cache[url]
+        data_url = None
         try:
             resp = requests.get(url, timeout=self.link_timeout,
-                                headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code != 200:
-                return None
-            data = resp.content
-            if not data or len(data) > 32 * 1024 * 1024:  # 32 MiB 上限
-                return None
-            # 推断 MIME: 优先响应头, 其次 URL
-            ct = resp.headers.get("content-type", "").lower()
-            mime = ct.split(";")[0].strip()
-            if mime not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-                u = url.lower()
-                if any(x in u for x in (".jpg", ".jpeg", "format=jpg", "format=jpeg")):
-                    mime = "image/jpeg"
-                elif ".png" in u or "format=png" in u:
-                    mime = "image/png"
-                elif ".gif" in u or "format=gif" in u:
-                    mime = "image/gif"
-                elif ".webp" in u or "format=webp" in u:
-                    mime = "image/webp"
-                else:
-                    return None
-            b64 = base64.b64encode(data).decode()
-            return f"data:{mime};base64,{b64}"
+                                headers={"User-Agent": _UA})
+            if resp.status_code == 200:
+                data = resp.content
+                if data and len(data) <= 32 * 1024 * 1024:  # 32 MiB 上限
+                    # 推断 MIME: 优先响应头, 其次 URL
+                    ct = resp.headers.get("content-type", "").lower()
+                    mime = ct.split(";")[0].strip()
+                    if mime not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+                        u = url.lower()
+                        if any(x in u for x in (".jpg", ".jpeg", "format=jpg", "format=jpeg")):
+                            mime = "image/jpeg"
+                        elif ".png" in u or "format=png" in u:
+                            mime = "image/png"
+                        elif ".gif" in u or "format=gif" in u:
+                            mime = "image/gif"
+                        elif ".webp" in u or "format=webp" in u:
+                            mime = "image/webp"
+                        else:
+                            mime = None
+                    if mime:
+                        b64 = base64.b64encode(data).decode()
+                        data_url = f"data:{mime};base64,{b64}"
         except Exception:
-            return None
+            pass
+        self._image_cache[url] = data_url  # 缓存成功与失败结果, 避免重试重复下载
+        return data_url
 
     def _enrich_with_pages(self, tweets: list[dict]) -> list[dict]:
         """为每条含外链的推文抓取目标页面文本, 附加到正文."""
