@@ -305,6 +305,11 @@ class Fetcher:
     # ---- 本地网页兜底 (web/ 目录保存的 X 主页) ----
 
     @staticmethod
+    def _is_image_url(url: str) -> bool:
+        return bool(re.match(r"^https?://", url)) and \
+            bool(re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE))
+
+    @staticmethod
     def _dedup(items: list) -> list:
         seen = set()
         out = []
