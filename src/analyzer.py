@@ -193,8 +193,23 @@ class Analyzer:
         self.max_tokens = cfg.get("max_tokens", 8192)
         self.max_input_chars = int(cfg.get("max_input_chars", 30000) or 30000)
         self.timeout = int(cfg.get("timeout_seconds", 120) or 120)
+        # 视觉/链接增强配置
+        self.vision_enabled = bool(cfg.get("vision_enabled", False))
+        self.vision_model = cfg.get("vision_model", "deepseek-v4-flash-vision-exp")
+        self.max_images_per_request = int(cfg.get("max_images_per_request", 6) or 6)
+        self.max_links_per_tweet = int(cfg.get("max_links_per_tweet", 2) or 2)
+        self.link_timeout = int(cfg.get("link_timeout_seconds", 15) or 15)
+        self.link_max_chars = int(cfg.get("link_max_chars", 1500) or 1500)
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
+
+    @staticmethod
+    def _tweet_url(t: dict) -> str:
+        url = t.get("url", "")
+        if url:
+            return url
+        tid = t.get("id", "")
+        return f"https://x.com/i/web/status/{tid}" if tid else ""
 
     @staticmethod
     def _format_tweets(tweets: list[dict]) -> str:
@@ -206,8 +221,68 @@ class Analyzer:
             content = (t.get("content", "") or "").replace("\n", " ")
             if len(content) > 500:
                 content = content[:500] + "..."
-            lines.append(f"{i}. [{date_str}] [{t.get('id','?')}] {content}")
+            url = Analyzer._tweet_url(t)
+            lines.append(f"{i}. [{date_str}] {url} [{t.get('id','?')}] {content}")
         return "\n".join(lines)
+
+    def _fetch_page_text(self, url: str) -> str:
+        """抓取外链页面并提取纯文本 (尽力而为, 失败返回空)."""
+        if not re.match(r"^https?://", url):
+            return ""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.link_timeout)
+            if resp.status_code != 200:
+                return ""
+            html = resp.text
+            text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", "", html)
+            text = re.sub(r"<br\s*/?>", "\n", text)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"[\r\n\t]+", " ", text)
+            text = re.sub(r"[ ]{2,}", " ", text).strip()
+            if not text:
+                return ""
+            if len(text) > self.link_max_chars:
+                text = text[:self.link_max_chars] + "..."
+            return text
+        except Exception:
+            return ""
+
+    def _enrich_with_pages(self, tweets: list[dict]) -> list[dict]:
+        """为每条含外链的推文抓取目标页面文本, 附加到正文."""
+        out = []
+        for t in tweets:
+            content = t.get("content", "") or ""
+            links = re.findall(r"\[链接\]\s*(https?://\S+)", content)
+            links = [l.rstrip(".,;:") for l in links]
+            fetched = []
+            for u in links[:self.max_links_per_tweet]:
+                page_text = self._fetch_page_text(u)
+                if page_text:
+                    fetched.append(f"[引用页面: {u}]\n{page_text}")
+                    print(f"[Analyzer]   引用页面抓取成功: {u} ({len(page_text)} chars)")
+                else:
+                    print(f"[Analyzer]   引用页面抓取失败: {u}")
+            if fetched:
+                t = dict(t)
+                t["content"] = content + "\n\n" + "\n\n".join(fetched)
+            out.append(t)
+        return out
+
+    def _gather_images(self, tweets: list[dict]) -> list[str]:
+        """收集本次要传给 AI 的图片 URL (去重 + 上限)."""
+        imgs = []
+        seen = set()
+        for t in tweets:
+            for u in t.get("images", []) or []:
+                if u and u not in seen:
+                    seen.add(u)
+                    imgs.append(u)
+        return imgs[:self.max_images_per_request]
 
     def analyze(self, new_tweets: list[dict], memory_context: str,
                 knowledge_base: str = "", retries: int = 1) -> dict | None:
@@ -215,6 +290,8 @@ class Analyzer:
             print("[Analyzer] Cannot run: API key not configured")
             return None
 
+        # 抓取外链页面, 丰富推文内容
+        new_tweets = self._enrich_with_pages(new_tweets)
         tweets_text = self._format_tweets(new_tweets)
 
         kb_section = ""
@@ -244,7 +321,15 @@ class Analyzer:
 {tweets_text}
 """
 
-        print(f"[Analyzer] Input: {len(user_msg)} chars, {len(new_tweets)} tweets")
+        # 多模态: 收集图片
+        images = self._gather_images(new_tweets) if self.vision_enabled else []
+        use_vision = self.vision_enabled and images
+        model = self.vision_model if use_vision else self.model
+        if use_vision:
+            print(f"[Analyzer] 使用视觉模型 {model}, 附带 {len(images)} 张图片")
+
+        print(f"[Analyzer] Input: {len(user_msg)} chars, {len(new_tweets)} tweets"
+              f"{f', {len(images)} images' if images else ''}")
 
         for attempt in range(1 + retries):
             if attempt > 0:
@@ -252,7 +337,7 @@ class Analyzer:
                 print(f"[Analyzer] Retry {attempt}/{retries} (wait {wait}s) ...")
                 time.sleep(wait)
 
-            result, retryable = self._call_api(user_msg)
+            result, retryable = self._call_api(user_msg, model, images)
             if result is not None:
                 if self._validate(result):
                     return result
@@ -289,13 +374,30 @@ class Analyzer:
             return False
         return True
 
-    def _call_api(self, user_msg: str) -> (dict | None, bool):
-        """调用 DeepSeek API。返回 (解析结果, 是否可重试)."""
+    def _call_api(self, user_msg: str, model: str = None,
+                  images: list[str] = None) -> (dict | None, bool):
+        """调用 DeepSeek API。返回 (解析结果, 是否可重试).
+
+        images 非空时使用多模态格式 (图片 + 文本), 需要视觉模型.
+        """
+        model = model or self.model
+
+        # 构造 user content: 纯文本 或 图文混合块
+        if images:
+            user_content = [
+                {"type": "text", "text": user_msg},
+            ]
+            for img in images:
+                user_content.append(
+                    {"type": "image_url", "image_url": {"url": img}})
+        else:
+            user_content = user_msg
+
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
+                {"role": "user", "content": user_content},
             ],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -309,7 +411,7 @@ class Analyzer:
         url = f"{self.base_url}/chat/completions"
 
         try:
-            print(f"[API-CALL][analyzer] POST {self.model} {datetime.utcnow().isoformat()}Z")
+            print(f"[API-CALL][analyzer] POST {model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
             if resp.status_code != 200:
                 retryable = resp.status_code in (429, 500, 502, 503, 504)

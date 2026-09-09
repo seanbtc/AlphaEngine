@@ -298,6 +298,7 @@ class Fetcher:
                 "content": content,
                 "date": parser.times[0] if parser.times else "",
                 "author": parser.avatars[0].lower() if parser.avatars else "",
+                "images": self._dedup(parser.image_urls),
             })
         return tweets
 
@@ -415,10 +416,14 @@ class Fetcher:
 
             # 提取图片 alt + 外链, 附加到正文
             img_alts = []
-            for im in re.finditer(r'<img\b[^>]*\balt="([^"]*)"', block):
+            image_urls = []
+            for im in re.finditer(r'<img\b[^>]*\balt="([^"]*)"[^>]*>', block):
                 alt = im.group(1).strip()
                 if alt and not alt.startswith("@"):
                     img_alts.append(alt)
+                m_src = re.search(r'\bsrc="([^"]+)"', im.group(0))
+                if m_src and self._is_image_url(m_src.group(1)):
+                    image_urls.append(m_src.group(1))
             links = []
             for lm in re.finditer(r'<a\b[^>]*\bhref="([^"]*)"', block):
                 u = lm.group(1).strip()
@@ -437,6 +442,7 @@ class Fetcher:
                 "content": text,
                 "date": time_val,
                 "author": author.lower(),
+                "images": self._dedup(image_urls),
             })
         return tweets
 
@@ -653,6 +659,7 @@ class _SavedPageParser(HTMLParser):
         self.avatars: list[str] = []
         self.img_alts: list[str] = []
         self.external_links: list[str] = []
+        self.image_urls: list[str] = []
         self._tweettext_depth = 0
         self._tweettext_buf: list[str] = []
         self._in_time = False
@@ -662,6 +669,11 @@ class _SavedPageParser(HTMLParser):
     def _is_external(url: str) -> bool:
         return bool(re.match(r"^https?://", url)) and \
             not re.match(r"^https?://(?:[a-z0-9.-]*\.)?(x|twitter)\.com/", url)
+
+    @staticmethod
+    def _is_image_url(url: str) -> bool:
+        return bool(re.match(r"^https?://", url)) and \
+            bool(re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE))
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
@@ -675,6 +687,9 @@ class _SavedPageParser(HTMLParser):
             alt = d.get("alt", "")
             if alt and not alt.startswith("@"):
                 self.img_alts.append(alt)
+            src = d.get("src", "")
+            if self._is_image_url(src):
+                self.image_urls.append(src)
         testid = d.get("data-testid", "")
         if testid == "tweetText":
             self._tweettext_depth = 1
