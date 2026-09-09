@@ -109,6 +109,27 @@ class ReviewEngine:
         last = prices[-1]["btc_price"]
         return round((last - first) / first * 100, 2)
 
+    def price_trend(self, days_7: int = 7, days_30: int = 30) -> dict:
+        """返回近 N 天价格趋势: {price, change_7d, change_30d}.
+
+        基于 price_history.jsonl. 无足够数据时返回空变化.
+        """
+        prices = self._load_recent_prices(days=days_30)
+        result = {"price": None, "change_7d": None, "change_30d": None}
+        if not prices:
+            return result
+        result["price"] = prices[-1]["btc_price"]
+        # 近 7 天
+        cutoff7 = datetime.utcnow() - timedelta(days=days_7)
+        p7 = [p for p in prices
+              if datetime.fromisoformat(p["ts"].replace("Z", "+00:00")).replace(tzinfo=None) >= cutoff7]
+        if len(p7) >= 2:
+            result["change_7d"] = round((p7[-1]["btc_price"] - p7[0]["btc_price"]) / p7[0]["btc_price"] * 100, 2)
+        # 近 30 天
+        if len(prices) >= 2:
+            result["change_30d"] = round((prices[-1]["btc_price"] - prices[0]["btc_price"]) / prices[0]["btc_price"] * 100, 2)
+        return result
+
     def _analyze_regime_accuracy(self, prices: list[dict]) -> dict:
         """评估 regime 判断准确性.
 

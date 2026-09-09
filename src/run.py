@@ -91,6 +91,40 @@ def print_status(components: dict):
           f"Stability={sm.get('regime.stability_counter',0)}")
 
 
+def build_market_state(components: dict, price: float = None) -> dict:
+    """组装当前引擎状态, 作为 AI 判断的连续性锚点."""
+    sm = components["state"]
+    engine = components["engine"]
+    state = {
+        "regime": engine.get_regime(),
+        "alpha": engine.get_alpha(),
+        "entered_from": sm.get("regime.entered_from", "") or "",
+        "progress": sm.get("alpha.regime_progress", 0.5),
+        "last_change_at": sm.get("regime.last_changed_at", "") or "",
+    }
+    # regime 已持续天数
+    started_at = sm.get("regime.started_at", "")
+    if started_at:
+        try:
+            start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            state["regime_days"] = max(0, int((datetime.utcnow() - start_dt.replace(tzinfo=None)).total_seconds() // 86400))
+        except ValueError:
+            state["regime_days"] = None
+    if price is not None:
+        state["price"] = price
+    # 价格趋势 (从 price_history 计算 7d/30d 涨跌)
+    review = components.get("review")
+    if review is not None:
+        trend = review.price_trend()
+        if trend.get("price") is not None and state.get("price") is None:
+            state["price"] = trend["price"]
+        if trend.get("change_7d") is not None:
+            state["price_change_7d"] = trend["change_7d"]
+        if trend.get("change_30d") is not None:
+            state["price_change_30d"] = trend["change_30d"]
+    return state
+
+
 def run_backfill(components: dict, force: bool = False) -> bool:
     """回溯历史推文，构建初始状态。返回是否执行了回填.
 
@@ -168,7 +202,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print(f"\n[Backfill] 批次 {bi+1}/{len(batches)} ({len(batch)} 推文) ...")
 
         ctx = memory.get_context_for_ai()
-        analysis = analyzer.analyze(batch, ctx, kb)
+        analysis = analyzer.analyze(batch, ctx, kb, market_state=build_market_state(c))
 
         if not analysis:
             print("[Backfill]   分析失败，跳过本批")
@@ -390,7 +424,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     for bi, batch in enumerate(batches, 1):
         print(f"[首次分析] 批次 {bi}/{len(batches)} ({len(batch)} 推文) ...")
         ctx = memory.get_context_for_ai()
-        a = analyzer.analyze(batch, ctx, kb)
+        a = analyzer.analyze(batch, ctx, kb, market_state=build_market_state(c))
         if a:
             last_analysis = a
             print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
@@ -533,7 +567,8 @@ def run_cycle(components: dict) -> bool:
         print("\n--- Analyze ---")
         kb = knowledge.load_knowledge_base()
         ctx = memory.get_context_for_ai()
-        analysis = analyzer.analyze(new_tweets, ctx, kb)
+        analysis = analyzer.analyze(new_tweets, ctx, kb,
+                                    market_state=build_market_state(c, btc_price))
 
         if analysis:
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
@@ -814,7 +849,15 @@ def _run_test_ai(c: dict, urls_only: bool = False):
 
     # 3. 发给 AI 分析
     print("\n--- Test-AI: 调用 AI 分析 ---")
-    analysis = analyzer.analyze(tweets, ctx, kb)
+    price = None
+    try:
+        price = c["datafeed"].get_price()
+        if price:
+            print(f"[Test-AI] 当前 BTC 价格: ${price:,.2f}")
+    except Exception:
+        pass
+    analysis = analyzer.analyze(tweets, ctx, kb,
+                                market_state=build_market_state(c, price))
     if not analysis:
         print("[Test-AI] AI 分析失败")
         return

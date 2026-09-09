@@ -204,6 +204,8 @@ class Analyzer:
         self._last_image_error = False
         # 测试: false 时只传推文 URL, 不传正文
         self.send_tweet_content = bool(cfg.get("send_tweet_content", True))
+        # 非 BTC 主题推文过滤 (降噪)
+        self.filter_non_btc = bool(cfg.get("filter_non_btc", True))
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
 
@@ -324,10 +326,98 @@ class Analyzer:
                     imgs.append(u)
         return imgs[:self.max_images_per_request]
 
+    # ---- 非 BTC 主题过滤 ----
+
+    _BTC_KEYWORDS = [
+        "btc", "bitcoin", "etf", "halving", "cycle", "market", "on-chain", "onchain",
+        "mvrv", "nupl", "sopr", "realized cap", "reserve risk", "lth", "sth",
+        "long-term holder", "short-term holder", "hash rate", "miner", "exchange",
+        "futures", "options", "funding", "basis", "derivatives", "supply", "cap",
+        "bottom", "top", "bull", "bear", "recovery", "accumulation", "distribution",
+        "capital flow", "stablecoin", "inflow", "outflow", "whale", "dominance",
+        "volatility", "liquidation", "liquidity", "spot", "fear", "greed",
+        "staking", "yield", "blockchain", "token", "holder", "address", "transaction",
+        "profit", "loss", "realized", "difficulty", "epoch", "debasement", "reserve",
+        "$btc", "#btc",
+    ]
+    # 纯 altcoin 主题词 (提及但无 BTC 上下文 → 过滤)
+    _ALTCOIN_ONLY_KEYWORDS = [
+        "solana", "sol ", "$sol", "ethereum", "eth ", "$eth", "zec", "$zec",
+        "chainlink", "$link", "ada", "xrp", "doge", "$doge", "bnb", "$bnb",
+        "unix", "aptos", "sui", "sei", "tia", "sol", "altcoin", "alts",
+    ]
+
+    def _is_btc_relevant(self, content: str) -> bool:
+        """判断推文是否与 BTC 周期判断相关."""
+        if not content:
+            return False
+        low = content.lower()
+        # 含 BTC 信号关键词 → 保留
+        if any(kw in low for kw in self._BTC_KEYWORDS):
+            return True
+        # 只含 altcoin 词且无 BTC 上下文 → 过滤
+        if any(kw in low for kw in self._ALTCOIN_ONLY_KEYWORDS):
+            return False
+        # 无明确关键词: 保留 (可能是通用市场讨论)
+        return True
+
+    def _filter_btc_tweets(self, tweets: list[dict]) -> list[dict]:
+        """过滤非 BTC 主题推文, 返回保留列表."""
+        if not self.filter_non_btc:
+            return tweets
+        kept = []
+        dropped = []
+        for t in tweets:
+            content = (t.get("content", "") or "")
+            if self._is_btc_relevant(content):
+                kept.append(t)
+            else:
+                dropped.append(t.get("url", "?"))
+        if dropped:
+            print(f"[Analyzer] 过滤 {len(dropped)} 条非BTC主题推文: "
+                  f"{', '.join(dropped[:5])}{'...' if len(dropped) > 5 else ''}")
+        return kept
+
+    def _format_market_state(self, market_state: dict | None) -> str:
+        """把当前引擎状态格式化为给 AI 的上下文锚点."""
+        if not market_state:
+            return ""
+        parts = []
+        regime = market_state.get("regime")
+        alpha = market_state.get("alpha")
+        if regime is not None:
+            parts.append(f"- 当前 regime: {regime}")
+        if alpha is not None:
+            parts.append(f"- 当前 alpha (仓位): {alpha:+.4f}")
+        if market_state.get("regime_days") is not None:
+            parts.append(f"- 当前 regime 已持续: {market_state['regime_days']} 天")
+        if market_state.get("entered_from"):
+            parts.append(f"- 进入方式: {market_state['entered_from']} → {regime}")
+        if market_state.get("progress") is not None:
+            parts.append(f"- 周期内进度: {float(market_state['progress']):.2f} (0=刚开始, 1=临近下一阶段)")
+        if market_state.get("price") is not None:
+            parts.append(f"- 当前 BTC 价格: ${market_state['price']:,.0f}")
+        if market_state.get("price_change_7d") is not None:
+            parts.append(f"- 近7天价格变化: {market_state['price_change_7d']:+.2f}%")
+        if market_state.get("price_change_30d") is not None:
+            parts.append(f"- 近30天价格变化: {market_state['price_change_30d']:+.2f}%")
+        if market_state.get("last_change_at"):
+            parts.append(f"- 上次状态变更: {market_state['last_change_at']}")
+        if not parts:
+            return ""
+        return "## 当前引擎状态 (锚点, 请基于此连续性判断)\n" + "\n".join(parts) + "\n"
+
     def analyze(self, new_tweets: list[dict], memory_context: str,
-                knowledge_base: str = "", retries: int = 1) -> dict | None:
+                knowledge_base: str = "", retries: int = 1,
+                market_state: dict | None = None) -> dict | None:
         if not self.api_key:
             print("[Analyzer] Cannot run: API key not configured")
+            return None
+
+        # 过滤非 BTC 主题推文 (降噪)
+        new_tweets = self._filter_btc_tweets(new_tweets)
+        if not new_tweets:
+            print("[Analyzer] 过滤后无推文, 跳过分析")
             return None
 
         # 抓取外链页面, 丰富推文内容 (仅当传正文时才有意义)
@@ -352,11 +442,14 @@ class Analyzer:
         if len(mem_section) > remaining2:
             mem_section = mem_section[:remaining2] + "\n...(记忆过长, 已截断)\n"
 
+        state_section = self._format_market_state(market_state)
+
         user_msg = f"""## 历史记忆上下文
 
 {mem_section}
 
 {kb_section}
+{state_section}
 ## 新推文
 
 {tweets_text}

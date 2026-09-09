@@ -15,7 +15,8 @@
     "max_images_per_request": 6,
     "max_links_per_tweet": 2,
     "link_timeout_seconds": 15,
-    "link_max_chars": 1500
+    "link_max_chars": 1500,
+    "filter_non_btc": true
   },
 
   "fetcher": {
