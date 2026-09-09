@@ -189,7 +189,7 @@ class Fetcher:
                 articles = self._parse_articles(html)
                 if len(articles) == 0 and "<article" in html:
                     # 标准解析失败 (可能无 data-testid), 尝试宽松解析
-                    lenient = self._parse_articles_lenient(html)
+                    lenient = self._parse_articles_lenient(html, owner=user)
                     if lenient:
                         print(f"[Fetcher]   ✓ 标准解析 0 条, 宽松解析 {len(lenient)} 条 "
                               f"(无 data-testid, 用宽松解析)")
@@ -314,10 +314,11 @@ class Fetcher:
         print(f"[Fetcher]   [debug] {block[:max_chars]}")
         print(f"[Fetcher]   [debug] --- 块结束 ---")
 
-    def _parse_articles_lenient(self, html: str) -> list[dict]:
+    def _parse_articles_lenient(self, html: str, owner: str = "") -> list[dict]:
         """宽松解析: 不依赖 data-testid, 从 <article> 内直接提取.
 
         适用于 X 实时返回的无 JS 版本 HTML (无 data-testid 属性).
+        owner: 页面所属账号 handle, 用于清除 header 噪音 (显示名/@handle/时间).
         """
         tweets = []
         for m in re.finditer(r"<article\b", html):
@@ -339,21 +340,49 @@ class Fetcher:
             times = re.findall(r'<time[^>]*datetime="([^"]*)"', block)
             time_val = times[0] if times else ""
 
-            # 提取用户 handle (主页 URL /status 前段)
-            handles = re.findall(
-                r'href="/(?:[A-Za-z0-9_]+)/status/(\d+)"', block)
-            # 提取作者: 找 @handle 文本 或 avatar alt
-            avatars = re.findall(r'alt="([A-Za-z0-9_]+)"', block)
-            author = avatars[0] if avatars else ""
+            # 提取作者: 取第一个 avatar alt 中的 handle (转推卡=原作者, 普通推=主人)
+            author = ""
+            avatars = re.findall(r'alt="@?([A-Za-z0-9_]+)"', block)
+            if avatars:
+                author = avatars[0].lower()
+            if not author:
+                author = owner.lower() if owner else ""
 
-            # 提取纯文本: 去掉所有标签和 script/style
+            # 提取纯文本: 去掉 script/style/标签
             text = re.sub(r"<script[^>]*>.*?</script>", "", block, flags=re.S)
             text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S)
             text = re.sub(r"<br\s*/?>", "\n", text)
             text = re.sub(r"<[^>]+>", "", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            # 去掉常见噪音前缀 (时间戳 / 回复数等)
-            text = re.sub(r"^\d+[smhd]?", "", text).strip()
+            text = re.sub(r"[ \t]+", " ", text)
+            text = re.sub(r"\n\s*", "\n", text).strip()
+
+            # 去掉 header: "显示名 @handle 时间" 前缀 (首个 @提及 之前的部分)
+            mh = re.search(r"@\w+", text[:250])
+            if mh:
+                text = text[mh.end():].strip()
+            text = re.sub(r"^(?:\d+[smhd]\s*)?[\s·.,•|:-]*", "", text).strip()
+            text = re.sub(r"^(?:Replying\s+to\s+@[A-Za-z0-9_]+\.?)\s*", "", text,
+                          flags=re.IGNORECASE).strip()
+
+            # 截断底部操作计数: "... 1.2K Reposts 56 Likes ..." 保留正文
+            m_foot = re.search(
+                r"\d+(?:[\d,\.]+)?[KMB]?\s*(?:Reposts?|Replies?|Likes?|Views?|"
+                r"Quotes?|Bookmarks?|Shares?)",
+                text, re.IGNORECASE)
+            if m_foot:
+                text = text[:m_foot.start()].strip()
+
+            # 去掉残留行: 纯数字/纯计数 或 单独 "Reposts/Likes" 词
+            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            cleaned = []
+            for ln in lines:
+                if re.fullmatch(r"[\d,\.]+[KMB]?", ln):
+                    continue
+                if re.fullmatch(r"(Reposts?|Replies?|Likes?|Views?|Quotes?|Bookmarks?|Shares?)",
+                                ln, re.IGNORECASE):
+                    continue
+                cleaned.append(ln)
+            text = " ".join(cleaned).strip()
 
             if not text:
                 continue

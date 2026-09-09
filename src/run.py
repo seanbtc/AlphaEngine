@@ -856,12 +856,16 @@ def main():
             if test_html:
                 articles = fetcher._parse_articles(test_html)
                 if len(articles) == 0 and "<article" in test_html:
-                    lenient = fetcher._parse_articles_lenient(test_html)
+                    lenient = fetcher._parse_articles_lenient(
+                        test_html, owner=fetcher.usernames[0])
                     print(f"[Main]   标准解析 0 条, 宽松解析 {len(lenient)} 条")
                     articles = lenient
                 print(f"[Main]   测试抓取结果: 解析到 {len(articles)} 条推文")
                 if len(articles) > 0:
                     print("[Main]   ✓ 网页解析成功, 后续将直接读取网页内容")
+                    for a in articles[:2]:
+                        snippet = (a.get("content", "") or "").replace("\n", " ")[:150]
+                        print(f"[Main]   [预览] {a.get('id')} | {snippet}")
                 else:
                     fetcher.debug_dump_first_article(test_html)
                     print("[Main]   ⚠ 网页可达但解析到 0 条推文")
