@@ -113,12 +113,17 @@ class Fetcher:
         return True
 
     def _check_x_com(self) -> bool:
-        """检测 x.com 是否可达."""
+        """检测 x.com 是否可达 (详细版)."""
         try:
             resp = requests.get("https://x.com", timeout=8,
                                 headers={"User-Agent": "Mozilla/5.0"})
+            print(f"[Fetcher] x.com 可达性检测: HTTP {resp.status_code}, "
+                  f"长度={len(resp.text)}, URL={resp.url}")
+            if resp.status_code != 200:
+                print(f"[Fetcher]   响应头: {dict(resp.headers)}")
             return resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            print(f"[Fetcher] x.com 不可达: {type(e).__name__}: {e}")
             return False
 
     def _fetch_x_web(self, user: str) -> str:
@@ -132,11 +137,29 @@ class Fetcher:
         }
         try:
             resp = requests.get(url, headers=headers, timeout=self.timeout)
-            if resp.status_code == 200:
-                return resp.text
-            print(f"[Fetcher] x.com/{user} HTTP {resp.status_code}")
+            print(f"[Fetcher]   HTTP {resp.status_code}, 长度={len(resp.text)}, "
+                  f"最终URL={resp.url}")
+            if resp.status_code != 200:
+                print(f"[Fetcher]   响应头 Content-Type: "
+                      f"{resp.headers.get('content-type', '?')}")
+                return ""
+
+            import re
+            has_article = len(re.findall(r'<article', resp.text))
+            has_testid = len(re.findall(r'data-testid=', resp.text))
+            has_status = len(re.findall(r'/status/\d+', resp.text))
+            has_tweet = "tweet" in resp.text.lower()
+            print(f"[Fetcher]   <article>标签: {has_article}, "
+                  f"data-testid: {has_testid}, /status/链接: {has_status}, "
+                  f"含'tweet'文本: {has_tweet}")
+            if len(resp.text) > 100:
+                m = re.search(r'<title>([^<]*)</title>', resp.text)
+                if m:
+                    print(f"[Fetcher]   页面标题: {m.group(1).strip()}")
+
+            return resp.text
         except Exception as e:
-            print(f"[Fetcher] x.com/{user} Error: {type(e).__name__}: {str(e)[:80]}")
+            print(f"[Fetcher]   Error: {type(e).__name__}: {str(e)[:120]}")
         return ""
 
     def fetch(self) -> list[dict]:
