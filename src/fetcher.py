@@ -287,13 +287,39 @@ class Fetcher:
             ids = self._dedup(parser.status_ids)
             if not ids or not parser.tweet_texts:
                 continue
+            content = parser.tweet_texts[0]
+            # 附加图片 alt 文本 + 外链 URL (信息补全)
+            extra = self._format_media_info(
+                parser.img_alts, parser.external_links)
+            if extra:
+                content = content + "\n" + extra
             tweets.append({
                 "id": ids[0],
-                "content": parser.tweet_texts[0],
+                "content": content,
                 "date": parser.times[0] if parser.times else "",
                 "author": parser.avatars[0].lower() if parser.avatars else "",
             })
         return tweets
+
+    @staticmethod
+    def _format_media_info(img_alts: list, links: list) -> str:
+        """把图片说明和外链格式化为附加信息 (均去重、去空)."""
+        parts = []
+        seen_alt = set()
+        for a in img_alts:
+            a = a.strip()
+            if a and a not in seen_alt:
+                seen_alt.add(a)
+                parts.append(a)
+        seen_link = set()
+        for u in links:
+            u = u.strip()
+            if u and u not in seen_link:
+                seen_link.add(u)
+                parts.append(f"[链接] {u}")
+        if not parts:
+            return ""
+        return " | ".join(parts)
 
     @staticmethod
     def debug_dump_first_article(html: str, max_chars: int = 3000) -> None:
@@ -386,6 +412,22 @@ class Fetcher:
                     continue
                 cleaned.append(ln)
             text = " ".join(cleaned).strip()
+
+            # 提取图片 alt + 外链, 附加到正文
+            img_alts = []
+            for im in re.finditer(r'<img\b[^>]*\balt="([^"]*)"', block):
+                alt = im.group(1).strip()
+                if alt and not alt.startswith("@"):
+                    img_alts.append(alt)
+            links = []
+            for lm in re.finditer(r'<a\b[^>]*\bhref="([^"]*)"', block):
+                u = lm.group(1).strip()
+                if u.startswith("http") and \
+                        not re.match(r"^https?://(?:[a-z0-9.-]*\.)?(x|twitter)\.com/", u):
+                    links.append(u)
+            extra = self._format_media_info(img_alts, links)
+            if extra:
+                text = text + "\n" + extra
 
             if not text:
                 continue
@@ -609,10 +651,17 @@ class _SavedPageParser(HTMLParser):
         self.tweet_texts: list[str] = []
         self.times: list[str] = []
         self.avatars: list[str] = []
+        self.img_alts: list[str] = []
+        self.external_links: list[str] = []
         self._tweettext_depth = 0
         self._tweettext_buf: list[str] = []
         self._in_time = False
         self._time_val = ""
+
+    @staticmethod
+    def _is_external(url: str) -> bool:
+        return bool(re.match(r"^https?://", url)) and \
+            not re.match(r"^https?://(?:[a-z0-9.-]*\.)?(x|twitter)\.com/", url)
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
@@ -620,6 +669,12 @@ class _SavedPageParser(HTMLParser):
         m = re.search(r"/status/(\d+)", href)
         if m:
             self.status_ids.append(m.group(1))
+        if tag == "a" and self._is_external(href):
+            self.external_links.append(href)
+        if tag == "img":
+            alt = d.get("alt", "")
+            if alt and not alt.startswith("@"):
+                self.img_alts.append(alt)
         testid = d.get("data-testid", "")
         if testid == "tweetText":
             self._tweettext_depth = 1
