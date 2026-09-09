@@ -1,6 +1,7 @@
 """
 DeepSeek AI 分析器 — 输出 cycle_position + 证据评分 + 元分析.
 """
+import base64
 import json
 import re
 import time
@@ -258,6 +259,39 @@ class Analyzer:
         except Exception:
             return ""
 
+    def _download_image_data_url(self, url: str) -> str | None:
+        """下载图片并转为 base64 data URL (供视觉模型读取).
+
+        返回 data:image/{mime};base64,... 或 None (失败).
+        """
+        try:
+            resp = requests.get(url, timeout=self.link_timeout,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                return None
+            data = resp.content
+            if not data or len(data) > 32 * 1024 * 1024:  # 32 MiB 上限
+                return None
+            # 推断 MIME: 优先响应头, 其次 URL
+            ct = resp.headers.get("content-type", "").lower()
+            mime = ct.split(";")[0].strip()
+            if mime not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+                u = url.lower()
+                if any(x in u for x in (".jpg", ".jpeg", "format=jpg", "format=jpeg")):
+                    mime = "image/jpeg"
+                elif ".png" in u or "format=png" in u:
+                    mime = "image/png"
+                elif ".gif" in u or "format=gif" in u:
+                    mime = "image/gif"
+                elif ".webp" in u or "format=webp" in u:
+                    mime = "image/webp"
+                else:
+                    return None
+            b64 = base64.b64encode(data).decode()
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            return None
+
     def _enrich_with_pages(self, tweets: list[dict]) -> list[dict]:
         """为每条含外链的推文抓取目标页面文本, 附加到正文."""
         out = []
@@ -406,12 +440,24 @@ class Analyzer:
 
         # 构造 user content: 纯文本 或 图文混合块
         if images:
+            # 海外服务器先下载图片 → base64 内联 (DeepSeek 服务器无法访问 pbs.twimg.com)
             user_content = [
                 {"type": "text", "text": user_msg},
             ]
+            ok_images = 0
             for img in images:
-                user_content.append(
-                    {"type": "image_url", "image_url": {"url": img}})
+                data_url = self._download_image_data_url(img)
+                if data_url:
+                    user_content.append(
+                        {"type": "image_url", "image_url": {"url": data_url}})
+                    ok_images += 1
+                else:
+                    print(f"[Analyzer] 图片下载失败, 跳过: {img}")
+            if ok_images == 0:
+                print("[Analyzer] 所有图片下载失败, 降级为纯文本")
+                self._last_image_error = True
+                return None, True
+            print(f"[Analyzer] 已内联 {ok_images}/{len(images)} 张图片 (base64)")
         else:
             user_content = user_msg
 
