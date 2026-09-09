@@ -306,8 +306,17 @@ class Fetcher:
 
     @staticmethod
     def _is_image_url(url: str) -> bool:
-        return bool(re.match(r"^https?://", url)) and \
-            bool(re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE))
+        if not re.match(r"^https?://", url):
+            return False
+        # 排除头像/个人资料图 (非推文内容图)
+        if re.search(r"/profile_images/|/profile_img/", url, re.IGNORECASE):
+            return False
+        if re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE):
+            return True
+        # pbs.twimg.com/media/ 下的无扩展名图 (如 ?format=jpg&name=large)
+        if re.search(r"pbs\.twimg\.com/media/", url, re.IGNORECASE):
+            return True
+        return False
 
     @staticmethod
     def _dedup(items: list) -> list:
@@ -735,8 +744,15 @@ class _SavedPageParser(HTMLParser):
 
     @staticmethod
     def _is_image_url(url: str) -> bool:
-        return bool(re.match(r"^https?://", url)) and \
-            bool(re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE))
+        if not re.match(r"^https?://", url):
+            return False
+        if re.search(r"/profile_images/|/profile_img/", url, re.IGNORECASE):
+            return False
+        if re.search(r"\.(jpe?g|png|gif|webp)(\?|$)", url, re.IGNORECASE):
+            return True
+        if re.search(r"pbs\.twimg\.com/media/", url, re.IGNORECASE):
+            return True
+        return False
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)

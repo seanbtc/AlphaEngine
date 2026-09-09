@@ -200,6 +200,7 @@ class Analyzer:
         self.max_links_per_tweet = int(cfg.get("max_links_per_tweet", 2) or 2)
         self.link_timeout = int(cfg.get("link_timeout_seconds", 15) or 15)
         self.link_max_chars = int(cfg.get("link_max_chars", 1500) or 1500)
+        self._last_image_error = False
         if not self.api_key:
             print("[Analyzer] WARNING: DeepSeek API key not configured!")
 
@@ -331,6 +332,9 @@ class Analyzer:
         print(f"[Analyzer] Input: {len(user_msg)} chars, {len(new_tweets)} tweets"
               f"{f', {len(images)} images' if images else ''}")
 
+        # 图片失败降级: 若因图片下载导致 400, 去掉图片用纯文本模型重试一次
+        image_fallback_done = False
+
         for attempt in range(1 + retries):
             if attempt > 0:
                 wait = 2 ** attempt * 5  # 指数退避: 10s, 20s
@@ -343,6 +347,18 @@ class Analyzer:
                     return result
                 print("[Analyzer] VALIDATION failed, treating as failure")
                 retryable = True
+
+            # 图片相关错误 → 降级为纯文本重试一次
+            if result is None and images and not image_fallback_done \
+                    and self._last_image_error:
+                print("[Analyzer] 图片下载失败, 降级为纯文本分析 (去掉图片)")
+                images = []
+                model = self.model
+                use_vision = False
+                image_fallback_done = True
+                retryable = True
+                continue
+
             if not retryable:
                 break
 
@@ -413,9 +429,16 @@ class Analyzer:
         try:
             print(f"[API-CALL][analyzer] POST {model} {datetime.utcnow().isoformat()}Z")
             resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            self._last_image_error = False
             if resp.status_code != 200:
                 retryable = resp.status_code in (429, 500, 502, 503, 504)
-                print(f"[Analyzer] HTTP {resp.status_code}: {resp.text[:200]} "
+                body = resp.text[:400]
+                # 图片下载失败 → 标记以便降级重试
+                if resp.status_code == 400 and ("image" in body.lower()
+                                                or "download" in body.lower()):
+                    self._last_image_error = True
+                    retryable = True
+                print(f"[Analyzer] HTTP {resp.status_code}: {body} "
                       f"(retryable={retryable})")
                 return None, retryable
             data = resp.json()
