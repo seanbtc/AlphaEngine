@@ -780,6 +780,47 @@ def _seconds_until_next_run(cfg: dict, now_utc: datetime) -> float:
     return (target_local - now_local).total_seconds()
 
 
+def _run_test_ai(c: dict):
+    """测试模式: 读取推文 → 解析 → 发给 AI 分析 → 打印结果.
+
+    不存历史记录、不写 tweets.jsonl、不发钉钉/Promo、不改状态.
+    """
+    print("\n" + "=" * 60)
+    print("[Test-AI] 测试模式开始 (只读, 不保存任何数据)")
+    print("=" * 60)
+
+    memory = c["memory"]
+    analyzer = c["analyzer"]
+    knowledge = c["knowledge"]
+    fetcher = c["fetcher"]
+
+    # 1. 读取 x.com 推文 (不落盘)
+    tweets = fetcher.preview_live()
+    if not tweets:
+        print("[Test-AI] 没有读取到推文, 退出")
+        return
+
+    # 2. 组装上下文 (只读, 不修改)
+    ctx = memory.get_context_for_ai()
+    kb = knowledge.load_knowledge_base()
+    print(f"[Test-AI] 上下文: 记忆 {len(ctx)} chars, 知识库 {len(kb)} chars")
+
+    # 3. 发给 AI 分析
+    print("\n--- Test-AI: 调用 AI 分析 ---")
+    analysis = analyzer.analyze(tweets, ctx, kb)
+    if not analysis:
+        print("[Test-AI] AI 分析失败")
+        return
+
+    # 4. 打印结果
+    print("\n--- Test-AI: 分析结果 ---")
+    print(json.dumps(analysis, ensure_ascii=False, indent=2))
+
+    print("\n" + "=" * 60)
+    print("[Test-AI] 测试完成 — 未保存任何数据")
+    print("=" * 60)
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
         print("Glassnode Alpha Engine")
@@ -789,11 +830,13 @@ def main():
         print("  python -m src.run --status     # 查看当前状态")
         print("  python -m src.run --import <file.jsonl>  # 导入历史推文文件")
         print("  python -m src.run --bulk <limit>   # 批量抓取并退出")
+        print("  python -m src.run --test-ai        # 测试: 读取推文→发给AI分析, 不存记录/不发帖")
         sys.exit(0)
 
     once = "--once" in sys.argv
     status_only = "--status" in sys.argv
     backfill_force = "--backfill" in sys.argv
+    test_ai = "--test-ai" in sys.argv
     import_file = None
     bulk_only = None
 
@@ -805,6 +848,10 @@ def main():
 
     cfg = load_config()
     c = init_components(cfg)
+
+    if test_ai:
+        _run_test_ai(c)
+        sys.exit(0)
 
     if bulk_only:
         count = c["fetcher"].fetch_bulk(limit=bulk_only)

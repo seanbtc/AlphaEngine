@@ -244,6 +244,64 @@ class Fetcher:
             print(f"[Fetcher]   NEW: {t.get('url','?')} | {snippet}")
         return new_tweets
 
+    def preview_live(self) -> list[dict]:
+        """测试模式: 只读取并解析 x.com 推文, 不落盘、不去重历史、不写文件.
+
+        返回所有解析出的推文 (含已见过的), 供 --test-ai 预览使用.
+        """
+        print("[Fetcher] === 测试模式: 读取 x.com 推文 (不保存) ===")
+        all_tweets = []
+        seen_ids = set()
+        tracked = {u.lower() for u in self.usernames}
+
+        if self._x_com_reachable is None:
+            self._x_com_reachable = self._check_x_com()
+
+        if self._x_com_reachable:
+            for user in self.usernames:
+                print(f"[Fetcher] 读取 https://x.com/{user} ...")
+                html = self._fetch_x_web(user)
+                if not html:
+                    print(f"[Fetcher]   ✗ 无法读取 {user} 的主页")
+                    continue
+                articles = self._parse_articles(html)
+                if len(articles) == 0 and "<article" in html:
+                    lenient = self._parse_articles_lenient(html, owner=user)
+                    if lenient:
+                        print(f"[Fetcher]   ✓ 标准解析 0 条, 宽松解析 {len(lenient)} 条")
+                        articles = lenient
+                print(f"[Fetcher]   ✓ 解析到 {len(articles)} 条推文")
+                owner = user.lower()
+                for art in articles:
+                    tid = art["id"]
+                    if tid in seen_ids:
+                        continue
+                    author = art["author"] or owner
+                    if author != owner and author not in tracked and author not in self.retweet_whitelist:
+                        continue
+                    content = art["content"]
+                    if self._is_retweet(content):
+                        continue
+                    seen_ids.add(tid)
+                    all_tweets.append({
+                        "id": tid,
+                        "date": art["date"],
+                        "content": content,
+                        "url": f"https://x.com/{author}/status/{tid}",
+                        "author": author,
+                        "source": f"x.com/{user}",
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "images": art.get("images", []),
+                    })
+
+        all_tweets.sort(key=lambda t: t["id"])
+        print(f"[Fetcher] === 测试读取: 共 {len(all_tweets)} 条推文 ===")
+        for t in all_tweets:
+            snippet = (t.get("content", "") or "").replace("\n", " ")[:60]
+            n_img = len(t.get("images", []) or [])
+            print(f"[Fetcher]   {t.get('url','?')} | 图{n_img} | {snippet}")
+        return all_tweets
+
     # ---- 本地网页兜底 (web/ 目录保存的 X 主页) ----
 
     @staticmethod
