@@ -45,6 +45,7 @@ class StateManager:
                 "last_deepseek_at": "",
                 "last_distill_at": "",
                 "last_calibration_at": "",
+                "last_review_at": "",
                 "uptime_started_at": datetime.utcnow().isoformat() + "Z",
             },
         }

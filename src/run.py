@@ -21,6 +21,7 @@ from src.knowledge import Knowledge
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
+from src.review_engine import ReviewEngine
 
 
 def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
@@ -67,6 +68,7 @@ def init_components(cfg: dict):
     tradesync = TradeSync(cfg.get("tradesync", {}), data_dir)
     datafeed = DataFeed(cfg.get("datafeed", {}))
     dingtalk = DingTalk(cfg.get("dingtalk", {}))
+    review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine, knowledge)
 
     return {
         "cfg": cfg, "data_dir": data_dir,
@@ -75,6 +77,7 @@ def init_components(cfg: dict):
         "engine": engine, "evidence": evidence,
         "knowledge": knowledge, "tradesync": tradesync,
         "datafeed": datafeed, "dingtalk": dingtalk,
+        "review": review,
     }
 
 
@@ -481,6 +484,7 @@ def run_cycle(components: dict) -> bool:
     tradesync = c["tradesync"]
     datafeed = c["datafeed"]
     dingtalk = c["dingtalk"]
+    review = c["review"]
 
     print_status(c)
 
@@ -506,6 +510,7 @@ def run_cycle(components: dict) -> bool:
     btc_price = datafeed.get_price()
     if btc_price:
         print(f"[BTC] ${btc_price:,.2f}")
+        review.record_price(btc_price, engine.get_regime(), engine.get_alpha())
 
     # 2. 抓取新推文
     new_tweets = []
@@ -736,7 +741,16 @@ def run_cycle(components: dict) -> bool:
             knowledge.distill(memory, sm)
             sm.set("runtime.last_distill_at", now.isoformat() + "Z")
 
-    # 11. 保存状态
+    # 11. 月度复盘
+    if review.should_review():
+        review_result = review.run_review()
+        if review_result:
+            review.apply_calibration(review_result)
+            if review_result.get("calibration", {}).get("warnings"):
+                for w in review_result["calibration"]["warnings"]:
+                    dingtalk.alert("月度复盘", w)
+
+    # 12. 保存状态
     sm.update_runtime()
     sm.save()
 

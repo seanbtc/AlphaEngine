@@ -84,9 +84,9 @@
 
   "datafeed": {
     "_note": "BTC 价格数据来源。通过 DataFeed 接口获取。",
-    "enabled": false,
+    "enabled": true,
     "mode": "http",
-    "endpoint": "",
+    "endpoint": "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
     "symbol": "BTC/USDT",
     "timeout_seconds": 10
   },
@@ -103,6 +103,11 @@
     "min_analysis_interval_hours": 24,
     "retry_on_fetch_failure": true,
     "retry_delay_seconds": 120
+  },
+
+  "review": {
+    "_note": "月度复盘: 每月最后一天 20:00(UTC) 触发, min_cycles_before_review=最少分析次数才触发复盘",
+    "min_cycles_before_review": 20
   },
 
   "dingtalk": {
