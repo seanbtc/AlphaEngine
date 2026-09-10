@@ -39,7 +39,6 @@ class Fetcher:
         self.timeout = int(config.get("timeout_seconds", 20) or 20)
         self.retweet_whitelist = {h.lower() for h in config.get("retweet_whitelist", [])}
         self.web_fallback = config.get("web_fallback", True)
-        self.max_tweet_age_days = int(config.get("max_tweet_age_days", 30) or 30)
         web_dir = config.get("web_dir", "web")
         if not os.path.isabs(web_dir):
             web_dir = os.path.normpath(
@@ -147,24 +146,6 @@ class Fetcher:
             print(f"[Fetcher]   Error: {type(e).__name__}: {str(e)[:120]}")
         return ""
 
-    def _is_recent(self, art: dict) -> bool:
-        """判断推文是否在有效时间窗内 (过滤置顶旧推文).
-
-        无日期信息时保守保留; max_tweet_age_days<=0 表示不过滤.
-        """
-        days = self.max_tweet_age_days
-        if days <= 0:
-            return True
-        d = art.get("date", "")
-        if not d:
-            return True
-        try:
-            dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
-            age = (datetime.utcnow() - dt.replace(tzinfo=None)).total_seconds() / 86400
-            return age <= days
-        except ValueError:
-            return True
-
     def _fetch_live_tweets(self) -> list[dict]:
         """抓取所有账号的实时推文, 返回原始列表 (不去重/不写盘).
 
@@ -198,9 +179,6 @@ class Fetcher:
             for art in articles:
                 tid = art["id"]
                 if tid in seen_ids:
-                    continue
-                if not self._is_recent(art):
-                    print(f"[Fetcher]   skip 旧推文 {tid} ({art.get('date','?')[:10]})")
                     continue
                 author = art["author"] or owner
                 if author != owner and author not in tracked and author not in self.retweet_whitelist:
