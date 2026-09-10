@@ -23,6 +23,7 @@
     "username": "glassnode",
     "usernames": ["glassnode", "cryptovizart", "n3ocortex"],
     "max_tweets_per_fetch": 20,
+    "max_tweet_age_days": 30,
     "timeout_seconds": 20,
     "retweet_whitelist": ["cryptovizart","n3ocortex"],
     "_note_web": "web_fallback: x.com 不可达时解析 web/ 目录保存的 X 主页 HTML; web_dir 为网页目录 (相对项目根)",
