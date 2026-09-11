@@ -60,7 +60,7 @@ def init_components(cfg: dict):
     state_mgr.load()
 
     fetcher = Fetcher(cfg.get("fetcher", {}), data_dir)
-    analyzer = Analyzer(cfg.get("deepseek", {}))
+    analyzer = Analyzer(cfg.get("ai_service") or cfg.get("deepseek") or {})
     engine = AlphaEngine(cfg.get("alpha", {}), state_mgr)
     evidence = EvidenceAccumulator(
         state_mgr, cfg.get("alpha", {}).get("evidence", {}).get("decay_per_cycle", 0.02))

@@ -3,8 +3,6 @@ import json
 import os
 from datetime import datetime
 
-import requests
-
 
 class Knowledge:
     def __init__(self, cfg: dict, data_dir: str, analyzer):
@@ -164,8 +162,8 @@ class Knowledge:
 
     def distill(self, memory, state_manager) -> str | None:
         """蒸馏知识: 压缩 memory.md + 生成新 knowledge_base.md."""
-        if not self.analyzer.api_key:
-            print("[Knowledge] Cannot distill: no API key")
+        if not getattr(self.analyzer, "enabled", True):
+            print("[Knowledge] Cannot distill: AI 服务已禁用")
             return None
 
         memory_content = memory.load_memory_md()
@@ -206,29 +204,24 @@ class Knowledge:
 {context}
 """
 
-        payload = {
-            "model": self.analyzer.model,
-            "messages": [
+        print(f"[API-CALL][distill] POST {self.analyzer.endpoint} purpose=knowledge "
+              f"{datetime.utcnow().isoformat()}Z")
+        response = self.analyzer.client.chat(
+            messages=[
                 {"role": "system", "content": "你是知识蒸馏引擎, 输出 Markdown 格式的知识库内容."},
                 {"role": "user", "content": distill_prompt},
             ],
-            "temperature": 0.2,
-            "max_tokens": 2048,
-        }
-        headers = {
-            "Authorization": f"Bearer {self.analyzer.api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"{self.analyzer.base_url}/chat/completions"
-
-        try:
-            print(f"[API-CALL][distill] POST {self.analyzer.model} {datetime.utcnow().isoformat()}Z")
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
-            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as e:
-            print(f"[Knowledge] Distill API error: {e}")
+            purpose="knowledge",
+            project="AlphaEngine",
+            temperature=0.2,
+            max_tokens=2048,
+            json_mode=False,
+            timeout_seconds=self.analyzer.timeout,
+        )
+        if not response.get("ok"):
+            print(f"[Knowledge] Distill AI服务调用失败: {response.get('error')}")
             return None
+        content = response.get("content") or ""
 
         if content:
             self.save_knowledge_base(content)
@@ -245,7 +238,7 @@ class Knowledge:
         if len(existing) <= threshold:
             return False
 
-        if not self.analyzer.api_key:
+        if not getattr(self.analyzer, "enabled", True):
             return False
 
         compress_prompt = f"""压缩以下分析历史为关键转折点摘要。
@@ -256,29 +249,24 @@ class Knowledge:
 {existing[-5000:] if len(existing) > 5000 else existing}
 """
 
-        payload = {
-            "model": self.analyzer.model,
-            "messages": [
+        print(f"[API-CALL][compress] POST {self.analyzer.endpoint} purpose=knowledge "
+              f"{datetime.utcnow().isoformat()}Z")
+        response = self.analyzer.client.chat(
+            messages=[
                 {"role": "system", "content": "你是文本压缩引擎, 输出简洁 Markdown."},
                 {"role": "user", "content": compress_prompt},
             ],
-            "temperature": 0.1,
-            "max_tokens": 2048,
-        }
-        headers = {
-            "Authorization": f"Bearer {self.analyzer.api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"{self.analyzer.base_url}/chat/completions"
-
-        try:
-            print(f"[API-CALL][compress] POST {self.analyzer.model} {datetime.utcnow().isoformat()}Z")
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
-            compressed = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as e:
-            print(f"[Knowledge] Compress error: {e}")
+            purpose="knowledge",
+            project="AlphaEngine",
+            temperature=0.1,
+            max_tokens=2048,
+            json_mode=False,
+            timeout_seconds=self.analyzer.timeout,
+        )
+        if not response.get("ok"):
+            print(f"[Knowledge] Compress AI服务调用失败: {response.get('error')}")
             return False
+        compressed = response.get("content") or ""
 
         if compressed:
             ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")

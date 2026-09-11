@@ -1,13 +1,21 @@
 """
-DeepSeek AI 分析器 — 输出 cycle_position + 证据评分 + 元分析.
+AI 分析器 (经统一 AIService 调用) — 输出 cycle_position + 证据评分 + 元分析.
 """
 import base64
 import json
+import os
 import re
+import sys
 import time
 from datetime import datetime
 
 import requests
+
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(os.path.dirname(_SRC_DIR))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from AIService.client import AIClient
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -190,16 +198,20 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 
 class Analyzer:
     def __init__(self, cfg: dict):
-        self.api_key = cfg.get("api_key", "")
-        self.model = cfg.get("model", "deepseek-v4-flash")
-        self.base_url = cfg.get("base_url", "https://api.deepseek.com").rstrip("/")
+        cfg = cfg or {}
+        self.enabled = bool(cfg.get("enabled", True))
+        self.endpoint = str(
+            cfg.get("endpoint") or os.getenv("AISERVICE_URL", "") or AIClient.DEFAULT_ENDPOINT
+        ).rstrip("/")
+        self.purpose = str(cfg.get("purpose") or "analysis").strip() or "analysis"
+        self.vision_purpose = str(cfg.get("vision_purpose") or "vision").strip() or "vision"
+        self.model = str(cfg.get("model") or "AIService").strip()  # 仅日志展示, 实际模型由服务映射
         self.temperature = cfg.get("temperature", 0.3)
         self.max_tokens = cfg.get("max_tokens", 16384)
         self.max_input_chars = int(cfg.get("max_input_chars", 30000) or 30000)
         self.timeout = int(cfg.get("timeout_seconds", 120) or 120)
         # 视觉/链接增强配置
         self.vision_enabled = bool(cfg.get("vision_enabled", False))
-        self.vision_model = cfg.get("vision_model", "deepseek-v4-flash-vision-exp")
         self.max_images_per_request = int(cfg.get("max_images_per_request", 6) or 6)
         self.max_links_per_tweet = int(cfg.get("max_links_per_tweet", 2) or 2)
         self.link_timeout = int(cfg.get("link_timeout_seconds", 15) or 15)
@@ -210,8 +222,9 @@ class Analyzer:
         # 非 BTC 主题推文过滤 (降噪)
         self.filter_non_btc = bool(cfg.get("filter_non_btc", True))
         self._image_cache: dict[str, str] = {}  # URL → base64 data URL (重试时避免重复下载)
-        if not self.api_key:
-            print("[Analyzer] WARNING: DeepSeek API key not configured!")
+        self.client = AIClient(endpoint=self.endpoint, timeout=self.timeout)
+        if not self.enabled:
+            print("[Analyzer] WARNING: AI 服务已禁用 (ai_service.enabled=false)")
 
     @staticmethod
     def _tweet_url(t: dict) -> str:
@@ -417,8 +430,8 @@ class Analyzer:
     def analyze(self, new_tweets: list[dict], memory_context: str,
                 knowledge_base: str = "", retries: int = 1,
                 market_state: dict | None = None) -> dict | None:
-        if not self.api_key:
-            print("[Analyzer] Cannot run: API key not configured")
+        if not self.enabled:
+            print("[Analyzer] Cannot run: AI 服务已禁用 (ai_service.enabled=false)")
             return None
 
         # 过滤非 BTC 主题推文 (降噪)
@@ -464,10 +477,9 @@ class Analyzer:
 
         # 多模态: 收集图片
         images = self._gather_images(new_tweets) if self.vision_enabled else []
-        use_vision = self.vision_enabled and images
-        model = self.vision_model if use_vision else self.model
+        use_vision = self.vision_enabled and bool(images)
         if use_vision:
-            print(f"[Analyzer] 使用视觉模型 {model}, 附带 {len(images)} 张图片")
+            print(f"[Analyzer] 使用视觉(多模态)评估 (purpose={self.vision_purpose}), 附带 {len(images)} 张图片")
 
         print(f"[Analyzer] Input: {len(user_msg)} chars, {len(new_tweets)} tweets"
               f"{f', {len(images)} images' if images else ''}")
@@ -481,7 +493,7 @@ class Analyzer:
                 print(f"[Analyzer] Retry {attempt}/{retries} (wait {wait}s) ...")
                 time.sleep(wait)
 
-            result, retryable = self._call_api(user_msg, model, images)
+            result, retryable = self._call_api(user_msg, images=images)
             if result is not None:
                 if self._validate(result):
                     return result
@@ -493,7 +505,6 @@ class Analyzer:
                     and self._last_image_error:
                 print("[Analyzer] 图片下载失败, 降级为纯文本分析 (去掉图片)")
                 images = []
-                model = self.model
                 use_vision = False
                 image_fallback_done = True
                 retryable = True
@@ -530,14 +541,11 @@ class Analyzer:
             return False
         return True
 
-    def _call_api(self, user_msg: str, model: str = None,
-                  images: list[str] = None) -> (dict | None, bool):
-        """调用 DeepSeek API。返回 (解析结果, 是否可重试).
+    def _call_api(self, user_msg: str, images: list[str] = None) -> (dict | None, bool):
+        """经统一 AI 服务调用。返回 (解析结果, 是否可重试).
 
-        images 非空时使用多模态格式 (图片 + 文本), 需要视觉模型.
+        images 非空时使用多模态格式 (图片 + 文本), 走 vision purpose; 模型由服务映射决定。
         """
-        model = model or self.model
-
         # 构造 user content: 纯文本 或 图文混合块
         if images:
             # 海外服务器先下载图片 → base64 内联 (DeepSeek 服务器无法访问 pbs.twimg.com)
@@ -558,75 +566,49 @@ class Analyzer:
                 self._last_image_error = True
                 return None, True
             print(f"[Analyzer] 已内联 {ok_images}/{len(images)} 张图片 (base64)")
+            purpose = self.vision_purpose
+            json_mode = False
         else:
             user_content = user_msg
+            purpose = self.purpose
+            json_mode = True
 
-        payload = {
-            "model": model,
-            "messages": [
+        print(f"[API-CALL][analyzer] POST {self.endpoint} purpose={purpose} "
+              f"{datetime.utcnow().isoformat()}Z")
+        response = self.client.chat(
+            messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        # 纯文本请求启用 JSON 模式, 强制直接输出 JSON (减少推理token浪费)
-        if not images:
-            payload["response_format"] = {"type": "json_object"}
+            purpose=purpose,
+            project="AlphaEngine",
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            json_mode=json_mode,
+            timeout_seconds=self.timeout,
+        )
+        if not response.get("ok"):
+            error = str(response.get("error") or "")
+            retryable = bool(response.get("retryable", False))
+            lower_error = error.lower()
+            # 图片相关错误 → 标记以便降级重试
+            if images and ("image" in lower_error or "download" in lower_error):
+                self._last_image_error = True
+                retryable = True
+            print(f"[Analyzer] AI服务调用失败: {error} (retryable={retryable})")
+            return None, retryable
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        url = f"{self.base_url}/chat/completions"
-
-        try:
-            print(f"[API-CALL][analyzer] POST {model} {datetime.utcnow().isoformat()}Z")
-            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-            self._last_image_error = False
-            if resp.status_code != 200:
-                retryable = resp.status_code in (429, 500, 502, 503, 504)
-                body = resp.text[:400]
-                # 图片下载失败 → 标记以便降级重试
-                if resp.status_code == 400 and ("image" in body.lower()
-                                                or "download" in body.lower()):
-                    self._last_image_error = True
-                    retryable = True
-                print(f"[Analyzer] HTTP {resp.status_code}: {body} "
-                      f"(retryable={retryable})")
-                return None, retryable
-            data = resp.json()
-        except requests.RequestException as e:
-            print(f"[Analyzer] API error: {e}")
-            return None, True
-
-        if "error" in data:
-            print(f"[Analyzer] API returned error: {json.dumps(data['error'], ensure_ascii=False)[:200]}")
-            return None, True
-
-        message = data.get("choices", [{}])[0].get("message", {})
-        content = message.get("content", "")
-        finish_reason = data.get("choices", [{}])[0].get("finish_reason", "unknown")
-
-        usage = data.get("usage", {})
-        print(f"[Analyzer] Got {len(content)} chars (finish_reason={finish_reason}) "
+        self._last_image_error = False
+        content = response.get("content") or ""
+        usage = response.get("usage") or {}
+        print(f"[Analyzer] Got {len(content)} chars | model={response.get('model')} "
               f"| tokens: in={usage.get('prompt_tokens', '?')} "
               f"out={usage.get('completion_tokens', '?')} "
               f"total={usage.get('total_tokens', '?')}")
-        if finish_reason == "length":
-            print(f"[Analyzer] WARNING: Response truncated due to max_tokens limit")
 
-        # 推理型模型: content 为空时检查 reasoning_content
-        if not content and message.get("reasoning_content"):
-            reasoning = message.get("reasoning_content", "")
-            print(f"[Analyzer] content 为空, reasoning_content {len(reasoning)} chars")
-            # 尝试从推理文本中提取 JSON
-            result = self._parse_json(reasoning)
-            if result:
-                return result, False
-
-        result = self._parse_json(content)
+        result = response.get("json") if json_mode else None
+        if result is None:
+            result = self._parse_json(content)
         return result, (result is None)
 
     @staticmethod

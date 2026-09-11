@@ -3,8 +3,6 @@ import json
 import os
 from datetime import datetime, timedelta
 
-import requests
-
 
 class ReviewEngine:
     def __init__(self, cfg: dict, data_dir: str, state_manager, alpha_engine, knowledge):
@@ -283,7 +281,7 @@ class ReviewEngine:
         from src.alpha_engine import REGIME_EXPECTED_DAYS
 
         analyzer = self.knowledge.analyzer
-        if not getattr(analyzer, "api_key", None):
+        if not getattr(analyzer, "enabled", True):
             return self._fallback_calibration(regime_stats, alpha_stats)
 
         # 读取上次复盘记录 (用于对比调整效果)
@@ -359,49 +357,45 @@ class ReviewEngine:
 
 如果无需调整, adjustments 为空数组。"""
 
-        payload = {
-            "model": analyzer.model,
-            "messages": [
+        print(f"[API-CALL][review-calibrate] POST {analyzer.endpoint} purpose=calibration "
+              f"{datetime.utcnow().isoformat()}Z")
+        response = analyzer.client.chat(
+            messages=[
                 {"role": "system", "content": "你是参数量化校准专家, 只输出纯 JSON, 不要 markdown 代码块."},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
-            "max_tokens": 1536,
-        }
-        headers = {
-            "Authorization": f"Bearer {analyzer.api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"{analyzer.base_url}/chat/completions"
+            purpose="calibration",
+            project="AlphaEngine",
+            temperature=0.2,
+            max_tokens=1536,
+            json_mode=True,
+            timeout_seconds=analyzer.timeout,
+        )
+        if not response.get("ok"):
+            print(f"[Review] AI 校准调用失败: {response.get('error')}, 使用规则兜底")
+            return self._fallback_calibration(regime_stats, alpha_stats)
 
-        try:
-            print(f"[API-CALL][review-calibrate] POST {analyzer.model} {datetime.utcnow().isoformat()}Z")
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
-            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not content:
-                return self._fallback_calibration(regime_stats, alpha_stats)
-
-            content = content.strip()
+        result = response.get("json")
+        if result is None:
+            content = (response.get("content") or "").strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1] if "\n" in content else content[3:]
                 if content.endswith("```"):
                     content = content[:-3]
                 content = content.strip()
+            if not content:
+                return self._fallback_calibration(regime_stats, alpha_stats)
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError as e:
+                print(f"[Review] AI 返回 JSON 解析失败: {e}")
+                return self._fallback_calibration(regime_stats, alpha_stats)
 
-            result = json.loads(content)
-            if "adjustments" not in result:
-                result["adjustments"] = []
-            if "warnings" not in result:
-                result["warnings"] = []
-            return result
-
-        except json.JSONDecodeError as e:
-            print(f"[Review] AI 返回 JSON 解析失败: {e}")
-            return self._fallback_calibration(regime_stats, alpha_stats)
-        except Exception as e:
-            print(f"[Review] AI 校准失败: {e}, 使用规则兜底")
-            return self._fallback_calibration(regime_stats, alpha_stats)
+        if "adjustments" not in result:
+            result["adjustments"] = []
+        if "warnings" not in result:
+            result["warnings"] = []
+        return result
 
     def _fallback_calibration(self, regime_stats: dict, alpha_stats: dict) -> dict:
         """规则兜底 (AI 不可用时)."""

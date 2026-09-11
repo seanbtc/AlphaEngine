@@ -1,17 +1,18 @@
 {
   "_note": "Glassnode Alpha Engine 配置文件",
 
-  "deepseek": {
-    "api_key": "sk-94974e3dbd1e4f5d9b9a733a79900b0e",
-    "model": "deepseek-v4-flash",
-    "base_url": "https://api.deepseek.com",
+  "ai_service": {
+    "_note": "统一 AI 服务 (AIService): API Key/模型版本由服务集中管理, 此处只配服务地址与业务参数。模型映射见 AIService/config.json。",
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:5010",
+    "purpose": "analysis",
+    "vision_purpose": "vision",
     "temperature": 0.3,
     "max_tokens": 16384,
     "timeout_seconds": 120,
     "max_input_chars": 30000,
-    "_note_vision": "推文夹带图片时切换视觉模型读取图片; vision_enabled=false 则只用文本。引用外链页面抓取由 max_links_per_tweet 控制",
+    "_note_vision": "推文夹带图片时走多模态 (vision purpose) 读取图片; vision_enabled=false 则只用文本。引用外链页面抓取由 max_links_per_tweet 控制",
     "vision_enabled": true,
-    "vision_model": "deepseek-v4-flash-vision-exp",
     "max_images_per_request": 6,
     "max_links_per_tweet": 2,
     "link_timeout_seconds": 15,
@@ -21,10 +22,10 @@
 
   "fetcher": {
     "username": "glassnode",
-    "usernames": ["glassnode", "cryptovizart", "n3ocortex"],
+    "usernames": ["glassnode",  "n3ocortex"],
     "max_tweets_per_fetch": 20,
     "timeout_seconds": 20,
-    "retweet_whitelist": ["cryptovizart","n3ocortex"],
+    "retweet_whitelist": ["n3ocortex"],
     "_note_web": "web_fallback: x.com 不可达时解析 web/ 目录保存的 X 主页 HTML; web_dir 为网页目录 (相对项目根)",
     "web_fallback": true,
     "web_dir": "web"

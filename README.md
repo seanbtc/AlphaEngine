@@ -116,8 +116,9 @@ pip install snscrape   # 可选：批量历史抓取
 
 ```json
 {
-  "deepseek": {
-    "api_key": "sk-xxxxxxxx"   // DeepSeek API key (platform.deepseek.com)
+  "ai_service": {
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:5010"   // 统一 AI 服务地址 (API Key/模型见 AIService/config.json)
   },
   "dingtalk": {
     "enabled": true,
