@@ -801,9 +801,9 @@ def run_cycle(components: dict) -> bool:
             if name:
                 memory.add_metric(name, si.get("signal", 0))
 
-    # 10. 每周蒸馏 (周日 0 UTC)
+    # 10. 每周蒸馏 (按 knowledge.distill 计划; 分析周期错过时下一轮补偿)
     now = datetime.utcnow()
-    if now.weekday() == 6 and now.hour == 0:
+    if knowledge.distill_due(sm, now):
         last_distill = sm.get("runtime.last_distill_at", "")
         if not last_distill or last_distill[:10] != now.strftime("%Y-%m-%d"):
             print("\n--- Weekly Distill ---")

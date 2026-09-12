@@ -1,7 +1,7 @@
 """自我进化系统 — 知识蒸馏 + 漂移检测 + 预测审计 + 自动校准."""
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class Knowledge:
@@ -158,6 +158,39 @@ class Knowledge:
         return results
 
     # ---- 知识蒸馏 (每周) ----
+
+    _WEEKDAY_INDEX = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+        'friday': 4, 'saturday': 5, 'sunday': 6,
+    }
+
+    def distill_due(self, state_manager, now=None) -> bool:
+        """按 knowledge.distill 配置判断是否到期。
+
+        分析周期(周二/周四)与计划时刻(默认周日 0 点 UTC)不重合, 因此按
+        "最近一个计划时刻" 比较: 上一轮分析错过后在下一轮分析时补偿执行。
+        """
+        now = now or datetime.utcnow()
+        cfg = self.distill_cfg or {}
+        day_name = str(cfg.get('schedule_day') or 'sunday').strip().lower()
+        target_weekday = self._WEEKDAY_INDEX.get(day_name, 6)
+        try:
+            hour = int(cfg.get('schedule_hour_utc') or 0)
+        except (TypeError, ValueError):
+            hour = 0
+        hour = max(0, min(hour, 23))
+        boundary = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        boundary -= timedelta(days=(now.weekday() - target_weekday) % 7)
+        if boundary > now:
+            boundary -= timedelta(days=7)
+        last_text = str(state_manager.get('runtime.last_distill_at', '') or '').strip()
+        if not last_text:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last_text.replace('Z', '+00:00')).replace(tzinfo=None)
+        except ValueError:
+            return True
+        return last_dt < boundary
 
     def distill(self, memory, state_manager) -> str | None:
         """蒸馏知识: 压缩 memory.md + 生成新 knowledge_base.md."""
