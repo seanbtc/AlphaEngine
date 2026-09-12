@@ -8,3 +8,5 @@
 {"ts": "2026-08-29T04:25:32.865253Z", "cycle_position": "RECOVERY", "confidence": "medium", "btc_price": null, "verified": false}
 {"ts": "2026-09-01T04:25:56.672720Z", "cycle_position": "RECOVERY", "confidence": "medium", "btc_price": null, "verified": false}
 {"ts": "2026-09-04T05:46:08.907195Z", "cycle_position": "RECOVERY", "confidence": "high", "btc_price": null, "verified": false}
+{"ts": "2026-09-09T04:06:16.309309Z", "cycle_position": "RECOVERY", "confidence": "high", "btc_price": null, "verified": false}
+{"ts": "2026-09-10T04:25:28.602548Z", "cycle_position": "RECOVERY", "confidence": "high", "btc_price": 78384.22, "verified": false}

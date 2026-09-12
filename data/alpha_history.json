@@ -54,5 +54,35 @@
     "regime": "RECOVERY",
     "target_alpha": 0.88,
     "btc_price": null
+  },
+  {
+    "date": "2026-09-05T04:15:00.094546Z",
+    "alpha": 0.8833,
+    "regime": "RECOVERY",
+    "target_alpha": 0.8833,
+    "btc_price": null,
+    "note": "时间推进: 无推文时按4年周期推进alpha"
+  },
+  {
+    "date": "2026-09-07T04:15:00.154940Z",
+    "alpha": 0.89,
+    "regime": "RECOVERY",
+    "target_alpha": 0.89,
+    "btc_price": null,
+    "note": "时间推进: 无推文时按4年周期推进alpha"
+  },
+  {
+    "date": "2026-09-09T04:06:16.310163Z",
+    "alpha": 0.895,
+    "regime": "RECOVERY",
+    "target_alpha": 0.895,
+    "btc_price": null
+  },
+  {
+    "date": "2026-09-10T04:25:28.603218Z",
+    "alpha": 0.91,
+    "regime": "RECOVERY",
+    "target_alpha": 0.916,
+    "btc_price": 78384.22
   }
 ]

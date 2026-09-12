@@ -8,3 +8,5 @@
 {"ts": "2026-08-29T04:25:32.863928Z", "quality": 7, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}
 {"ts": "2026-09-01T04:25:56.671350Z", "quality": 6, "new_terms": [], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}
 {"ts": "2026-09-04T05:46:08.906328Z", "quality": 8, "new_terms": ["BTC Vector Signal"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}
+{"ts": "2026-09-09T04:06:16.307969Z", "quality": 7, "new_terms": ["90天资产相关性切换", "LTH供应量对已实现波动率的解释力"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}
+{"ts": "2026-09-10T04:25:28.601529Z", "quality": 8, "new_terms": ["Debasement Trade（贬值交易）", "Pricing-Model Support Structure（True Market Mean/Median Realized/Balanced Price/Delta Price 定价模型带）"], "deprecated_candidates": [], "drift_suspected": false, "cycle_position": "RECOVERY"}

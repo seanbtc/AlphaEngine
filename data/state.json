@@ -5,53 +5,53 @@
     "current": "RECOVERY",
     "started_at": "2026-08-27T11:06:41.405719Z",
     "entered_from": "BEAR_BOTTOM",
-    "cooldown_remaining": 3,
-    "stability_counter": 7,
+    "cooldown_remaining": 0,
+    "stability_counter": 13,
     "last_changed_at": "2026-08-27T11:06:41.405719Z"
   },
   "alpha": {
-    "current": 0.875,
-    "target": 0.88,
-    "regime_progress": 0.6,
+    "current": 0.91,
+    "target": 0.916,
+    "regime_progress": 0.72,
     "deferred_build": false,
-    "transition_progress": 0.75,
-    "last_change_at": "2026-09-04T05:46:08.907474Z",
+    "transition_progress": 0.7142857142857143,
+    "last_change_at": "2026-09-10T04:25:28.603165Z",
     "locked": false,
     "lock_reason": ""
   },
   "evidence": {
     "accumulators": {
-      "BEAR_BOTTOM": 2.740000000000002,
-      "RECOVERY": 7.7700000000000005
+      "BEAR_BOTTOM": 2.700000000000003,
+      "RECOVERY": 11.930000000000003
     },
     "by_category": {
       "profitability": {
-        "BEAR_BOTTOM": 1.4599999999999997,
-        "RECOVERY": 1.37
+        "BEAR_BOTTOM": 1.4199999999999997,
+        "RECOVERY": 2.13
       },
       "institutional": {
-        "BEAR_BOTTOM": -0.36,
-        "RECOVERY": 3.17
+        "BEAR_BOTTOM": -0.31999999999999995,
+        "RECOVERY": 4.530000000000001
       },
       "onchain": {
-        "BEAR_BOTTOM": 1.7399999999999998,
-        "RECOVERY": 0.97
+        "BEAR_BOTTOM": 1.6999999999999997,
+        "RECOVERY": 1.83
       },
       "derivatives": {
-        "BEAR_BOTTOM": 0.43,
-        "RECOVERY": 0.47
+        "BEAR_BOTTOM": 0.38999999999999996,
+        "RECOVERY": 0.73
       },
       "macro": {
-        "BEAR_BOTTOM": -0.5,
-        "RECOVERY": 1.67
+        "BEAR_BOTTOM": -0.45999999999999996,
+        "RECOVERY": 2.4299999999999997
       }
     }
   },
   "runtime": {
-    "analysis_count": 31,
-    "post_count": 11,
-    "last_analysis_at": "2026-09-04T05:46:09.761572Z",
-    "last_deepseek_at": "2026-09-04T05:46:08.906221Z",
+    "analysis_count": 37,
+    "post_count": 13,
+    "last_analysis_at": "2026-09-10T04:25:29.387082Z",
+    "last_deepseek_at": "2026-09-10T04:25:28.601423Z",
     "last_distill_at": "",
     "last_calibration_at": "",
     "uptime_started_at": "2026-08-11T03:48:41.228462Z"
