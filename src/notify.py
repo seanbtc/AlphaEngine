@@ -1,10 +1,13 @@
-"""钉钉通知模块."""
-import hashlib
-import hmac
-import base64
-import time
-import urllib.parse
+"""钉钉通知模块 (发送经 commons.dingtalk 共享实现)."""
+import os
+import sys
+
 import requests
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from commons.dingtalk import send_text as _dingtalk_send_text
 
 
 class DingTalk:
@@ -14,32 +17,12 @@ class DingTalk:
         self.secret = cfg.get("secret", "").strip()
         self.session = requests.Session()
 
-    def _sign_url(self) -> str:
-        if not self.secret:
-            return self.webhook
-        ts = str(round(time.time() * 1000))
-        string_to_sign = f"{ts}\n{self.secret}"
-        hmac_code = hmac.new(
-            self.secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256
-        ).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-        sep = "&" if "?" in self.webhook else "?"
-        return f"{self.webhook}{sep}timestamp={ts}&sign={sign}"
-
     def send(self, content: str) -> bool:
         if not self.enabled or not self.webhook:
             return False
-        url = self._sign_url()
-        payload = {"msgtype": "text", "text": {"content": content}}
-        try:
-            resp = self.session.post(url, json=payload, timeout=10)
-            data = resp.json()
-            if data.get("errcode") == 0:
-                return True
-            print(f"[DingTalk] Send failed: {data.get('errmsg', resp.text[:100])}")
-        except Exception as e:
-            print(f"[DingTalk] Error: {e}")
-        return False
+        return _dingtalk_send_text(
+            self.webhook, content, secret=self.secret, timeout=10, session=self.session
+        )
 
     # ---- 模板 ----
 

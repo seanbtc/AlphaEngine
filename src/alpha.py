@@ -2,14 +2,16 @@
 Glassnode Alpha Engine — 主入口.
 
 用法:
-    python -m src.run
-    nohup python3 -u -m src.run > engine.log 2>&1 &
+    python -m src.alpha
+    nohup python3 -u -m src.alpha > engine.log 2>&1 &
 """
 import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta
+
+import requests
 
 from src.config_loader import load_config, resolve_data_dir
 from src.memory import Memory
@@ -23,30 +25,63 @@ from src.datafeed import DataFeed
 from src.notify import DingTalk
 from src.review_engine import ReviewEngine
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from commons.event_contract import append_event, build_event
+
+
+def _push_promo_event(record: dict) -> bool:
+    """优先推送到 Promo HTTP 事件服务 (env PROMO_EVENTS_URL); 未配置/失败返回 False。"""
+    url = str(os.getenv("PROMO_EVENTS_URL", "") or "").strip()
+    if not url:
+        return False
+    headers = {"Content-Type": "application/json"}
+    token = str(os.getenv("PROMO_EVENTS_TOKEN", "") or "").strip()
+    if token:
+        headers["X-Webhook-Token"] = token
+    try:
+        resp = requests.post(url, json=record, headers=headers, timeout=5)
+    except requests.RequestException as exc:
+        print(f"[Promo] 事件推送异常: {exc}, 降级文件桥")
+        return False
+    if not (200 <= resp.status_code < 300):
+        print(f"[Promo] 事件推送失败 HTTP {resp.status_code}, 降级文件桥")
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        return True
+    return bool(body.get("ok", True))
+
 
 def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
-    """把编号帖子写入 Promo 桥文件 (JSONL)."""
+    """把编号帖子发送给 Promo: 优先 HTTP 推送, 失败降级写入桥文件 (JSONL, 带事件契约字段)."""
     promo_cfg = cfg.get("promo", {})
     if not promo_cfg.get("enabled", False) or not post_text:
         return
     posts_file = promo_cfg.get("posts_file", "")
-    if not posts_file:
-        return
-    if not os.path.isabs(posts_file):
-        posts_file = os.path.normpath(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         posts_file))
     try:
-        os.makedirs(os.path.dirname(posts_file), exist_ok=True)
-        with open(posts_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "post_no": post_no,
-                "content": post_text,
-                "cycle": cycle,
-                "alpha": alpha,
-            }, ensure_ascii=False) + "\n")
-        print(f"[Promo] 帖子 No.{post_no} 已写入 {posts_file}")
+        record = build_event("AlphaEngine", "alpha_post", {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "post_no": post_no,
+            "content": post_text,
+            "cycle": cycle,
+            "alpha": alpha,
+        })
+        if _push_promo_event(record):
+            print(f"[Promo] 帖子 No.{post_no} 已推送到 Promo 事件服务")
+            return
+        if not posts_file:
+            return
+        if not os.path.isabs(posts_file):
+            posts_file = os.path.normpath(
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             posts_file))
+        if append_event(posts_file, record):
+            print(f"[Promo] 帖子 No.{post_no} 已写入 {posts_file}")
+        else:
+            print(f"[Promo] 写帖子失败: {posts_file}")
     except Exception as e:
         print(f"[Promo] 写帖子失败: {e}")
 
@@ -899,14 +934,14 @@ def _run_test_ai(c: dict, urls_only: bool = False):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
         print("Glassnode Alpha Engine")
-        print("  python -m src.run              # 运行监控循环")
-        print("  python -m src.run --once       # 只跑一次分析")
-        print("  python -m src.run --backfill   # 强制重新回溯历史推文, 重设 alpha")
-        print("  python -m src.run --status     # 查看当前状态")
-        print("  python -m src.run --import <file.jsonl>  # 导入历史推文文件")
-        print("  python -m src.run --bulk <limit>   # 批量抓取并退出")
-        print("  python -m src.run --test-ai        # 测试: 读取推文→发给AI分析, 不存记录/不发帖")
-        print("  python -m src.run --test-ai-urls   # 测试: 只传推文URL, 不传正文")
+        print("  python -m src.alpha              # 运行监控循环")
+        print("  python -m src.alpha --once       # 只跑一次分析")
+        print("  python -m src.alpha --backfill   # 强制重新回溯历史推文, 重设 alpha")
+        print("  python -m src.alpha --status     # 查看当前状态")
+        print("  python -m src.alpha --import <file.jsonl>  # 导入历史推文文件")
+        print("  python -m src.alpha --bulk <limit>   # 批量抓取并退出")
+        print("  python -m src.alpha --test-ai        # 测试: 读取推文→发给AI分析, 不存记录/不发帖")
+        print("  python -m src.alpha --test-ai-urls   # 测试: 只传推文URL, 不传正文")
         sys.exit(0)
 
     once = "--once" in sys.argv

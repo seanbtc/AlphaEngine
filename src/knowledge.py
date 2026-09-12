@@ -12,7 +12,6 @@ class Knowledge:
         self.kb_file = os.path.join(data_dir, "knowledge_base.md")
         self.drift_log_file = os.path.join(data_dir, "drift_log.jsonl")
         self.prediction_log_file = os.path.join(data_dir, "prediction_log.jsonl")
-        self.calibration_log_file = os.path.join(data_dir, "calibration_log.jsonl")
         self.distill_cfg = cfg.get("distill", {})
         self.drift_cfg = cfg.get("drift", {})
 

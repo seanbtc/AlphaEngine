@@ -6,3 +6,4 @@ __pycache__/
 venv/
 web/*_files/
 web/
+data/price_history.jsonl

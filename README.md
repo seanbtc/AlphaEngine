@@ -131,28 +131,28 @@ pip install snscrape   # 可选：批量历史抓取
 
 ```bash
 # 1. 批量抓取历史推文
-python -m src.run --bulk 3000
+python -m src.alpha --bulk 3000
 
 # 2. 启动引擎（自动回溯 + 监控）
-python -m src.run
+python -m src.alpha
 
 # 或常驻
-nohup python3 -u -m src.run > engine.log 2>&1 &
+nohup python3 -u -m src.alpha > engine.log 2>&1 &
 ```
 
 ### 日常使用
 
 ```bash
-python -m src.run --status    # 查看 regime + alpha
-python -m src.run --once      # 手动跑一次
-python -m src.run --backfill  # 强制重新回溯历史推文, 重设启动时的 alpha
-python -m src.run             # 常驻监控 (每天检测一次)
+python -m src.alpha --status    # 查看 regime + alpha
+python -m src.alpha --once      # 手动跑一次
+python -m src.alpha --backfill  # 强制重新回溯历史推文, 重设启动时的 alpha
+python -m src.alpha             # 常驻监控 (每天检测一次)
 ```
 
 ### 导入外部推文数据
 
 ```bash
-python -m src.run --import tweets_backup.jsonl
+python -m src.alpha --import tweets_backup.jsonl
 # 支持 JSONL: 每行一个 {"id":"...","date":"...","content":"..."}
 # 支持 JSON 数组: [{"id":"...","date":"...","content":"..."}, ...]
 ```
@@ -214,7 +214,7 @@ glassnode-engine/
 重启时**无需清空 data 目录**。若想重新回溯历史推文确认启动时的 alpha：
 
 ```bash
-python -m src.run --backfill   # 强制重跑回溯 (重置证据, 重设 regime/alpha)
+python -m src.alpha --backfill   # 强制重跑回溯 (重置证据, 重设 regime/alpha)
 ```
 
 `tweets.jsonl` 是回溯的数据源，请勿删除；`state.json` 保存运行状态，重启自动恢复。
