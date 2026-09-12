@@ -1,13 +1,11 @@
-"""钉钉通知模块 (发送经 commons.dingtalk 共享实现)."""
+"""钉钉通知模块 (发送经 commons.notify 共享实现)."""
 import os
 import sys
-
-import requests
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from commons.dingtalk import send_text as _dingtalk_send_text
+from commons.notify import DingTalkNotifier
 
 
 class DingTalk:
@@ -15,14 +13,12 @@ class DingTalk:
         self.enabled = cfg.get("enabled", False)
         self.webhook = cfg.get("webhook_url", "").strip()
         self.secret = cfg.get("secret", "").strip()
-        self.session = requests.Session()
+        self._notifier = DingTalkNotifier(
+            self.webhook, self.secret, enabled=self.enabled, timeout=10
+        )
 
     def send(self, content: str) -> bool:
-        if not self.enabled or not self.webhook:
-            return False
-        return _dingtalk_send_text(
-            self.webhook, content, secret=self.secret, timeout=10, session=self.session
-        )
+        return self._notifier.send(content)
 
     # ---- 模板 ----
 
