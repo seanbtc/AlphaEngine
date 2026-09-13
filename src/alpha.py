@@ -28,11 +28,11 @@ from src.review_engine import ReviewEngine
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from commons.event_contract import append_event, build_event
+from commons.event_contract import build_event
 
 
 def _push_promo_event(record: dict) -> bool:
-    """优先推送到 Promo HTTP 事件服务 (env PROMO_EVENTS_URL); 未配置/失败返回 False。"""
+    """推送事件到 Promo HTTP 服务 (env PROMO_EVENTS_URL); 未配置/失败返回 False。"""
     url = str(os.getenv("PROMO_EVENTS_URL", "") or "").strip()
     if not url:
         return False
@@ -43,10 +43,10 @@ def _push_promo_event(record: dict) -> bool:
     try:
         resp = requests.post(url, json=record, headers=headers, timeout=5)
     except requests.RequestException as exc:
-        print(f"[Promo] 事件推送异常: {exc}, 降级文件桥")
+        print(f"[Promo] 事件推送异常: {exc}")
         return False
     if not (200 <= resp.status_code < 300):
-        print(f"[Promo] 事件推送失败 HTTP {resp.status_code}, 降级文件桥")
+        print(f"[Promo] 事件推送失败 HTTP {resp.status_code}")
         return False
     try:
         body = resp.json()
@@ -56,11 +56,10 @@ def _push_promo_event(record: dict) -> bool:
 
 
 def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
-    """把编号帖子发送给 Promo: 优先 HTTP 推送, 失败降级写入桥文件 (JSONL, 带事件契约字段)."""
+    """把编号帖子推送给 Promo: 仅 HTTP 推送, 失败即丢弃 (不写文件桥, 过期不候)。"""
     promo_cfg = cfg.get("promo", {})
     if not promo_cfg.get("enabled", False) or not post_text:
         return
-    posts_file = promo_cfg.get("posts_file", "")
     try:
         record = build_event("AlphaEngine", "alpha_post", {
             "ts": datetime.utcnow().isoformat() + "Z",
@@ -71,19 +70,10 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
         })
         if _push_promo_event(record):
             print(f"[Promo] 帖子 No.{post_no} 已推送到 Promo 事件服务")
-            return
-        if not posts_file:
-            return
-        if not os.path.isabs(posts_file):
-            posts_file = os.path.normpath(
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             posts_file))
-        if append_event(posts_file, record):
-            print(f"[Promo] 帖子 No.{post_no} 已写入 {posts_file}")
         else:
-            print(f"[Promo] 写帖子失败: {posts_file}")
+            print(f"[Promo] 帖子 No.{post_no} 推送失败, 已丢弃")
     except Exception as e:
-        print(f"[Promo] 写帖子失败: {e}")
+        print(f"[Promo] 推送帖子失败: {e}")
 
 
 def init_components(cfg: dict):
