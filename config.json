@@ -129,9 +129,8 @@
   },
 
   "promo": {
-    "_note": "分析帖子输出给 Promo 发帖项目。posts_file 为 JSONL 桥文件 (相对项目根目录)。",
-    "enabled": true,
-    "posts_file": "../Promo/runtime/alphaengine_posts.jsonl"
+    "_note": "分析帖子推送给 Promo (HTTP POST, env PROMO_EVENTS_URL); 推送失败即丢弃。",
+    "enabled": true
   },
 
   "backfill": {
