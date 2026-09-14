@@ -571,6 +571,17 @@ def run_cycle(components: dict) -> bool:
         print(f"[BTC] ${btc_price:,.2f}")
         review.record_price(btc_price, engine.get_regime(), engine.get_alpha())
 
+    # 1.5 预测审计 (幂等): 到期预测写回结果侧车。
+    # 原先只在周日蒸馏时执行, 而当前调度为周二/周四 → 永不触发, 这里改为每轮执行。
+    if btc_price:
+        try:
+            audit = knowledge.audit_predictions(btc_price)
+            if audit.get("new_audited"):
+                print(f"[Audit] 新增审计 {audit['new_audited']} 条 | "
+                      f"命中率 {audit.get('hit_rate', 0):.0%}")
+        except Exception as e:
+            print(f"[Audit] 预测审计异常 (不影响本轮分析): {e}")
+
     # 2. 抓取新推文
     new_tweets = []
     print("\n--- Fetch ---")
@@ -798,7 +809,7 @@ def run_cycle(components: dict) -> bool:
         if not last_distill or last_distill[:10] != now.strftime("%Y-%m-%d"):
             print("\n--- Weekly Distill ---")
             knowledge.compress_memory(memory)
-            knowledge.distill(memory, sm)
+            knowledge.distill(memory, sm, btc_price)
             sm.set("runtime.last_distill_at", now.isoformat() + "Z")
 
     # 11. 月度复盘

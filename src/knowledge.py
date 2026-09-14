@@ -12,6 +12,7 @@ class Knowledge:
         self.kb_file = os.path.join(data_dir, "knowledge_base.md")
         self.drift_log_file = os.path.join(data_dir, "drift_log.jsonl")
         self.prediction_log_file = os.path.join(data_dir, "prediction_log.jsonl")
+        self.prediction_outcome_file = os.path.join(data_dir, "prediction_outcomes.jsonl")
         self.distill_cfg = cfg.get("distill", {})
         self.drift_cfg = cfg.get("drift", {})
 
@@ -27,14 +28,16 @@ class Knowledge:
         if not os.path.exists(filepath):
             return []
         items = []
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        items.append(json.loads(line))
+                        item = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(item, dict):
+                        items.append(item)
         return items
 
     def _read_jsonl_tail(self, filepath, count: int) -> list[dict]:
@@ -112,8 +115,13 @@ class Knowledge:
     # ---- 预测审计 ----
 
     def log_prediction(self, cycle_position: str, confidence: str, btc_price: float = None):
+        if btc_price is None:
+            # DataFeed 不可用时用历史最后已知价格兜底, 避免预测价格全为 null (审计空转)
+            btc_price = self._last_known_price()
+        ts = datetime.utcnow().isoformat() + "Z"
         entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": ts,
+            "prediction_id": f"{ts}|{cycle_position}",
             "cycle_position": cycle_position,
             "confidence": confidence,
             "btc_price": btc_price,
@@ -121,40 +129,167 @@ class Knowledge:
         }
         self._append_jsonl(self.prediction_log_file, entry)
 
+    def _prediction_id(self, pred: dict) -> str:
+        return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('cycle_position','')}")
+
+    def _load_prediction_outcomes(self) -> dict:
+        """读取预测审计侧车 (prediction_outcomes.jsonl), 返回 prediction_id -> 结果。"""
+        outcomes = {}
+        for item in self._read_jsonl(self.prediction_outcome_file):
+            pid = str(item.get("prediction_id") or "").strip()
+            if pid:
+                outcomes[pid] = item
+        return outcomes
+
+    def _price_history(self) -> list:
+        """读取 price_history.jsonl, 返回 [(datetime, price)] 升序列表。"""
+        path = os.path.join(self.data_dir, "price_history.jsonl")
+        if not os.path.exists(path):
+            return []
+        entries = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    ts = datetime.fromisoformat(str(item["ts"]).replace("Z", "+00:00")).replace(tzinfo=None)
+                    price = float(item["btc_price"])
+                except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                    continue
+                entries.append((ts, price))
+        entries.sort(key=lambda e: e[0])
+        return entries
+
+    def _last_known_price(self):
+        history = self._price_history()
+        return history[-1][1] if history else None
+
+    def _price_at(self, ts_text: str, history=None):
+        """取预测时刻(之前最近)的价格, 用于补全历史预测的入场价。"""
+        try:
+            target = datetime.fromisoformat(str(ts_text).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+        history = history if history is not None else self._price_history()
+        selected = None
+        for ts, price in history:
+            if ts <= target:
+                selected = price
+            else:
+                break
+        return selected
+
+    @staticmethod
+    def _expected_direction(cycle_position: str):
+        """按 regime 的目标 alpha 判断价格预期: up/down/flat; 未知返回 None。"""
+        try:
+            from src.alpha_engine import REGIME_ALPHA_MAP
+        except Exception:
+            REGIME_ALPHA_MAP = {}
+        if cycle_position in REGIME_ALPHA_MAP:
+            alpha = float(REGIME_ALPHA_MAP[cycle_position])
+            if alpha > 0:
+                return "up"
+            if alpha < 0:
+                return "down"
+            return "flat"
+        # 兜底与 REGIME_ALPHA_MAP 对齐 (import 失败时口径不能反转)
+        fallback = {
+            "BEAR_BOTTOM": "flat", "RECOVERY": "up", "BULL": "up", "DEEP_BULL": "up",
+            "BULL_COOLING": "flat", "BEAR": "down", "BEAR_DEEP": "down",
+        }
+        return fallback.get(cycle_position)
+
+    @staticmethod
+    def _prediction_verdict(expected: str, move_pct: float) -> str:
+        """按预期方向与实际涨跌幅给出 correct/early/late/flat。"""
+        if expected == "up":
+            if move_pct >= 2.0:
+                return "correct"
+            if move_pct <= -2.0:
+                return "early"
+            return "flat"
+        if expected == "down":
+            if move_pct <= -2.0:
+                return "correct"
+            if move_pct >= 2.0:
+                return "late"
+            return "flat"
+        if expected == "flat":
+            return "correct" if abs(move_pct) <= 3.0 else "flat"
+        return "flat"
+
     def audit_predictions(self, current_price: float = None) -> dict:
-        """审计旧预测的准确性。"""
+        """审计到期预测并写回结果侧车; 返回统计 (含命中率)。
+
+        - current_price 缺省时用 price_history 最后价格兜底;
+        - 已审计的预测 (prediction_outcomes.jsonl 中已有 prediction_id) 不重复审计;
+        - 结果写侧车而非改写主日志, 保持 append-only。
+        """
         preds = self._read_jsonl(self.prediction_log_file)
+        outcomes = self._load_prediction_outcomes()
         max_age_days = self.distill_cfg.get("max_prediction_age_days", 30)
         now = datetime.utcnow()
-        results = {"correct": 0, "early": 0, "late": 0, "total": 0}
+        if current_price is None:
+            current_price = self._last_known_price()
+        price_history = self._price_history()
+        results = {"correct": 0, "early": 0, "late": 0, "flat": 0, "total": 0,
+                   "hit_rate": 0.0, "new_audited": 0}
 
+        new_outcomes = []
         for pred in preds:
-            if pred.get("verified"):
+            pid = self._prediction_id(pred)
+            if pid in outcomes or pred.get("verified"):
                 continue
             ts = pred.get("ts", "")
             if not ts:
                 continue
             try:
-                pred_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                pred_time = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
                 age = (now - pred_time.replace(tzinfo=None)).days
             except ValueError:
                 continue
             if age < max_age_days:
                 continue
 
-            results["total"] += 1
-            if current_price and pred.get("btc_price"):
-                if pred["cycle_position"] in ("BEAR_DEEP", "BEAR_BOTTOM"):
-                    if current_price > pred["btc_price"]:
-                        results["correct"] += 1
-                    else:
-                        results["early"] += 1
-                elif pred["cycle_position"] in ("DEEP_BULL", "BULL"):
-                    if current_price < pred["btc_price"]:
-                        results["correct"] += 1
-                    else:
-                        results["late"] += 1
+            entry_price = pred.get("btc_price") or self._price_at(ts, price_history)
+            try:
+                entry_price = float(entry_price) if entry_price else None
+                audit_price = float(current_price) if current_price else None
+            except (TypeError, ValueError):
+                entry_price, audit_price = None, None
+            if not entry_price or not audit_price:
+                continue
 
+            move_pct = (audit_price - entry_price) / entry_price * 100.0
+            expected = self._expected_direction(pred.get("cycle_position"))
+            verdict = self._prediction_verdict(expected, move_pct)
+            outcome = {
+                "prediction_id": pid,
+                "ts": ts,
+                "cycle_position": pred.get("cycle_position"),
+                "confidence": pred.get("confidence"),
+                "entry_price": round(entry_price, 2),
+                "audit_price": round(audit_price, 2),
+                "move_pct": round(move_pct, 2),
+                "expected": expected,
+                "verdict": verdict,
+                "age_days": age,
+                "audited_at": now.isoformat() + "Z",
+            }
+            new_outcomes.append(outcome)
+            outcomes[pid] = outcome
+            results[verdict] = results.get(verdict, 0) + 1
+            results["total"] += 1
+
+        for outcome in new_outcomes:
+            self._append_jsonl(self.prediction_outcome_file, outcome)
+        results["new_audited"] = len(new_outcomes)
+
+        decided = results["correct"] + results["early"] + results["late"]
+        results["hit_rate"] = round(results["correct"] / decided, 3) if decided else 0.0
         return results
 
     # ---- 知识蒸馏 (每周) ----
@@ -192,14 +327,14 @@ class Knowledge:
             return True
         return last_dt < boundary
 
-    def distill(self, memory, state_manager) -> str | None:
+    def distill(self, memory, state_manager, current_price: float = None) -> str | None:
         """蒸馏知识: 压缩 memory.md + 生成新 knowledge_base.md."""
         if not getattr(self.analyzer, "enabled", True):
             print("[Knowledge] Cannot distill: AI 服务已禁用")
             return None
 
         memory_content = memory.load_memory_md()
-        audit = self.audit_predictions()
+        audit = self.audit_predictions(current_price)
         drift_log = self._read_jsonl_tail(self.drift_log_file, 20)
 
         alpha_hist = memory.load_alpha_history()
