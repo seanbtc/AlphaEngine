@@ -17,6 +17,11 @@
     "max_links_per_tweet": 2,
     "link_timeout_seconds": 15,
     "link_max_chars": 1500,
+    "_note_link_reader": "外链报告读取: Papermark 查看器换签名 PDF (papermark_max_chars 为单份文档抽取上限, pdf_timeout_seconds 下载超时 30s, 下载≤30MB/抽取≤40页); 通用 HTML 回退用 link_max_chars 截断; link_viewer_email 为 Papermark 查看者邮箱; link_max_total_chars 为进入 prompt 的引用文本合计上限 (独立于 500 字推文原文截断, 单条+总量双层兜底)",
+    "link_viewer_email": "reader@example.com",
+    "papermark_max_chars": 6000,
+    "link_max_total_chars": 10000,
+    "pdf_timeout_seconds": 30,
     "filter_non_btc": true
   },
 
