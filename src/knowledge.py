@@ -236,7 +236,8 @@ class Knowledge:
             current_price = self._last_known_price()
         price_history = self._price_history()
         results = {"correct": 0, "early": 0, "late": 0, "flat": 0, "total": 0,
-                   "hit_rate": 0.0, "new_audited": 0}
+                   "hit_rate": 0.0, "new_audited": 0, "skipped": 0}
+        audited = 0
 
         new_outcomes = []
         for pred in preds:
@@ -261,6 +262,19 @@ class Knowledge:
             except (TypeError, ValueError):
                 entry_price, audit_price = None, None
             if not entry_price or not audit_price:
+                # 无入场价(且价格历史也没有) → 标记 skipped, 避免永久悬空
+                outcome = {
+                    "prediction_id": pid,
+                    "ts": ts,
+                    "cycle_position": pred.get("cycle_position"),
+                    "confidence": pred.get("confidence"),
+                    "verdict": "skipped",
+                    "reason": "missing entry/audit price",
+                    "audited_at": now.isoformat() + "Z",
+                }
+                new_outcomes.append(outcome)
+                outcomes[pid] = outcome
+                results["skipped"] += 1
                 continue
 
             move_pct = (audit_price - entry_price) / entry_price * 100.0
@@ -283,10 +297,11 @@ class Knowledge:
             outcomes[pid] = outcome
             results[verdict] = results.get(verdict, 0) + 1
             results["total"] += 1
+            audited += 1
 
         for outcome in new_outcomes:
             self._append_jsonl(self.prediction_outcome_file, outcome)
-        results["new_audited"] = len(new_outcomes)
+        results["new_audited"] = audited
 
         decided = results["correct"] + results["early"] + results["late"]
         results["hit_rate"] = round(results["correct"] / decided, 3) if decided else 0.0

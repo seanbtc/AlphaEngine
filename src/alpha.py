@@ -576,9 +576,12 @@ def run_cycle(components: dict) -> bool:
     if btc_price:
         try:
             audit = knowledge.audit_predictions(btc_price)
-            if audit.get("new_audited"):
-                print(f"[Audit] 新增审计 {audit['new_audited']} 条 | "
-                      f"命中率 {audit.get('hit_rate', 0):.0%}")
+            if audit.get("new_audited") or audit.get("skipped"):
+                message = f"新增审计 {audit.get('new_audited', 0)} 条"
+                if audit.get("skipped"):
+                    message += f" | 跳过 {audit['skipped']} 条(无入场价)"
+                message += f" | 命中率 {audit.get('hit_rate', 0):.0%}"
+                print(f"[Audit] {message}")
         except Exception as e:
             print(f"[Audit] 预测审计异常 (不影响本轮分析): {e}")
 

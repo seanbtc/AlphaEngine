@@ -68,7 +68,7 @@
       "schedule_day": "sunday",
       "schedule_hour_utc": 0,
       "memory_compress_threshold_chars": 10000,
-      "max_prediction_age_days": 30
+      "max_prediction_age_days": 15
     },
     "drift": {
       "new_term_trigger_count": 5,
