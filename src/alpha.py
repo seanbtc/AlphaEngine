@@ -18,7 +18,7 @@ from src.memory import Memory
 from src.state_manager import StateManager
 from src.fetcher import Fetcher
 from src.analyzer import Analyzer
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator
+from src.alpha_engine import AlphaEngine, EvidenceAccumulator, REGIME_TRANSITIONS
 from src.knowledge import Knowledge
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
@@ -76,6 +76,25 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
         print(f"[Promo] 推送帖子失败: {e}")
 
 
+def _select_progress(rp, ok: bool, cp: str, current_regime: str,
+                     old_progress: float) -> float:
+    """选择本轮要落盘的 regime_progress (纯函数, 便于测试).
+
+    仅当 regime 提议被接受 (ok) 或 AI 描述的就是当前 regime 时才采用新值;
+    提议被拒且指向其它 regime 时保留旧值 —— 被拒的跨级提议若用新进度参与
+    target 计算, 会把"下一阶段"的语义错位到"当前 regime"上。
+    """
+    if rp is None:
+        return old_progress
+    try:
+        new_progress = float(rp)
+    except (TypeError, ValueError):
+        return old_progress
+    if ok or cp == current_regime:
+        return max(0.0, min(1.0, new_progress))
+    return old_progress
+
+
 def init_components(cfg: dict):
     data_dir = resolve_data_dir(cfg)
     os.makedirs(data_dir, exist_ok=True)
@@ -120,12 +139,14 @@ def build_market_state(components: dict, price: float = None) -> dict:
     """组装当前引擎状态, 作为 AI 判断的连续性锚点."""
     sm = components["state"]
     engine = components["engine"]
+    regime = engine.get_regime()
     state = {
-        "regime": engine.get_regime(),
+        "regime": regime,
         "alpha": engine.get_alpha(),
         "entered_from": sm.get("regime.entered_from", "") or "",
         "progress": sm.get("alpha.regime_progress", 0.5),
         "last_change_at": sm.get("regime.last_changed_at", "") or "",
+        "allowed_transitions": list(REGIME_TRANSITIONS.get(regime, [])),
     }
     # regime 已持续天数
     started_at = sm.get("regime.started_at", "")
@@ -612,13 +633,6 @@ def run_cycle(components: dict) -> bool:
         if analysis:
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
 
-            # 周期内进度 → 动态目标 (状态感知)
-            rp = analysis.get("regime_progress")
-            if rp is not None:
-                sm.set("alpha.regime_progress", float(rp))
-            progress = float(sm.get("alpha.regime_progress", 0.5))
-            print(f"  regime_progress: {progress:.2f}")
-
         if analysis:
             cp = analysis.get("cycle_position", "BEAR")
             conf = analysis.get("cycle_confidence", "low")
@@ -648,6 +662,15 @@ def run_cycle(components: dict) -> bool:
             current_regime = engine.get_regime()
             ok, reason = engine.request_regime_change(cp, scores, conf,
                                                        meta.get("analysis_quality", 8))
+            # 周期内进度 → 动态目标 (状态感知):
+            # 仅当提议被接受或 AI 描述的正是当前 regime 时才采用新进度;
+            # 被拒且指向其它 regime 时保留旧值, 不参与 target 计算.
+            old_progress = float(sm.get("alpha.regime_progress", 0.5))
+            progress = _select_progress(analysis.get("regime_progress"), ok, cp,
+                                        current_regime, old_progress)
+            if progress != old_progress:
+                sm.set("alpha.regime_progress", progress)
+
             if ok and cp != current_regime:
                 alpha_before = engine.get_alpha()
                 new_regime = engine.execute_regime_change(cp, progress)
@@ -660,6 +683,11 @@ def run_cycle(components: dict) -> bool:
                                        old_alpha=alpha_before)
             elif cp != current_regime:
                 print(f"  [REGIME] 请求 {cp} 被拒绝: {reason}")
+
+            if cp != current_regime and not ok:
+                print(f"  regime_progress: {progress:.2f} (提议被拒, 保留旧值)")
+            else:
+                print(f"  regime_progress: {progress:.2f}")
 
             # 6. 跟踪预测
             knowledge.log_prediction(cp, conf, btc_price)

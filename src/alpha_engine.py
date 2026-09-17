@@ -23,16 +23,18 @@ REGIME_EXPECTED_DAYS = {
 
 REGIME_TRANSITIONS = {
     # regime → [possible_next_regimes]
-    # 正向流程: BULL → DEEP_BULL → BULL_COOLING → BEAR → BEAR_DEEP → BEAR_BOTTOM → RECOVERY → BULL
-    # 允许回退 (信号误判纠正)
+    # 严格逐步推进 (相邻 ±1): 每次只允许前进一步、回退一步或保持;
+    # 正向流程 = FORWARD_NEXT_REGIME (BULL → DEEP_BULL → BULL_COOLING → BEAR →
+    # BEAR_DEEP → BEAR_BOTTOM → RECOVERY → BULL), 回退仅限上一步.
+    # INIT 为特例: 仅允许进入 BEAR (无保持/回退).
     "INIT":         ["BEAR"],
     "DEEP_BULL":    ["DEEP_BULL", "BULL_COOLING", "BULL"],
-    "BULL":         ["DEEP_BULL", "BULL", "BULL_COOLING"],
+    "BULL":         ["RECOVERY", "BULL", "DEEP_BULL"],
     "BULL_COOLING": ["DEEP_BULL", "BULL_COOLING", "BEAR"],
     "BEAR":         ["BULL_COOLING", "BEAR", "BEAR_DEEP"],
     "BEAR_DEEP":    ["BEAR", "BEAR_DEEP", "BEAR_BOTTOM"],
     "BEAR_BOTTOM":  ["BEAR_DEEP", "BEAR_BOTTOM", "RECOVERY"],
-    "RECOVERY":     ["BEAR_DEEP", "RECOVERY", "BULL"],
+    "RECOVERY":     ["BEAR_BOTTOM", "RECOVERY", "BULL"],
 }
 
 REGIME_ALPHA_MAP = {

@@ -17,6 +17,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from AIService.client import AIClient
 from src.link_reader import read_link_content
+from src.alpha_engine import FORWARD_NEXT_REGIME
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -37,6 +38,22 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 | BULL_COOLING | 中性 (=0) | 牛顶确认 → 清仓多单, 准备做空 | 多指标转弱势, ETF开始流出, 价格跌破成本位, 顶部确认 |
 | BEAR | 满仓做空 (-1.0) | 熊市确认 → 满仓做空 | 多次确认熊市, 多指标看跌共振, 下降趋势确认 |
 | BEAR_DEEP | 减空 (-0.3) | 深熊 → 减仓做空, 等底部 | 底部信号浮现但不完整, SEC进入历史底部区域但未触地板 |
+
+## 长周期纪律（必须遵守）
+
+- 本引擎追踪 BTC 4 年周期位置（每个阶段预期数月至一年），alpha 是**周期级仓位基准**（-1~+1），
+  不是短期行情方向；不要因短期波动改变周期判定。
+- 周期位置证据必须是**周期级别**的：多维度在**数周~数月**尺度上一致。
+  单日/单周价格波动、单次数据、一两天的 ETF 流向变化，不足以改变 cycle_position。
+- 观察到"可能转向"的早期迹象时：**保持当前 cycle_position**，用 regime_progress 反映进展
+  （如：熊侧早期迹象增强 → progress 推向 1.0），并在 regime_evidence 中说明这是早期信号。
+- 变更遵循**确认制 + 相邻原则**：只允许正向流程的相邻位置或回退一步（保持当前位置也允许）。
+- 状态机严格逐步推进（8 个状态每次仅前进/回退一步）：当你观察到需要跨越多步的演变时，
+  用 regime_progress 表达进展（推向 1.0 表示临近下一状态），待相邻状态证据确认后再提议变更。
+- 锚点中会列出本轮允许的变更，以该列表为准；列表之外的转换会被引擎拒绝。
+  跨级提议（如 RECOVERY→BULL_COOLING、BEAR→BEAR_BOTTOM）意味着跳过了中间阶段数月的
+  市场过程，且必须是周期级证据而非短期噪音。
+- 不确定时默认不动：保持当前位置 + progress 微调。
 
 ## 仓位纪律 (确认即定位, 跨零线先平仓)
 
@@ -189,6 +206,7 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 ## 关键规则
 - 不要编造数字, 没提到的指标不要出现在 evidence_scores 或 signal_board 中
 - 参考历史记忆中的 alpha 趋势, 如果 regime 要变更需在 regime_evidence 中明确说明
+- cycle_position 变更必须相邻（正向下一步或回退一步），跨级或仅凭短期数据的提议会被引擎拒绝
 - 当且仅当推文中有新术语或指标库遗漏时, 才填写 unrecognized_topics
 - tweet_draft 简洁有力, 中文, ≤277 字符
 - 所有判断必须引用推文中的具体内容
@@ -449,6 +467,15 @@ class Analyzer:
         alpha = market_state.get("alpha")
         if regime is not None:
             parts.append(f"- 当前 regime: {regime}")
+        allowed = market_state.get("allowed_transitions")
+        if allowed and regime is not None:
+            forward = FORWARD_NEXT_REGIME.get(regime)
+            labels = ([f"保持 {r}" for r in allowed if r == regime]
+                      + [f"正向 {r}" for r in allowed if r == forward and r != regime]
+                      + [f"回退 {r}" for r in allowed
+                         if r != regime and r != forward])
+            if labels:
+                parts.append(f"- 允许的变更: {' / '.join(labels)}")
         if alpha is not None:
             parts.append(f"- 当前 alpha (仓位): {alpha:+.4f}")
         if market_state.get("regime_days") is not None:
