@@ -7,3 +7,4 @@ venv/
 web/*_files/
 web/
 data/price_history.jsonl
+data/ma_history.jsonl

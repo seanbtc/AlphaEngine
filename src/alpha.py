@@ -20,6 +20,7 @@ from src.fetcher import Fetcher
 from src.analyzer import Analyzer
 from src.alpha_engine import AlphaEngine, EvidenceAccumulator, REGIME_TRANSITIONS
 from src.knowledge import Knowledge
+from src.ma_context import build_ma_context
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
@@ -135,8 +136,12 @@ def print_status(components: dict):
           f"Stability={sm.get('regime.stability_counter',0)}")
 
 
-def build_market_state(components: dict, price: float = None) -> dict:
-    """组装当前引擎状态, 作为 AI 判断的连续性锚点."""
+def build_market_state(components: dict, price: float = None,
+                       persist_ma: bool = True) -> dict:
+    """组装当前引擎状态, 作为 AI 判断的连续性锚点.
+
+    persist_ma=False (--test-ai / 回溯等路径): 只读均线历史, 不写 ma_history.jsonl。
+    """
     sm = components["state"]
     engine = components["engine"]
     regime = engine.get_regime()
@@ -168,6 +173,15 @@ def build_market_state(components: dict, price: float = None) -> dict:
             state["price_change_7d"] = trend["change_7d"]
         if trend.get("change_30d") is not None:
             state["price_change_30d"] = trend["change_30d"]
+    # 移动均线结构 (日线): 辅助 AI 判断价格区间/趋势; 失败不阻塞主流程
+    ma_cfg = (components.get("cfg") or {}).get("ma_context") or {}
+    if ma_cfg.get("enabled", False):
+        try:
+            ma_context = build_ma_context(ma_cfg, persist=persist_ma)
+            if ma_context:
+                state["ma_context"] = ma_context
+        except Exception as exc:
+            print(f"[MA] 均线上下文构建失败 (不影响本轮): {exc}")
     return state
 
 
@@ -248,7 +262,8 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print(f"\n[Backfill] 批次 {bi+1}/{len(batches)} ({len(batch)} 推文) ...")
 
         ctx = memory.get_context_for_ai()
-        analysis = analyzer.analyze(batch, ctx, kb, market_state=build_market_state(c))
+        analysis = analyzer.analyze(batch, ctx, kb,
+                                    market_state=build_market_state(c, persist_ma=False))
 
         if not analysis:
             print("[Backfill]   分析失败，跳过本批")
@@ -470,7 +485,8 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     for bi, batch in enumerate(batches, 1):
         print(f"[首次分析] 批次 {bi}/{len(batches)} ({len(batch)} 推文) ...")
         ctx = memory.get_context_for_ai()
-        a = analyzer.analyze(batch, ctx, kb, market_state=build_market_state(c))
+        a = analyzer.analyze(batch, ctx, kb,
+                             market_state=build_market_state(c, persist_ma=False))
         if a:
             last_analysis = a
             print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
@@ -949,7 +965,8 @@ def _run_test_ai(c: dict, urls_only: bool = False):
     except Exception:
         pass
     analysis = analyzer.analyze(tweets, ctx, kb,
-                                market_state=build_market_state(c, price))
+                                market_state=build_market_state(c, price,
+                                                                persist_ma=False))
     if not analysis:
         print("[Test-AI] AI 分析失败")
         return

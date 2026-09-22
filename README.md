@@ -100,6 +100,26 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 
 证据累积为正则支持 bullish→bear 的过渡，为负则支持 bearish→bull。空闲周期衰减（每日 -0.01）。
 
+### 移动均线结构（每轮评审锚点）
+
+每轮 AI 评审前，引擎从 4h 归档重采样日线收盘，计算 5/10/20 EMA + 50/100/200/250 SMA，
+向 AI 提供价格所在区间、趋势斜率与近期均线事件（穿越/金叉死叉/斜率翻转），并写入
+`data/ma_history.jsonl` 按日去重的历史快照——AI 因此能看到"上次评审区间 → 本次变化"的演化，
+而非孤立快照。均线仅辅助判断周期位置是否与价格结构一致，不构成短期交易信号。
+
+| 均线 | 语义 |
+|---|---|
+| 5 EMA | ⚡动能 |
+| 10 EMA | 🔍短期趋势 |
+| 20 EMA | 🎯均值回归 |
+| 50 SMA | 🛡️强劲上升趋势支撑 |
+| 100 SMA | 📉回调买入警报 |
+| 200 SMA | 🔄趋势转变 |
+| 250 SMA | 💰公允价值 |
+
+区间档位：强势多头区 / 上升趋势回调区 / 趋势转变观察区 / 转弱/反抽区 / 空头区。
+配置见 `config.json` → `ma_context`（归档路径、均线周期、斜率阈值、事件窗口、历史保留条数）。
+
 ## 快速开始
 
 ### 安装
@@ -172,6 +192,7 @@ glassnode-engine/
 │   ├── fetcher.py                 # RSS 多源 + snscrape 批量 + 文件导入
 │   ├── analyzer.py                # DeepSeek API (system prompt + JSON 修复)
 │   ├── alpha_engine.py            # Regime 状态机 + 证据累积 + α 平滑
+│   ├── ma_context.py              # 日线均线结构 (区间/趋势/事件 + 历史快照)
 │   ├── state_manager.py           # state.json 持久化 + 脏写合批
 │   ├── memory.py                  # 双存储 (memory.md + metrics + alpha_history)
 │   ├── knowledge.py               # 蒸馏/漂移检测/预测审计
@@ -189,6 +210,7 @@ glassnode-engine/
     ├── knowledge_base.md          # 自进化知识库
     ├── drift_log.jsonl            # 漂移追踪
     ├── prediction_log.jsonl       # 预测日志
+    ├── ma_history.jsonl           # 日线均线快照历史 (按日去重, 跨轮连续性)
     ├── calibration_log.jsonl      # 校准审计
     └── orders/                    # 交易指令输出 (默认关闭)
 ```

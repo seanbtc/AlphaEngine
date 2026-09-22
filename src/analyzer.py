@@ -55,6 +55,15 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
   市场过程，且必须是周期级证据而非短期噪音。
 - 不确定时默认不动：保持当前位置 + progress 微调。
 
+## 移动均线结构 (辅助参考, 不构成短期交易信号)
+
+每轮评审锚点会给出日线均线结构 (价格相对位置/距离/斜率/区间/近期事件), 备忘单语义:
+- 5 EMA ⚡动能 | 10 EMA 🔍短期趋势 | 20 EMA 🎯均值回归
+- 50 SMA 🛡️强劲上升趋势支撑 | 100 SMA 📉回调买入警报 | 200 SMA 🔄趋势转变 | 250 SMA 💰公允价值
+
+均线用于辅助判断周期位置是否与价格结构一致, 不构成短期交易信号;
+若价格结构与周期位置明显背离 (如 BEAR 但价格在 200SMA 上方), 需在 regime_evidence 中说明。
+
 ## 仓位纪律 (确认即定位, 跨零线先平仓)
 
 仓位管理与 alpha 引擎联动, 遵循"状态感知"原则:
@@ -492,9 +501,72 @@ class Analyzer:
             parts.append(f"- 近30天价格变化: {market_state['price_change_30d']:+.2f}%")
         if market_state.get("last_change_at"):
             parts.append(f"- 上次状态变更: {market_state['last_change_at']}")
-        if not parts:
+        text = ""
+        if parts:
+            text = ("## 当前引擎状态 (锚点, 请基于此连续性判断)\n"
+                    + "\n".join(parts) + "\n")
+        return text + self._format_ma_context(market_state.get("ma_context"))
+
+    @staticmethod
+    def _fmt_k(value) -> str:
+        """价格/均线值紧凑格式: 81234.5 → 81.2k."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "?"
+        if abs(number) >= 1000:
+            return f"{number / 1000:.1f}k"
+        return f"{number:.4g}"
+
+    def _format_ma_context(self, ma_context: dict | None) -> str:
+        """渲染日线均线结构段 (辅助判断价格区间与趋势)."""
+        if not ma_context:
             return ""
-        return "## 当前引擎状态 (锚点, 请基于此连续性判断)\n" + "\n".join(parts) + "\n"
+        snapshot = ma_context.get("snapshot") or {}
+        mas = snapshot.get("mas") or {}
+        ma_bits = []
+        for key, item in mas.items():
+            slope = item.get("slope") or "na"
+            ma_bits.append(
+                f"{item.get('label', key)} {self._fmt_k(item.get('value'))}"
+                f"({item.get('pos', '?')},{float(item.get('dist_pct') or 0.0):+.1f}%,{slope})")
+        price = snapshot.get("price")
+        price_text = f"{float(price):,.0f}" if price is not None else "?"
+        lines = ["## 移动均线结构 (日线, 辅助判断区间与趋势)"]
+        lines.append(f"- 价格: {price_text}"
+                     + (f" | {' | '.join(ma_bits)}" if ma_bits else ""))
+
+        zone_line = f"- 当前区间: {snapshot.get('zone') or '?'}"
+        as_of = ma_context.get("as_of") or snapshot.get("as_of")
+        if as_of:
+            zone_line += f" (截至 {as_of})"
+        label = snapshot.get("long_ma_label") or "200SMA"
+        dist_long = snapshot.get("dist_long_pct")
+        if dist_long is not None:
+            zone_line += f" | 距{label} {float(dist_long):+.1f}%"
+        days30 = snapshot.get("days_above_long_30d")
+        if days30 is not None:
+            zone_line += f" | 近30日站上{label} {days30} 天"
+        lines.append(zone_line)
+
+        events = ma_context.get("events") or []
+        if events:
+            event_text = "；".join(
+                f"{str(e.get('date', ''))[5:]} {e.get('text', '')}".strip()
+                for e in events)
+        else:
+            event_text = "无"
+        lines.append(f"- 近期事件: {event_text}")
+
+        last_zone = ma_context.get("last_zone")
+        if last_zone:
+            last_line = f"- 上次评审区间: {last_zone}"
+            if ma_context.get("last_as_of"):
+                last_line += f" ({str(ma_context['last_as_of'])[5:]})"
+            if ma_context.get("zone_changed") and ma_context.get("zone_change_reason"):
+                last_line += f" → 变更原因: {ma_context['zone_change_reason']}"
+            lines.append(last_line)
+        return "\n".join(lines) + "\n"
 
     def analyze(self, new_tweets: list[dict], memory_context: str,
                 knowledge_base: str = "", retries: int = 1,

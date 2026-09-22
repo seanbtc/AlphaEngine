@@ -126,6 +126,27 @@
     "min_cycles_before_review": 20
   },
 
+  "ma_context": {
+    "_note": "日线均线结构 (辅助 AI 判断价格区间/趋势, 不构成短期交易信号)。data_file 为 4h 归档 (缺失时按 data_file_fallbacks 回退); history_file 按日去重保存快照 (跨轮连续性); periods 均线周期; slope_lookback/slope_flat_pct 斜率比较天数与走平阈值(%); events_lookback/max_events 事件检测窗口与上限; history_keep 历史保留条数; zone_thresholds 区间档位判定所用均线 (long_trend=200SMA, fair_value=250SMA, mid_term=100SMA)",
+    "enabled": true,
+    "data_file": "backtest/backtest_data_BTCUSDT_4h_daily_20191231.csv.gz",
+    "data_file_fallbacks": [
+      "../BStrategy/backtest/backtest_data_BTCUSDT_4h_daily_20191231.csv.gz"
+    ],
+    "history_file": "data/ma_history.jsonl",
+    "periods": {"ema": [5, 10, 20], "sma": [50, 100, 200, 250]},
+    "slope_lookback": 5,
+    "slope_flat_pct": 0.2,
+    "events_lookback": 5,
+    "max_events": 5,
+    "history_keep": 400,
+    "zone_thresholds": {
+      "long_trend": "sma200",
+      "fair_value": "sma250",
+      "mid_term": "sma100"
+    }
+  },
+
   "dingtalk": {
     "enabled": true,
     "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=63e160c26acc3dfe3e55be8a86f1a8aa5af3fc8f17b839b7de1af2a2a7b12af8",
