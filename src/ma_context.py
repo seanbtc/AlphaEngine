@@ -1,18 +1,21 @@
 """移动平均线区间/趋势上下文 (日线) — 辅助 AI 判断周期位置与价格结构是否一致.
 
 数据流:
-    4h 归档 CSV(.gz) → 日线收盘 (UTC 当日最后一根) → 5/10/20 EMA + 50/100/200/250 SMA
+    DataFeed 服务 /klines (1d, Binance U 本位) → 日线收盘 → 5/10/20 EMA + 50/100/200/250 SMA
     → 区间标签 / 穿越事件 / 历史统计 → 按日去重的 JSONL 记忆 (跨轮连续性)
+
+DataFeed 不可用 (ok=false / stale=true / 数据不足) → 不输出均线段并打印错误日志,
+不回退读取本地归档 (用户决策: 宁缺毋滥)。
 
 备忘单语义 (写入 prompt): 5 EMA ⚡动能 | 10 EMA 🔍短期趋势 | 20 EMA 🎯均值回归 |
 50 SMA 🛡️强劲上升趋势支撑 | 100 SMA 📉回调买入警报 | 200 SMA 🔄趋势转变 | 250 SMA 💰公允价值
 
-本模块只读归档/纯计算, 失败返回空值, 不抛异常阻塞主流程。
+本模块只通过注入的 DataFeed 客户端取数 + 纯计算, 失败返回空值, 不抛异常阻塞主流程。
 """
-import csv
-import gzip
 import json
 import os
+import time
+from datetime import datetime, timezone
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,13 +34,13 @@ _DEFAULT_PERIODS = {"ema": [5, 10, 20], "sma": [50, 100, 200, 250]}
 _DEFAULT_ZONE_THRESHOLDS = {"long_trend": "sma200", "fair_value": "sma250",
                             "mid_term": "sma100"}
 
-_CLOSES_CACHE = {}
+_KLINE_CACHE = {}
 _CONTEXT_CACHE = {"key": None, "value": None}
 
 
 def clear_cache():
-    """清空归档/上下文缓存 (测试与手工刷新用)."""
-    _CLOSES_CACHE.clear()
+    """清空 K 线/上下文缓存 (测试与手工刷新用)."""
+    _KLINE_CACHE.clear()
     _CONTEXT_CACHE["key"] = None
     _CONTEXT_CACHE["value"] = None
 
@@ -278,34 +281,41 @@ def compute_ma_snapshot(series, cfg=None, as_of=None):
     }
 
 
-def load_daily_closes(data_file):
-    """读取 4h 归档 (CSV 或 .gz CSV) → [(YYYY-MM-DD, close), ...] 升序.
+def load_daily_closes(client, interval="1d", limit=None):
+    """经 DataFeed 客户端取日线 K 线 → ([(YYYY-MM-DD, close), ...], info).
 
-    按 UTC 日期重采样, 取当日时间戳最后一根的 close; 失败返回 []。
+    info = {ok, stale, error, source}; DataFeed 不可用/空数据时 series=[]。
+    同一 UTC 日期多根时取时间戳最后一根 close, 输出按日期升序。
     """
-    if not data_file or not os.path.exists(data_file):
-        return []
-    opener = gzip.open if str(data_file).endswith(".gz") else open
+    result = client.get_klines(interval=interval, limit=limit) if client else None
+    if not result:
+        return [], {"ok": False, "stale": False, "error": "无响应", "source": ""}
+    info = {
+        "ok": bool(result.get("ok")),
+        "stale": bool(result.get("stale")),
+        "error": result.get("error"),
+        "source": result.get("source") or "",
+    }
+    if not info["ok"] or info["stale"]:
+        return [], info
+
     daily = {}
-    try:
-        with opener(data_file, "rt", encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                timestamp = (row.get("timestamp") or "").strip()
-                close_raw = row.get("close")
-                if not timestamp or close_raw in (None, ""):
-                    continue
-                try:
-                    close = float(close_raw)
-                except (TypeError, ValueError):
-                    continue
-                date = timestamp[:10]
-                previous = daily.get(date)
-                if previous is None or timestamp >= previous[0]:
-                    daily[date] = (timestamp, close)
-    except (OSError, EOFError, UnicodeDecodeError) as exc:
-        print(f"[MA] 归档读取失败 ({data_file}): {exc}")
-        return []
-    return [(date, daily[date][1]) for date in sorted(daily)]
+    for bar in result.get("bars") or []:
+        open_time = bar.get("open_time")
+        close_raw = bar.get("close")
+        if open_time in (None, "") or close_raw in (None, ""):
+            continue
+        try:
+            timestamp_ms = int(open_time)
+            close = float(close_raw)
+        except (TypeError, ValueError):
+            continue
+        date = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc) \
+            .strftime("%Y-%m-%d")
+        previous = daily.get(date)
+        if previous is None or timestamp_ms >= previous[0]:
+            daily[date] = (timestamp_ms, close)
+    return [(date, daily[date][1]) for date in sorted(daily)], info
 
 
 def load_history(history_file):
@@ -351,41 +361,29 @@ def update_history(history_file, snapshot, keep=400):
     return entries
 
 
-def _resolve_data_file(cfg, override=None):
-    candidates = [override, cfg.get("data_file")]
-    candidates.extend(cfg.get("data_file_fallbacks") or [])
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = candidate if os.path.isabs(candidate) \
-            else os.path.join(_PROJECT_ROOT, candidate)
-        path = os.path.normpath(path)
-        if os.path.exists(path):
-            return path
-    return None
-
-
 def _resolve_history_file(cfg, override=None):
     raw = override or cfg.get("history_file") or "data/ma_history.jsonl"
     return raw if os.path.isabs(raw) \
         else os.path.normpath(os.path.join(_PROJECT_ROOT, raw))
 
 
-def _cached_closes(path):
-    try:
-        stat = os.stat(path)
-        key = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        return []
-    cached = _CLOSES_CACHE.get(path)
-    if cached and cached[0] == key:
-        return cached[1]
-    series = load_daily_closes(path)
-    if series:
-        _CLOSES_CACHE[path] = (key, series)
-        if len(_CLOSES_CACHE) > 8:
-            _CLOSES_CACHE.pop(next(iter(_CLOSES_CACHE)))
-    return series
+def _get_daily_series(client, cfg):
+    """取日线序列 (TTL 缓存, 避免一轮内重复请求); 返回 (series, info)."""
+    interval = str(cfg.get("interval") or "1d")
+    limit = int(cfg.get("kline_limit", 400) or 400)
+    ttl = float(cfg.get("cache_ttl_seconds", 300) or 0)
+    key = (getattr(client, "endpoint", ""), getattr(client, "symbol", ""),
+           interval, limit)
+    now = time.monotonic()
+    cached = _KLINE_CACHE.get(key)
+    if cached and ttl > 0 and (now - cached[0]) <= ttl:
+        return cached[1], cached[2]
+    series, info = load_daily_closes(client, interval=interval, limit=limit)
+    if ttl > 0:
+        _KLINE_CACHE[key] = (now, series, info)
+        if len(_KLINE_CACHE) > 8:
+            _KLINE_CACHE.pop(next(iter(_KLINE_CACHE)))
+    return series, info
 
 
 def _history_digest(entry):
@@ -397,30 +395,41 @@ def _history_digest(entry):
     }
 
 
-def build_ma_context(cfg=None, as_of=None, data_file=None, history_file=None,
+def build_ma_context(cfg=None, client=None, as_of=None, history_file=None,
                      persist=True):
     """组装均线上下文: 最新快照 + 近期事件 + 历史统计 + 最近 3 条历史摘要.
 
-    persist=False 时只读历史 (不写 JSONL), 供 --test-ai / 回溯等路径使用;
-    归档缺失/数据不足返回 None, 不抛异常 (调用方跳过即可)。
+    数据来自注入的 DataFeed 客户端 (不回退本地归档);
+    DataFeed 不可用 / stale / 数据不足 → 返回 None 并打印错误日志;
+    persist=False 时只读历史 (不写 JSONL), 供 --test-ai / 回溯等路径使用。
     """
     cfg = cfg or {}
-    path = _resolve_data_file(cfg, data_file)
-    if not path:
-        print("[MA] 未找到 4h 归档, 跳过均线上下文")
+    if client is None:
+        print("[MA] DataFeed 客户端未注入, 跳过均线上下文")
         return None
-    series = _cached_closes(path)
-    if not series:
-        print(f"[MA] 日线数据为空: {path}")
-        return None
-    history_file = _resolve_history_file(cfg, history_file)
     try:
-        stat = os.stat(path)
-        cache_key = (path, stat.st_mtime_ns, stat.st_size,
-                     str(as_of or ""), history_file, bool(persist))
-    except OSError:
-        cache_key = None
-    if cache_key is not None and _CONTEXT_CACHE["key"] == cache_key:
+        series, info = _get_daily_series(client, cfg)
+    except Exception as exc:
+        print(f"[MA] DataFeed 取数异常: {exc}")
+        return None
+    if not info.get("ok"):
+        print(f"[MA] DataFeed 不可用 ({info.get('error') or 'ok=false'}), 跳过均线上下文")
+        return None
+    if info.get("stale"):
+        print(f"[MA] DataFeed 数据 stale (source={info.get('source') or '?'}), 跳过均线上下文")
+        return None
+    if not series:
+        print("[MA] DataFeed 返回空 bars, 跳过均线上下文")
+        return None
+
+    history_file = _resolve_history_file(cfg, history_file)
+    interval = str(cfg.get("interval") or "1d")
+    limit = int(cfg.get("kline_limit", 400) or 400)
+    freshness = (series[-1][0], series[-1][1], len(series))
+    cache_key = (getattr(client, "endpoint", ""), getattr(client, "symbol", ""),
+                 interval, limit, str(as_of or ""), history_file, bool(persist),
+                 info.get("source"), bool(info.get("stale")), freshness)
+    if _CONTEXT_CACHE["key"] == cache_key:
         return _CONTEXT_CACHE["value"]
 
     if as_of:
@@ -441,6 +450,7 @@ def build_ma_context(cfg=None, as_of=None, data_file=None, history_file=None,
     zone_changed = bool(last and last.get("zone") != snapshot.get("zone"))
     context = {
         "as_of": snapshot.get("as_of", ""),
+        "source": "datafeed",
         "snapshot": snapshot,
         "events": events,
         "stats": {
@@ -456,7 +466,6 @@ def build_ma_context(cfg=None, as_of=None, data_file=None, history_file=None,
         "zone_change_reason": events[0].get("text", "") if (zone_changed and events) else "",
         "recent_history": [_history_digest(e) for e in prior[-3:]][::-1],
     }
-    if cache_key is not None:
-        _CONTEXT_CACHE["key"] = cache_key
-        _CONTEXT_CACHE["value"] = context
+    _CONTEXT_CACHE["key"] = cache_key
+    _CONTEXT_CACHE["value"] = context
     return context

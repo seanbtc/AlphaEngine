@@ -102,10 +102,14 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 
 ### 移动均线结构（每轮评审锚点）
 
-每轮 AI 评审前，引擎从 4h 归档重采样日线收盘，计算 5/10/20 EMA + 50/100/200/250 SMA，
-向 AI 提供价格所在区间、趋势斜率与近期均线事件（穿越/金叉死叉/斜率翻转），并写入
-`data/ma_history.jsonl` 按日去重的历史快照——AI 因此能看到"上次评审区间 → 本次变化"的演化，
-而非孤立快照。均线仅辅助判断周期位置是否与价格结构一致，不构成短期交易信号。
+每轮 AI 评审前，引擎经 DataFeed 服务取日线 K 线（`GET /klines?symbol=BTCUSDT&interval=1d`，
+Binance U 本位口径），计算 5/10/20 EMA + 50/100/200/250 SMA，向 AI 提供价格所在区间、
+趋势斜率与近期均线事件（穿越/金叉死叉/斜率翻转），并写入 `data/ma_history.jsonl`
+按日去重的历史快照——AI 因此能看到"上次评审区间 → 本次变化"的演化，而非孤立快照。
+均线仅辅助判断周期位置是否与价格结构一致，不构成短期交易信号。
+
+数据源**不回退本地归档**：DataFeed 不可用（`ok=false`/异常）或 `stale=true` 时，
+均线段整体缺省并打印 `[MA]` 错误日志，主流程继续。
 
 | 均线 | 语义 |
 |---|---|
@@ -304,16 +308,22 @@ AI 自动运行：
  "direction":"long","size_pct":50.0,"btc_price":64600,"action":"adjust"}
 ```
 
-## 接入 DataFeed (BTC 价格)
+## 接入 DataFeed (BTC 价格 / K 线)
 
 ```json
 "datafeed": {
     "enabled": true,
-    "endpoint": "http://localhost:8080/api/btc/price"
+    "endpoint": "http://127.0.0.1:9550",
+    "symbol": "BTC/USDT",
+    "timeout_seconds": 10,
+    "strict_stale_price": false
 }
 ```
 
-端点应返回 `{"price": 64600.0}` 或 `{"last": 64600}` 或 `{"close": 64600}`。
+`endpoint` 为 DataFeed 服务基址：
+
+- `GET /price?symbol=BTCUSDT` → `{ok, price, ts, stale, source, error}`（`stale=true` 默认仍采用并告警，`strict_stale_price=true` 则视为不可用）
+- `GET /klines?symbol=BTCUSDT&interval=1d&limit=N` → `{ok, stale, error, source, bars:[...]}`（均线结构用）
 
 ## 配置调优
 

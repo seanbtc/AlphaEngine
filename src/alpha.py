@@ -177,7 +177,8 @@ def build_market_state(components: dict, price: float = None,
     ma_cfg = (components.get("cfg") or {}).get("ma_context") or {}
     if ma_cfg.get("enabled", False):
         try:
-            ma_context = build_ma_context(ma_cfg, persist=persist_ma)
+            ma_context = build_ma_context(ma_cfg, client=components.get("datafeed"),
+                                          persist=persist_ma)
             if ma_context:
                 state["ma_context"] = ma_context
         except Exception as exc:

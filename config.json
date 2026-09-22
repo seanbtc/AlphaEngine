@@ -98,12 +98,13 @@
   },
 
   "datafeed": {
-    "_note": "BTC 价格数据来源。通过 DataFeed 接口获取。",
+    "_note": "DataFeed 服务基址 (本机服务, 默认 9550)。实时价走 GET /price?symbol=BTCUSDT; 日线均线走上 GET /klines?symbol=BTCUSDT&interval=1d&limit=N (Binance U 本位)。strict_stale_price=true 时 stale 价格视为不可用 (默认仍采用并告警)。",
     "enabled": true,
     "mode": "http",
-    "endpoint": "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+    "endpoint": "http://127.0.0.1:9550",
     "symbol": "BTC/USDT",
-    "timeout_seconds": 10
+    "timeout_seconds": 10,
+    "strict_stale_price": false
   },
 
   "paths": {
@@ -127,13 +128,12 @@
   },
 
   "ma_context": {
-    "_note": "日线均线结构 (辅助 AI 判断价格区间/趋势, 不构成短期交易信号)。data_file 为 4h 归档 (缺失时按 data_file_fallbacks 回退); history_file 按日去重保存快照 (跨轮连续性); periods 均线周期; slope_lookback/slope_flat_pct 斜率比较天数与走平阈值(%); events_lookback/max_events 事件检测窗口与上限; history_keep 历史保留条数; zone_thresholds 区间档位判定所用均线 (long_trend=200SMA, fair_value=250SMA, mid_term=100SMA)",
+    "_note": "日线均线结构 (辅助 AI 判断价格区间/趋势, 不构成短期交易信号)。数据来自 DataFeed /klines (不回退本地归档; 不可用/stale 则该段缺省并报错)。interval/kline_limit 为请求参数; cache_ttl_seconds 为取数缓存秒数; history_file 按日去重保存快照 (跨轮连续性); periods 均线周期; slope_lookback/slope_flat_pct 斜率比较天数与走平阈值(%); events_lookback/max_events 事件检测窗口与上限; history_keep 历史保留条数; zone_thresholds 区间档位判定所用均线 (long_trend=200SMA, fair_value=250SMA, mid_term=100SMA)",
     "enabled": true,
-    "data_file": "backtest/backtest_data_BTCUSDT_4h_daily_20191231.csv.gz",
-    "data_file_fallbacks": [
-      "../BStrategy/backtest/backtest_data_BTCUSDT_4h_daily_20191231.csv.gz"
-    ],
     "history_file": "data/ma_history.jsonl",
+    "interval": "1d",
+    "kline_limit": 400,
+    "cache_ttl_seconds": 300,
     "periods": {"ema": [5, 10, 20], "sma": [50, 100, 200, 250]},
     "slope_lookback": 5,
     "slope_flat_pct": 0.2,

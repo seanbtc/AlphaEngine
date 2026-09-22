@@ -532,8 +532,10 @@ class Analyzer:
                 f"({item.get('pos', '?')},{float(item.get('dist_pct') or 0.0):+.1f}%,{slope})")
         price = snapshot.get("price")
         price_text = f"{float(price):,.0f}" if price is not None else "?"
+        source = ma_context.get("source")
         lines = ["## 移动均线结构 (日线, 辅助判断区间与趋势)"]
-        lines.append(f"- 价格: {price_text}"
+        prefix = f"数据源: {source} | " if source else ""
+        lines.append(f"- {prefix}价格: {price_text}"
                      + (f" | {' | '.join(ma_bits)}" if ma_bits else ""))
 
         zone_line = f"- 当前区间: {snapshot.get('zone') or '?'}"
