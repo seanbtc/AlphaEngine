@@ -20,7 +20,7 @@ from src.fetcher import Fetcher
 from src.analyzer import Analyzer
 from src.alpha_engine import AlphaEngine, EvidenceAccumulator, REGIME_TRANSITIONS
 from src.knowledge import Knowledge
-from src.ma_context import build_ma_context
+from src.ma_context import build_ma_context, summarize_ma_context
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
@@ -184,6 +184,17 @@ def build_market_state(components: dict, price: float = None,
         except Exception as exc:
             print(f"[MA] 均线上下文构建失败 (不影响本轮): {exc}")
     return state
+
+
+def _record_ma_state(sm, market_state: dict) -> dict:
+    """把均线摘要写入 state["ma"] (与 regime/alpha 同一保存点落盘).
+
+    摘要来自本轮 build_market_state 的 ma_context; 无上下文时 available=false。
+    """
+    summary = summarize_ma_context((market_state or {}).get("ma_context"))
+    summary["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    sm.set("ma", summary)
+    return summary
 
 
 def run_backfill(components: dict, force: bool = False) -> bool:
@@ -644,8 +655,9 @@ def run_cycle(components: dict) -> bool:
         print("\n--- Analyze ---")
         kb = knowledge.load_knowledge_base()
         ctx = memory.get_context_for_ai()
-        analysis = analyzer.analyze(new_tweets, ctx, kb,
-                                    market_state=build_market_state(c, btc_price))
+        market_state = build_market_state(c, btc_price)
+        _record_ma_state(sm, market_state)
+        analysis = analyzer.analyze(new_tweets, ctx, kb, market_state=market_state)
 
         if analysis:
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
@@ -738,6 +750,17 @@ def run_cycle(components: dict) -> bool:
                 "note": "时间推进: 无推文时按4年周期推进alpha",
             })
             dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price, target)
+
+        # 空闲周期也刷新 K 线趋势摘要 (Web 展示用): 只读历史不写 ma_history,
+        # DataFeed 不可用/异常不阻塞 alpha 时间推进.
+        try:
+            ma_summary = _record_ma_state(
+                sm, build_market_state(c, btc_price, persist_ma=False))
+            if ma_summary.get("available"):
+                print(f"  MA 趋势: {ma_summary.get('zone')} "
+                      f"(截至 {ma_summary.get('as_of')})")
+        except Exception as exc:
+            print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
         sm.update_runtime()
         sm.save()

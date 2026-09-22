@@ -14,8 +14,9 @@ if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
 from src import ma_context  # noqa: E402
-from src.alpha import _run_test_ai, build_market_state  # noqa: E402
-from src.alpha_engine import AlphaEngine  # noqa: E402
+from src.alpha import (_record_ma_state, _run_test_ai, build_market_state,  # noqa: E402
+                       run_cycle)
+from src.alpha_engine import AlphaEngine, EvidenceAccumulator  # noqa: E402
 from src.analyzer import SYSTEM_PROMPT, Analyzer  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
 
@@ -575,3 +576,338 @@ def test_test_ai_path_does_not_create_ma_history(tmp_path):
     _run_test_ai(_test_ai_components(tmp_path, datafeed, str(history_file)))
 
     assert not history_file.exists()
+
+
+def test_test_ai_path_does_not_write_state(tmp_path):
+    datafeed = _FakeDataFeed(result=_klines_result(_rising_prices(300)))
+    history_file = tmp_path / "ma_history.jsonl"
+    components = _test_ai_components(tmp_path, datafeed, str(history_file))
+    components["state"].save(force=True)
+    state_file = tmp_path / "state.json"
+    before = state_file.read_text(encoding="utf-8")
+
+    _run_test_ai(components)
+
+    assert state_file.read_text(encoding="utf-8") == before
+    assert "ma" not in json.loads(state_file.read_text(encoding="utf-8"))
+
+
+# ---- summarize_ma_context: Web 展示用摘要 ----
+
+def test_summarize_ma_context_available():
+    assert ma_context.summarize_ma_context(_sample_ma_context()) == {
+        "available": True, "as_of": "2026-09-17",
+        "zone": "上升趋势回调区", "price": 76401.8,
+    }
+
+
+@pytest.mark.parametrize("ctx", [None, {}, [], "bad", 3])
+def test_summarize_ma_context_unavailable(ctx):
+    assert ma_context.summarize_ma_context(ctx) == {
+        "available": False, "as_of": None, "zone": None, "price": None}
+
+
+def test_summarize_ma_context_missing_zone_and_as_of_fallback():
+    summary = ma_context.summarize_ma_context({"snapshot": {"price": "100.5"}})
+    assert summary == {"available": True, "as_of": None, "zone": None,
+                       "price": 100.5}
+
+    summary = ma_context.summarize_ma_context(
+        {"as_of": "2026-09-20", "snapshot": {"zone": "空头区", "price": None}})
+    assert summary == {"available": True, "as_of": "2026-09-20",
+                       "zone": "空头区", "price": None}
+
+
+def test_summarize_ma_context_bad_snapshot_types():
+    summary = ma_context.summarize_ma_context(
+        {"as_of": "2026-09-20", "snapshot": "bad"})
+    assert summary["available"] is True
+    assert summary["zone"] is None and summary["price"] is None
+
+    summary = ma_context.summarize_ma_context(
+        {"snapshot": {"zone": "空头区", "price": "not-a-number"}})
+    assert summary["zone"] == "空头区" and summary["price"] is None
+
+
+# ---- state["ma"] 写入 / 旧 state 兼容 ----
+
+class _FakeStateManager:
+    def __init__(self):
+        self.state = {}
+        self.saved = 0
+
+    def set(self, path, value):
+        self.state[path] = value
+
+    def save(self):
+        self.saved += 1
+
+
+def test_record_ma_state_with_fake_state_manager():
+    sm = _FakeStateManager()
+
+    summary = _record_ma_state(sm, {"ma_context": _sample_ma_context()})
+
+    assert sm.state["ma"] == summary
+    assert summary["available"] is True
+    assert summary["zone"] == "上升趋势回调区"
+    assert summary["as_of"] == "2026-09-17"
+    assert summary["price"] == pytest.approx(76401.8)
+    assert summary["updated_at"].endswith("Z")
+
+
+def test_record_ma_state_without_context_marks_unavailable():
+    sm = _FakeStateManager()
+
+    summary = _record_ma_state(sm, {})
+
+    assert sm.state["ma"] == summary
+    assert summary["available"] is False
+    assert summary["as_of"] is None
+    assert summary["zone"] is None
+    assert summary["price"] is None
+    assert summary["updated_at"].endswith("Z")
+
+
+def test_record_ma_state_legacy_state_without_ma_key(tmp_path):
+    legacy = {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "regime": {"current": "BULL", "started_at": "2026-01-01T00:00:00Z",
+                   "entered_from": "RECOVERY", "cooldown_remaining": 0,
+                   "stability_counter": 0, "last_changed_at": "2026-01-01T00:00:00Z"},
+        "alpha": {"current": 0.42, "target": 0.5, "regime_progress": 0.5,
+                  "deferred_build": False, "transition_progress": 1.0,
+                  "last_change_at": "2026-01-01T00:00:00Z", "locked": False,
+                  "lock_reason": ""},
+        "runtime": {"analysis_count": 7},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(legacy), encoding="utf-8")
+    sm = StateManager(str(tmp_path), "state.json")
+    sm.load()
+
+    _record_ma_state(sm, {"ma_context": _sample_ma_context()})
+    sm.save()
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["ma"]["zone"] == "上升趋势回调区"
+    assert persisted["ma"]["updated_at"].endswith("Z")
+    assert persisted["regime"]["current"] == "BULL"
+    assert persisted["alpha"]["current"] == 0.42
+    assert persisted["runtime"]["analysis_count"] == 7
+
+
+# ---- run_cycle: 正常分析周期落盘 state["ma"] ----
+
+class _CycleMemory:
+    def get_context_for_ai(self):
+        return ""
+
+    def append_alpha(self, record):
+        pass
+
+    def append_entry(self, text):
+        pass
+
+    def add_metric(self, name, value):
+        pass
+
+
+class _CycleFetcher:
+    def fetch(self):
+        return [{"id": "1", "date": "2026-09-21T12:25:00",
+                 "url": "https://x.com/i/web/status/1", "content": "BTC"}]
+
+
+class _CycleAnalyzer:
+    def __init__(self, result):
+        self.result = result
+
+    def analyze(self, tweets, memory_context, knowledge_base="",
+                retries=1, market_state=None):
+        return self.result
+
+
+class _CycleKnowledge:
+    def load_knowledge_base(self):
+        return ""
+
+    def log_drift_meta(self, meta, cycle_position):
+        pass
+
+    def check_drift(self):
+        return []
+
+    def log_prediction(self, cycle_position, confidence, btc_price=None):
+        pass
+
+    def distill_due(self, state_manager, now=None):
+        return False
+
+
+class _CycleTradeSync:
+    def send_order(self, alpha, regime, price=None):
+        return None
+
+
+class _CycleDingTalk:
+    def regime_change(self, *args, **kwargs):
+        pass
+
+    def alpha_change(self, *args, **kwargs):
+        pass
+
+    def analysis(self, *args, **kwargs):
+        return ""
+
+    def alert(self, *args, **kwargs):
+        pass
+
+
+class _CycleReview:
+    def record_price(self, *args, **kwargs):
+        pass
+
+    def price_trend(self):
+        return {}
+
+    def should_review(self):
+        return False
+
+
+_CYCLE_ANALYSIS = {
+    "cycle_position": "RECOVERY",
+    "cycle_confidence": "high",
+    "regime_progress": 0.5,
+    "regime_evidence": "",
+    "summary": "ma state cycle",
+    "evidence_scores": {},
+    "signal_board": [],
+    "meta": {"analysis_quality": 8},
+}
+
+
+def _cycle_components(tmp_path, ma_cfg, datafeed):
+    sm = StateManager(str(tmp_path), "state.json")
+    sm.load()
+    sm.set("regime.current", "RECOVERY")
+    sm.set("alpha.current", 0.70)
+    engine = AlphaEngine({}, sm)
+    return {
+        "cfg": {"schedule": {"min_analysis_interval_hours": 0},
+                "ma_context": ma_cfg},
+        "memory": _CycleMemory(),
+        "state": sm,
+        "fetcher": _CycleFetcher(),
+        "analyzer": _CycleAnalyzer(_CYCLE_ANALYSIS),
+        "engine": engine,
+        "evidence": EvidenceAccumulator(sm, 0.02),
+        "knowledge": _CycleKnowledge(),
+        "tradesync": _CycleTradeSync(),
+        "datafeed": datafeed,
+        "dingtalk": _CycleDingTalk(),
+        "review": _CycleReview(),
+    }
+
+
+def test_run_cycle_persists_ma_state(tmp_path):
+    fake = _FakeDataFeed(result=_klines_result(_rising_prices(300)), price=None)
+    ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
+              "kline_limit": 400, "cache_ttl_seconds": 0}
+
+    run_cycle(_cycle_components(tmp_path, ma_cfg, fake))
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    ma_state = persisted["ma"]
+    assert ma_state["available"] is True
+    assert ma_state["zone"] == "强势多头区"
+    assert ma_state["as_of"] == _dates(300)[-1]
+    assert ma_state["price"] == pytest.approx(249.5, abs=0.01)
+    assert ma_state["updated_at"].endswith("Z")
+
+
+def test_run_cycle_persists_unavailable_ma_state(tmp_path):
+    fake = _FakeDataFeed(result=None, price=None)
+    ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
+              "kline_limit": 400, "cache_ttl_seconds": 0}
+
+    run_cycle(_cycle_components(tmp_path, ma_cfg, fake))
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["ma"]["available"] is False
+    assert persisted["ma"]["zone"] is None
+
+
+# ---- run_cycle: 空闲周期 (无新推文) 也刷新 state["ma"] ----
+
+class _IdleFetcher:
+    def fetch(self):
+        return []
+
+
+def _idle_components(tmp_path, ma_cfg, datafeed):
+    components = _cycle_components(tmp_path, ma_cfg, datafeed)
+    components["fetcher"] = _IdleFetcher()
+    return components
+
+
+def test_run_cycle_idle_refreshes_ma_state(tmp_path):
+    fake = _FakeDataFeed(result=_klines_result(_rising_prices(300)), price=None)
+    ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
+              "kline_limit": 400, "cache_ttl_seconds": 0}
+    components = _idle_components(tmp_path, ma_cfg, fake)
+    sm = components["state"]
+    sm.set("ma", {"available": True, "as_of": "2026-01-01", "zone": "空头区",
+                  "price": 100.0, "updated_at": "2026-01-01T00:00:00Z"})
+
+    run_cycle(components)
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    ma_state = persisted["ma"]
+    assert ma_state["as_of"] == _dates(300)[-1]      # 空闲周期刷新了截至日期
+    assert ma_state["zone"] == "强势多头区"
+    assert ma_state["price"] == pytest.approx(249.5, abs=0.01)
+    assert ma_state["updated_at"] != "2026-01-01T00:00:00Z"
+    # 只读刷新: 不写 ma_history, 不影响 alpha 时间推进
+    assert not (tmp_path / "h.jsonl").exists()
+    assert persisted["alpha"]["current"] > 0.70
+
+
+def test_run_cycle_idle_datafeed_exception_keeps_cycle(tmp_path, capsys):
+    fake = _FakeDataFeed(exc=RuntimeError("boom"), price=None)
+    ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
+              "kline_limit": 400, "cache_ttl_seconds": 0}
+    components = _idle_components(tmp_path, ma_cfg, fake)
+
+    run_cycle(components)  # 不抛
+
+    out = capsys.readouterr().out
+    assert "取数异常" in out
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["ma"]["available"] is False
+    assert persisted["ma"]["zone"] is None
+    assert persisted["ma"]["updated_at"].endswith("Z")
+    assert persisted["runtime"]["analysis_count"] >= 1
+    assert persisted["alpha"]["current"] > 0.70
+    assert not (tmp_path / "h.jsonl").exists()
+
+
+class _BrokenTrendReview(_CycleReview):
+    def price_trend(self):
+        raise RuntimeError("trend boom")
+
+
+def test_run_cycle_idle_build_failure_does_not_block(tmp_path, capsys):
+    fake = _FakeDataFeed(result=_klines_result(_rising_prices(300)), price=None)
+    ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
+              "kline_limit": 400, "cache_ttl_seconds": 0}
+    components = _idle_components(tmp_path, ma_cfg, fake)
+    components["review"] = _BrokenTrendReview()
+
+    run_cycle(components)  # build_market_state 异常也不阻塞
+
+    out = capsys.readouterr().out
+    assert "空闲周期均线摘要更新失败" in out
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert "ma" not in persisted
+    assert persisted["runtime"]["analysis_count"] >= 1

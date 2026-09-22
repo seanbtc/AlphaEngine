@@ -469,3 +469,24 @@ def build_ma_context(cfg=None, client=None, as_of=None, history_file=None,
     _CONTEXT_CACHE["key"] = cache_key
     _CONTEXT_CACHE["value"] = context
     return context
+
+
+def summarize_ma_context(ctx):
+    """从均线上下文提取 Web 展示用摘要; 无上下文 → available=False."""
+    if not isinstance(ctx, dict) or not ctx:
+        return {"available": False, "as_of": None, "zone": None, "price": None}
+    snapshot = ctx.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    as_of = ctx.get("as_of") or snapshot.get("as_of")
+    zone = snapshot.get("zone")
+    price = snapshot.get("price")
+    try:
+        price = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        price = None
+    return {
+        "available": True,
+        "as_of": str(as_of) if as_of else None,
+        "zone": str(zone) if zone else None,
+        "price": price,
+    }

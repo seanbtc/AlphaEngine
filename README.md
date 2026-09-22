@@ -124,6 +124,10 @@ Binance U 本位口径），计算 5/10/20 EMA + 50/100/200/250 SMA，向 AI 提
 区间档位：强势多头区 / 上升趋势回调区 / 趋势转变观察区 / 转弱/反抽区 / 空头区。
 配置见 `config.json` → `ma_context`（归档路径、均线周期、斜率阈值、事件窗口、历史保留条数）。
 
+每轮正常分析还会把 K 线趋势摘要（`available/as_of/zone/price` + `updated_at`）随
+regime/alpha 一起写入 `state.json` 的 `ma` 字段，供 Web 面板只读展示（`--test-ai`/回溯
+等只读路径不写）；Web 侧由 `Web/web.py::load_alpha_engine_ma` 读取。
+
 ## 快速开始
 
 ### 安装
@@ -206,7 +210,7 @@ glassnode-engine/
 │   └── run.py                     # 主入口 + 回溯 + 循环调度
 │
 └── data/                          # 运行时自动生成
-    ├── state.json                 # 持久状态 (regime, alpha, evidence, runtime)
+    ├── state.json                 # 持久状态 (regime, alpha, ma, evidence, runtime)
     ├── tweets.jsonl               # 推文存档 (JSONL)
     ├── memory.md                  # 叙事记忆
     ├── metrics.json               # 结构化指标
