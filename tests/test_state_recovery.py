@@ -2,6 +2,7 @@
 import json
 import shutil
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ _ALPHA_ROOT = Path(__file__).resolve().parents[1]
 if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
+from src.alpha_engine import AlphaEngine  # noqa: E402
 from src.memory import Memory  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
 
@@ -239,6 +241,53 @@ def test_rebuild_uses_passed_memory_object(tmp_path):
     assert state["regime"]["current"] == "BEAR_DEEP"
     assert state["alpha"]["current"] == pytest.approx(-0.25)
     assert state["alpha"]["target"] == pytest.approx(-0.3)
+
+
+# ---- WP8 8C 附带加固: alpha.regime_progress 非法/越界归一化 ----
+
+@pytest.mark.parametrize("bad,expected", [
+    ("bad", 0.5), (None, 0.5), (True, 0.5), (float("nan"), 0.5),
+    (1.5, 1.0), (-0.2, 0.0), ("1.5", 1.0), ("0.25", 0.25),
+])
+def test_dirty_regime_progress_normalized(tmp_path, bad, expected, capsys):
+    """非法/越界 progress → 归一化+告警 (不触发损坏恢复), tick_alpha 不抛错。"""
+    state = {
+        "version": 1,
+        "regime": {"current": "BEAR"},
+        "alpha": {"current": 0.0, "regime_progress": bad},
+        "runtime": {"last_tick_at": "2026-09-22T00:00:00Z"},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    sm = StateManager(str(tmp_path), "state.json")
+    loaded = sm.load()
+
+    assert loaded["alpha"]["regime_progress"] == pytest.approx(expected)
+    assert sm.get("alpha.regime_progress") == pytest.approx(expected)
+    out = capsys.readouterr().out
+    assert "告警" in out and "regime_progress" in out
+    assert sm.last_recovery is None
+    assert _corrupt_backups(tmp_path) == []
+    # 归一化值随下一次 save 落盘 (在 tick 改变 progress 之前校验)
+    sm.save(force=True)
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["alpha"]["regime_progress"] == pytest.approx(expected)
+    # 归一化后 tick_alpha 正常推进 (旧实现字符串会 TypeError)
+    engine = AlphaEngine({}, sm)
+    engine.tick_alpha(now=datetime(2026, 9, 23, 0, 0, 0))
+    assert 0.0 <= float(sm.get("alpha.regime_progress")) <= 1.0
+
+
+def test_valid_regime_progress_no_warning(tmp_path, capsys):
+    state = {
+        "version": 1,
+        "regime": {"current": "BEAR"},
+        "alpha": {"current": 0.0, "regime_progress": 0.5},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    sm = StateManager(str(tmp_path), "state.json")
+    assert sm.load()["alpha"]["regime_progress"] == 0.5
+    assert capsys.readouterr().out == ""
 
 
 # ---- 主入口告警接线 ----

@@ -23,9 +23,12 @@ from src.state_manager import StateManager
 from src.fetcher import Fetcher
 from src.analyzer import Analyzer
 from src.alpha_engine import (AlphaEngine, EvidenceAccumulator,
-                              REGIME_ALPHA_MAP, REGIME_TRANSITIONS)
+                              EXPECTED_DAYS_TOTAL, REGIME_ALPHA_MAP,
+                              REGIME_TRANSITIONS)
 from src.knowledge import Knowledge
 from src.ma_context import build_ma_context, summarize_ma_context
+from src.rhythm_gates import apply_rhythm_gates
+from src.shadow_ledger import ShadowLedger
 from src.pending_analysis import PendingAnalysis
 from src.cycle_context import build_cycle_context
 from src.tradesync import TradeSync
@@ -212,6 +215,8 @@ def init_components(cfg: dict):
     datafeed = DataFeed(cfg.get("datafeed", {}))
     review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine,
                           knowledge, evidence=evidence)
+    # WP8 8C 影子账本 (纯观察, 永不下单; enabled=false 时完全停用零开销)
+    shadow = ShadowLedger(cfg.get("alpha", {}), data_dir, engine, state_mgr)
 
     return {
         "cfg": cfg, "data_dir": data_dir,
@@ -221,6 +226,7 @@ def init_components(cfg: dict):
         "knowledge": knowledge, "tradesync": tradesync,
         "datafeed": datafeed, "dingtalk": dingtalk,
         "review": review, "pending": pending,
+        "shadow": shadow,
     }
 
 
@@ -238,6 +244,14 @@ def print_status(components: dict):
                  f"(since {outage.get('since', '?')})")
     engine = components.get("engine")
     if engine is not None:
+        try:
+            total_days = engine.expected_days_sum()
+            if total_days == EXPECTED_DAYS_TOTAL:
+                line += f" | RegimeDays={total_days}"
+            else:
+                line += f" | RegimeDays={total_days}(!目标{EXPECTED_DAYS_TOTAL})"
+        except Exception:
+            pass
         pending = engine.get_pending_proposal()
         if pending:
             line += (f" | Pending={pending.get('cp')}"
@@ -330,6 +344,49 @@ def _record_ma_state(sm, market_state: dict) -> dict:
     summary["updated_at"] = datetime.utcnow().isoformat() + "Z"
     sm.set("ma", summary)
     return summary
+
+
+def _apply_rhythm_gates_to_progress(components: dict, regime: str,
+                                    progress: float, market_state: dict) -> float:
+    """按 alpha.rhythm 配置对 progress 应用节奏门控 (默认全关 = 恒等).
+
+    纯函数 apply_rhythm_gates 的接线层: 打印门控原因, 仅在被调整时写回
+    state["alpha.regime_progress"]; 门控异常/数据缺失 → fail-open (返回原值),
+    不影响本轮推进。未配置 rhythm 段时直接返回原值 (零开销零行为变化)。
+    """
+    rhythm_cfg = ((components.get("cfg") or {}).get("alpha") or {}).get("rhythm")
+    if not isinstance(rhythm_cfg, dict) or not rhythm_cfg:
+        return progress
+    try:
+        gated, reasons = apply_rhythm_gates(regime, progress, market_state,
+                                            rhythm_cfg)
+    except Exception as exc:  # 失败隔离: 门控异常不影响本轮
+        print(f"[Rhythm] 门控异常 (fail-open, 不施加): {exc}")
+        return progress
+    for reason in reasons:
+        print(f"  [Rhythm] {reason}")
+    if gated != progress:
+        components["state"].set("alpha.regime_progress", gated)
+    return gated
+
+
+def _record_shadow_cycle(components: dict, btc_price, market_state, *,
+                         advance: bool, mode: str) -> None:
+    """WP8 8C: 轮末影子账记录 (纯观察, 失败只日志, 绝不阻断主流程).
+
+    advance=False 用于 outage 轮 (故障时长不计入镜像周期钟);
+    mode: "analysis" (分析轮) / "idle" (空闲轮) / "outage" (故障轮) —
+    仅影响换挡 deferred_build 的定位时机 (与引擎 step_alpha/tick_alpha 对齐)。
+    """
+    shadow = components.get("shadow")
+    if shadow is None:
+        return
+    try:
+        shadow.on_cycle(price=btc_price, market_state=market_state,
+                        advance=advance, mode=mode)
+    except Exception as exc:  # 隔离: 影子账本任何异常不影响主流程
+        print(f"[Shadow] 本轮记录失败 (不影响主流程): "
+              f"{type(exc).__name__}: {exc}")
 
 
 def run_backfill(components: dict, force: bool = False) -> bool:
@@ -1090,6 +1147,11 @@ def run_cycle(components: dict) -> bool:
 
             if ok and cp != current_regime:
                 alpha_before = engine.get_alpha()
+                # WP8 #2: 变更日不旁路门控 — 以**新 regime** 语境对将用于 target 的
+                # progress 应用节奏门控 (如 G1 熊侧: BULL_COOLING→BEAR 时 AI 0.9
+                # 压回 0.5 → target -0.65, 而非 execute_regime_change 直接定位 -0.37)
+                progress = _apply_rhythm_gates_to_progress(c, cp, progress,
+                                                           market_state)
                 new_regime = engine.execute_regime_change(cp, progress)
                 regime_changed_this_cycle = True
                 print(f"  [REGIME] {current_regime} → {new_regime}")
@@ -1135,10 +1197,21 @@ def run_cycle(components: dict) -> bool:
             _set_outage(c, "analysis_failed", detail)
             sm.update_runtime()
             sm.save()
+            # WP8 8C: outage 轮不推进镜像引擎 (仅刷新锚点, 故障时长不补记)
+            _record_shadow_cycle(c, btc_price, market_state,
+                                 advance=False, mode="outage")
             return False
 
     if idle_cycle:
         # 无新推文 (或全部被过滤跳过)
+        # WP8: 先构建市场上下文 (MA/周期, TTL 缓存复用, 与下方摘要同一份),
+        # 供节奏门控与 MA 摘要使用; 构建失败不影响推进/摘要既有语义 (仅日志).
+        idle_market_state = None
+        try:
+            idle_market_state = build_market_state(c, btc_price, persist_ma=False)
+        except Exception as exc:
+            print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
+
         if fetch_error:
             # 数据源故障: 视为数据缺失, 本轮不推进周期钟 (alpha/progress/cooldown/
             # stability/evidence 全部冻结), 价格/审计/MA 摘要与 state 保存照常
@@ -1153,6 +1226,11 @@ def run_cycle(components: dict) -> bool:
             if fetched_ok:
                 _clear_outage(c, "抓取成功 (无新推文)")
             old_alpha = engine.get_alpha()
+            # WP8 节奏门控: tick_alpha 前对 progress 应用 (默认全关 = 恒等);
+            # 原值传入 (不在此 float()): 脏 progress 由 _parse_progress fail-open 处理
+            _apply_rhythm_gates_to_progress(
+                c, engine.get_regime(),
+                sm.get("alpha.regime_progress", 0.5), idle_market_state)
             new_alpha, alpha_changed = engine.tick_alpha()
             evidence.decay_all()
             engine.tick_cooldown()
@@ -1175,15 +1253,15 @@ def run_cycle(components: dict) -> bool:
                                       btc_price, target)
 
         # 空闲周期也刷新 K 线趋势摘要 (Web 展示用): 只读历史不写 ma_history,
-        # DataFeed 不可用/异常不阻塞 alpha 时间推进.
-        try:
-            ma_summary = _record_ma_state(
-                sm, build_market_state(c, btc_price, persist_ma=False))
-            if ma_summary.get("available"):
-                print(f"  MA 趋势: {ma_summary.get('zone')} "
-                      f"(截至 {ma_summary.get('as_of')})")
-        except Exception as exc:
-            print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
+        # DataFeed 不可用/异常不阻塞 alpha 时间推进 (构建失败时跳过写入, 保持旧语义).
+        if idle_market_state is not None:
+            try:
+                ma_summary = _record_ma_state(sm, idle_market_state)
+                if ma_summary.get("available"):
+                    print(f"  MA 趋势: {ma_summary.get('zone')} "
+                          f"(截至 {ma_summary.get('as_of')})")
+            except Exception as exc:
+                print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
         # 发单一致性: 时间推进改 alpha 也要与 TradeSync 指令保持一致
         _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start,
@@ -1193,6 +1271,10 @@ def run_cycle(components: dict) -> bool:
             # 故障轮不计入分析计数, 仅保存状态 (outage/MA 摘要)
             sm.update_runtime()
         sm.save()
+        # WP8 8C: 空闲轮影子账 (fetch_error 轮不推进镜像引擎)
+        _record_shadow_cycle(c, btc_price, idle_market_state,
+                             advance=not fetch_error,
+                             mode=("outage" if fetch_error else "idle"))
         return False
 
     # 6.5 右侧纪律兜底: 仓位符号与周期方向侧冲突 → 先平仓, 本轮不再步进
@@ -1244,10 +1326,17 @@ def run_cycle(components: dict) -> bool:
         engine.tick_stability()
     elif conf == "low":
         order_reason = "low_confidence"
+        # WP8 #2: 低置信冻结 alpha 也不旁路门控 (按当前 regime 语境压回进度,
+        # 避免未确认进度跨轮残留; alpha 锁定语义不变)
+        progress = _apply_rhythm_gates_to_progress(
+            c, engine.get_regime(), progress, market_state)
         print(f"  Alpha: 保持不变 (置信度 low, 锁定)")
         engine.tick_cooldown()
         engine.tick_stability()
     else:
+        # WP8 节奏门控: step_alpha 前对 progress 应用 (默认全关 = 恒等)
+        progress = _apply_rhythm_gates_to_progress(
+            c, engine.get_regime(), progress, market_state)
         new_alpha, alpha_changed = engine.step_alpha()
         engine.tick_cooldown()
         engine.tick_stability()
@@ -1331,6 +1420,10 @@ def run_cycle(components: dict) -> bool:
     # 12. 保存状态
     sm.update_runtime()
     sm.save()
+
+    # WP8 8C: 分析轮影子账 (轮末记录, 纯观察)
+    _record_shadow_cycle(c, btc_price, market_state,
+                         advance=True, mode="analysis")
 
     return has_analysis
 
@@ -1533,6 +1626,13 @@ def main():
     if lock_mode:
         _acquire_lock_or_exit(cfg, lock_mode)
     c = init_components(cfg)
+    # 参数治理: 启动日志展示各 regime 预期天数合计 (含校准 overlay 后, 目标 1461)
+    try:
+        total = c["engine"].warn_if_expected_days_mismatch()
+        print(f"[Alpha] regime_expected_days 合计={total} "
+              f"(目标 {EXPECTED_DAYS_TOTAL})")
+    except Exception as exc:
+        print(f"[Alpha] 预期天数合计读取失败 (不影响启动): {exc}")
 
     if test_ai_urls:
         _run_test_ai(c, urls_only=True)

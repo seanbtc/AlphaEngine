@@ -93,6 +93,8 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 | 结构一致性 | `cross_check.structure_check.enabled` (默认开) | 提议增加多头暴露且 close<SMA200 → 降为 low (减仓/清仓方向不拦截) |
 | 抓取重试 | `schedule.retry_on_fetch_failure` / `retry_delay_seconds` | 抓取异常本轮内重试 1 次 (等待 clamp(delay, 0, 30) 秒), 仍失败走 outage |
 | 图片缓存上限 | `ai_service.image_cache_max_entries` (32) / `image_cache_max_bytes` (64MiB) | 视觉图片 base64 LRU 上限, 防长驻进程内存持续增长 |
+| 节奏门控 | `alpha.rhythm.*.enabled` (默认全关) | 结构定性门控 (熊侧收复/复苏完成/牛市顶部), 默认关闭可回滚 |
+| 影子账本 | `alpha.shadow.enabled` (默认观察) | 四轨迹纯观察 (永不下单), 不影响任何引擎行为; 报告见 tools/ |
 | 合法转换 | 预定义转换表 | 禁止非法跳变 |
 
 ### 时间语义（自然日推进）
@@ -114,11 +116,73 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
   恢复后从下一轮起按自然日推进。
 - **锚表对齐 4 年周期**：`REGIME_EXPECTED_DAYS` 各 regime 预期天数按 1461 天对齐（旧表
   1270 天等比放大 ≈×1.15 后取整），合计 = 1461；`config.json.alpha.regime_expected_days`
-  可覆盖（值 clamp [1, 500]），需与 `src/alpha_engine.py` 锚表保持同步。
+  可覆盖（值 clamp [20, 700]），需与 `src/alpha_engine.py` 锚表保持同步。
+- **参数治理（合计校验）**：启动路径（校准 overlay 之后）校验
+  `sum(expected_days) == 1461`，不一致仅打印一次
+  `[Alpha] 告警: regime_expected_days 合计=… != 1461 (4年周期), 不阻断`（不阻断启动；
+  构造期不重复告警）；`--status` 行展示 `RegimeDays=<合计>`，不匹配时标注
+  `RegimeDays=<合计>(!目标1461)`；启动日志也打印合计，便于部署核对。
+  校准路径（`params_store`）与 config 覆盖路径同边界 [20, 700]（月度复盘 prompt 同步）。
 - **校准落盘**：月度复盘 `apply_calibration` 在内存生效的同时写 `data/params.json`
   （键=参数路径，值=新值；tmp+原子替换）并 append `data/calibration_log.jsonl`
   （时间/参数/旧→新/来源）；启动时只读加载 overlay 恢复（非法文件告警并忽略），
   重启不再丢失校准结果；`--test-ai` 等只读入口不写任何文件。
+
+### 节奏门控（rhythm，默认关闭）
+
+防过拟合的结构定性门控（`src/rhythm_gates.py`，纯函数、无 IO）：**不改节奏表数值**
+（`REGIME_EXPECTED_DAYS`/步长边界不动），只修定性结构错误；三门控**全部默认关闭**、
+可单独开关、可回滚（关掉即回到基线行为，参数默认零变化）。门控在 `tick_alpha` /
+`step_alpha` **前**作用于 `alpha.regime_progress`，数据来自 `ma_context`/`cycle_context`
+（TTL 缓存复用，不额外取数）；数据缺失/异常 → **fail-open**（不施加门控 = 基线行为）
+并打印 `[Rhythm]` 日志，任何异常不阻断本轮。
+
+| 门控 | regime | 触发 | 行为 |
+|---|---|---|---|
+| G1 `bear_reclaim_gate` | BEAR / BEAR_DEEP | 连续 `reclaim_confirm_days`(10) 日收盘 > 长均线（默认 SMA200）未确认 | progress 上限 `progress_cap`(0.5)；确认（结构修复）后放行 |
+| G2 `recovery_completion_gate` | RECOVERY | SMA250 斜率↑（结构完成） | progress = 1.0 |
+| G3 `bull_top_gate` | BULL | progress > `progress_threshold`(0.7) 且无释放条件 | 压回阈值；释放条件 = `top_risk.active` **或** SMA250 斜率↓ |
+
+配置见 `config.json` → `alpha.rhythm`；"连续站上长均线天数"为 `ma_context` 快照的
+`days_above_long_streak`（最小扩展，既有键不变）。门控作用在进入本轮推进的 progress 上，
+空闲轮随后仍按自然日推进一个步长（轮末落盘值可高于上限至多 `max_catchup_days/预期天数`）；
+分析轮（step）的压回为严格上限。默认关闭时 `apply_rhythm_gates` 恒等返回，行为与引入前
+逐点一致（冻结时钟回归测试覆盖 tick/step 两条路径）。
+
+### 影子账本（shadow，纯观察，永不下单）
+
+在"不接实盘"前提下长期观察不同节奏门控组合的盈利表现（`src/shadow_ledger.py`）：
+四轨迹 **baseline / +G1 / +G1+G2 / +G1+G2+G3** 独立模拟——regime 与引擎共享
+（引擎换挡时同步换挡，并取引擎门控后的 progress 作为同起点，此后因门控不同而
+分叉）。推进语义与引擎对齐（baseline 轨迹与引擎逐点一致；引擎"未步进"分支——
+低置信锁定/侧向兜底——不在镜像范围，影子按自身规则推进）：**分析轮** progress
+取引擎落盘值（= AI 输入，不叠加自然日），再应用本轨门控 → 定位/步进（对齐
+`step_alpha`）；**空闲轮**先门控（作用于进入本轮 progress）再按自然日推进
+（复用引擎 `expected_days`/`_dynamic_step` 同一公式，对齐 gate→`tick_alpha`）；
+**outage 轮**不推进也不刷新锚点，恢复轮一次性重置锚点且 days=0（对齐
+`_clear_outage`）。各轨门控复用 `rhythm_gates.apply_rhythm_gates`，目标复用
+`calculate_target_alpha`，步进同一 clamp 公式。
+目标仓位变化 ≥ `rebalance_threshold_pp`（默认 1.0pp）或方向变化才记事件
+（复刻 TradeSync 去重）；成交价 = 当轮引擎实际取到的价格；成本 = taker 0.05% +
+滑点 0.02%（按成交名义）；固定参考本金 10,000 U。**净值 = 固定名义敞口
+（alpha×本金）按当前价 mark-to-market，收益不滚入下一轮仓位（不复利）**。
+事件带当轮 `cycle_context` 结构阶段（①-④）供归因。
+
+- 产物（`data/shadow/`，已 gitignore）：`state.json`（四轨迹状态，原子写）、
+  `ledger.jsonl`（init/enter/adjust/exit 事件流，原子 append）、`equity.jsonl`
+  （每轮按当前价 mark-to-market 的净值快照，含 regime/phase）；
+- **隔离红线**：全部 try/except（失败只打印 `[Shadow]` 日志，绝不阻断主流程）、
+  不写引擎 `state.json`、不碰发单、不影响 AI 输出/通知/发帖；outage 轮不推进
+  镜像引擎（仅刷新锚点，故障时长不补记）；`enabled=false` 完全停用（零产物）；
+- 配置 `alpha.shadow`（`enabled=true` 表示"开始观察"；`notional`/`fee_pct`/
+  `slip_pct`/`rebalance_threshold_pp` 可调；门控参数取自 `alpha.rhythm`，
+  轨迹开关由轨迹名强制，与生产门控默认关闭无关）；
+- 报告：`py -3 tools/shadow_report.py`（四轨迹当前状态、净值曲线、按阶段盈亏
+  归因与成本、首个分叉点与原因、最近事件；`--out <file>` 写文件，`--data-dir`/
+  `--ledger`/`--equity` 指定数据源）；
+- 节奏校准：`py -3 tools/rhythm_report.py`（结构段长统计、关键里程碑、现表对照 +
+  cap×confirm×threshold 共 27 组合门控参数敏感性扫描，输出差异矩阵与参数轴
+  稳健性；数据源 `--csv` > 归档目录最新 CSV.gz > DataFeed `/klines`；纯只读）。
 
 连续确认细节：提议 `cp ≠ 当前 regime` 时写入 `state.regime.pending_proposal`
 （同一 cp 连续出现计数 +1，换向重置为 1，提议回到当前 regime 或执行成功后清除）；
@@ -295,6 +359,8 @@ glassnode-engine/
 │   ├── alpha_engine.py            # Regime 状态机 + 证据累积 + α 平滑
 │   ├── ma_context.py              # 日线均线结构 (区间/趋势/事件 + 历史快照)
 │   ├── cycle_context.py           # 周期定位/阶段判定/四组历史类比 (辅助参考)
+│   ├── rhythm_gates.py            # 节奏门控 G1/G2/G3 (默认关闭, 可回滚)
+│   ├── shadow_ledger.py           # 影子账本 (四轨迹纯观察, 永不下单)
 │   ├── state_manager.py           # state.json 持久化 + 脏写合批
 │   ├── memory.py                  # 双存储 (memory.md + metrics + alpha_history)
 │   ├── knowledge.py               # 蒸馏/漂移检测/预测审计
@@ -302,6 +368,10 @@ glassnode-engine/
 │   ├── datafeed.py                # BTC 价格获取
 │   ├── notify.py                  # 钉钉推送
 │   └── run.py                     # 主入口 + 回溯 + 循环调度
+│
+├── tools/                         # 只读报告工具
+│   ├── shadow_report.py           # 影子账本报告 (四轨迹/阶段归因/分叉点)
+│   └── rhythm_report.py           # 节奏校准 + 门控参数敏感性扫描
 │
 └── data/                          # 运行时自动生成
     ├── state.json                 # 持久状态 (regime, alpha, ma, evidence, runtime)
@@ -315,6 +385,7 @@ glassnode-engine/
     ├── ma_history.jsonl           # 日线均线快照历史 (按日去重, 跨轮连续性)
     ├── params.json                # 校准参数覆盖 (启动时加载, 重启不丢失)
     ├── calibration_log.jsonl      # 校准审计 (时间/参数/旧→新/来源)
+    ├── shadow/                    # 影子账本 (state.json/ledger.jsonl/equity.jsonl)
     └── orders/                    # 交易指令输出 (默认关闭)
 ```
 

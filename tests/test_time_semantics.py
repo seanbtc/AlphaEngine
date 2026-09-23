@@ -20,13 +20,14 @@ _ALPHA_ROOT = Path(__file__).resolve().parents[1]
 if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
-from src.alpha import init_components  # noqa: E402
+from src.alpha import init_components, print_status  # noqa: E402
 from src.alpha_engine import (AlphaEngine, EvidenceAccumulator,  # noqa: E402
-                              FORWARD_NEXT_REGIME, NEUTRAL_REGIMES,
-                              REGIME_ALPHA_MAP, REGIME_EXPECTED_DAYS)
+                              EXPECTED_DAYS_TOTAL, FORWARD_NEXT_REGIME,
+                              NEUTRAL_REGIMES, REGIME_ALPHA_MAP,
+                              REGIME_EXPECTED_DAYS)
 from src.analyzer import SYSTEM_PROMPT  # noqa: E402
-from src.params_store import (apply_overlay, load_overlay,  # noqa: E402
-                              save_overlay)
+from src.params_store import (apply_overlay, clamp_param,  # noqa: E402
+                              load_overlay, save_overlay)
 from src.review_engine import ReviewEngine  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
 
@@ -71,13 +72,69 @@ def test_config_override_expected_days(tmp_path):
 
 
 def test_config_expected_days_clamped(tmp_path):
-    """建议3: config 覆盖值 clamp [1, 500] (0/负值/超大不越界)。"""
+    """WP8 8A: config 覆盖值 clamp [20, 700] (0/负值/超大不越界, 整数与非法值处理不变)。"""
     engine, _ = _engine(tmp_path, cfg={"regime_expected_days": {
-        "BULL": 0, "BEAR": -5, "DEEP_BULL": 99999, "RECOVERY": 103}})
-    assert engine.expected_days["BULL"] == 1
-    assert engine.expected_days["BEAR"] == 1
-    assert engine.expected_days["DEEP_BULL"] == 500
+        "BULL": 0, "BEAR": -5, "DEEP_BULL": 99999, "RECOVERY": 103,
+        "BULL_COOLING": "bad"}})
+    assert engine.expected_days["BULL"] == 20
+    assert engine.expected_days["BEAR"] == 20
+    assert engine.expected_days["DEEP_BULL"] == 700
     assert engine.expected_days["RECOVERY"] == 103
+    assert engine.expected_days["BULL_COOLING"] == REGIME_EXPECTED_DAYS["BULL_COOLING"]
+
+
+def test_expected_days_sum_governance(tmp_path, capsys):
+    """WP8 8A/#7: 构造期不告警; 显式校验 (启动路径 overlay 后) 告警一次, 不阻断。"""
+    engine, _ = _engine(tmp_path)
+    assert engine.expected_days_sum() == EXPECTED_DAYS_TOTAL == 1461
+    assert "告警" not in capsys.readouterr().out
+    assert engine.warn_if_expected_days_mismatch() == EXPECTED_DAYS_TOTAL
+    assert "告警" not in capsys.readouterr().out
+
+    engine, _ = _engine(tmp_path / "mismatch",
+                        cfg={"regime_expected_days": {"BULL": 700}})
+    assert engine.expected_days_sum() == EXPECTED_DAYS_TOTAL - 420 + 700
+    assert "告警" not in capsys.readouterr().out  # 构造期无重复告警
+    assert engine.warn_if_expected_days_mismatch() == 1741
+    out = capsys.readouterr().out
+    assert "告警" in out and "不阻断" in out
+    assert engine.expected_days["BULL"] == 700  # 不阻断: 覆盖值仍生效
+
+
+def test_print_status_regime_days_annotation(tmp_path, capsys):
+    """WP8 8A/#7: --status 展示合计; 不匹配时标注 (!目标1461)。"""
+    engine, sm = _engine(tmp_path)
+    print_status({"state": sm, "engine": engine})
+    assert f"RegimeDays={EXPECTED_DAYS_TOTAL}" in capsys.readouterr().out
+
+    engine, sm = _engine(tmp_path / "mismatch",
+                         cfg={"regime_expected_days": {"BULL": 700}})
+    print_status({"state": sm, "engine": engine})
+    out = capsys.readouterr().out
+    assert f"RegimeDays=1741(!目标{EXPECTED_DAYS_TOTAL})" in out
+
+
+def test_clamp_param_expected_days_aligned_bounds():
+    """WP8 #5: 校准路径与 config 覆盖路径同边界 [20, 700]。"""
+    assert clamp_param("regime_expected_days.BULL", 0) == 20
+    assert clamp_param("regime_expected_days.BULL", -5) == 20
+    assert clamp_param("regime_expected_days.BULL", 99999) == 700
+    assert clamp_param("regime_expected_days.BULL", 420) == 420
+
+
+def test_calibration_expected_days_wide_bounds_persist(tmp_path):
+    """WP8 #5: 校准建议 600 生效 (旧 [30,500] 会压到 500) 并落盘。"""
+    engine, sm = _engine(tmp_path)
+    review = ReviewEngine({}, str(tmp_path), sm, engine, _FakeKnowledge())
+
+    applied = review.apply_calibration({"calibration": {"adjustments": [
+        {"param": "regime_expected_days.BULL", "old": 420, "new": 600,
+         "reason": "test"}]}})
+
+    assert applied == ["regime_expected_days.BULL: 420 → 600"]
+    assert engine.expected_days["BULL"] == 600
+    params = json.loads((tmp_path / "params.json").read_text(encoding="utf-8"))
+    assert params["regime_expected_days.BULL"] == 600
 
 
 # ---- 自然日推进 ----

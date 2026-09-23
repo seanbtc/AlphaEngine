@@ -186,6 +186,22 @@ def _count_days_above(prices, ma_values, window):
     return count
 
 
+def _count_days_above_streak(prices, ma_values):
+    """连续站上长均线天数 (自最新一根向前); 均线未就绪/无数据 → None.
+
+    WP8 节奏门控 G1 用: "连续 reclaim_confirm_days 日收盘 > SMA200" 的结构修复确认。
+    """
+    if not prices or not ma_values or ma_values[-1] is None:
+        return None
+    count = 0
+    for i in range(len(prices) - 1, -1, -1):
+        value = ma_values[i] if i < len(ma_values) else None
+        if value is None or prices[i] <= value:
+            break
+        count += 1
+    return count
+
+
 def _zone_series(prices, series_by_key, cfg):
     keys = list(series_by_key.keys())
     zones = []
@@ -276,6 +292,8 @@ def compute_ma_snapshot(series, cfg=None, as_of=None):
         "events": events[:max_events],
         "days_above_long_30d": _count_days_above(prices, series_by_key.get(long_key), 30),
         "days_above_long_90d": _count_days_above(prices, series_by_key.get(long_key), 90),
+        "days_above_long_streak": _count_days_above_streak(
+            prices, series_by_key.get(long_key)),
         "zone_changes_30d": _count_zone_changes(
             _zone_series(prices, series_by_key, cfg), 30),
     }

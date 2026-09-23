@@ -37,7 +37,7 @@ def clamp_param(param: str, value):
         lo, hi = PARAM_BOUNDS[param]
         return max(lo, min(hi, value))
     if param.startswith("regime_expected_days."):
-        return max(30, min(500, int(value)))
+        return max(20, min(700, int(value)))
     if param.startswith("regime_alpha_map."):
         return max(-1.0, min(1.0, float(value)))
     return value

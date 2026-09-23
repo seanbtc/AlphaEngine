@@ -56,7 +56,7 @@
       "max_catchup_days": 7
     },
     "regime_expected_days": {
-      "_note": "4年周期(1461天)各阶段预期天数, 覆盖代码内 REGIME_EXPECTED_DAYS (等比放大自旧 1270 天锚表); 用于 progress 推进速率与动态步长折算, 需与 src/alpha_engine.py 锚表保持同步.",
+      "_note": "4年周期(1461天)各阶段预期天数, 覆盖代码内 REGIME_EXPECTED_DAYS (等比放大自旧 1270 天锚表); 用于 progress 推进速率与动态步长折算, 需与 src/alpha_engine.py 锚表保持同步. 覆盖值 clamp [20,700]; 合计应为 1461 (不一致仅告警不阻断, 见 --status RegimeDays 与启动日志).",
       "BEAR_BOTTOM": 207,
       "RECOVERY": 103,
       "BULL": 420,
@@ -77,6 +77,20 @@
     "stability": {
       "_note": "连续同向确认: 提议 regime ≠ 当前时, 需连续 N 轮'有新推文且分析成功'的同一提议才执行变更 (1=关闭确认, 与旧行为一致); 被其它门(冷却/低置信/质量/共识)拒绝时待确认计数保留; idle 不计数不重置; 首轮/回溯豁免确认",
       "required_confirmations": 2
+    },
+    "rhythm": {
+      "_note": "WP8 节奏门控 (防过拟合: 不改节奏表数值, 只修定性结构错误; 全部默认关闭、可开关、可回滚; 数据缺失/异常 fail-open=baseline 行为; 失败隔离不阻断主流程)。三门控 regime 互斥: G1 bear_reclaim_gate 熊侧 (BEAR/BEAR_DEEP) 连续 reclaim_confirm_days 日收盘>长均线(默认SMA200)未确认前 progress 上限 progress_cap, 确认后放行; G2 recovery_completion_gate 复苏 (RECOVERY) 250SMA 斜率↑ 时 progress=1.0 (结构完成即完成); G3 bull_top_gate 牛市 (BULL) progress>progress_threshold 需释放条件 (top_risk.active 或 250SMA 斜率↓) 才允许继续推进, 否则压回阈值。数据来自 ma_context/cycle_context (连续站上天数 snapshot.days_above_long_streak)。详见 README「节奏门控」。",
+      "bear_reclaim_gate": {"enabled": false, "progress_cap": 0.5, "reclaim_confirm_days": 10},
+      "recovery_completion_gate": {"enabled": false},
+      "bull_top_gate": {"enabled": false, "progress_threshold": 0.7}
+    },
+    "shadow": {
+      "_note": "WP8 8C 影子账本 (纯观察, 永不下单): enabled=true 表示开始观察, 不影响任何引擎/AI/通知/发单行为, 设为 false 完全停用。四轨迹 baseline/+G1/+G1G2/+G1G2G3 独立模拟 (regime 与引擎共享, 门控参数取自 alpha.rhythm), 产物写入 data/shadow/ (state.json/ledger.jsonl/equity.jsonl, 已 gitignore)。notional 为固定参考本金(U, 不复利); fee_pct/slip_pct 为 taker+滑点成本(%); rebalance_threshold_pp 复刻 TradeSync 去重 (同向且仓位变化 < 该值不记事件)。报告: py -3 tools/shadow_report.py; 参数敏感性: py -3 tools/rhythm_report.py。",
+      "enabled": true,
+      "notional": 10000,
+      "fee_pct": 0.05,
+      "slip_pct": 0.02,
+      "rebalance_threshold_pp": 1.0
     },
     "cross_check": {
       "_note": "单次判断交叉验证: 同一 prompt 采样 samples 次 (1=关闭); 样本 cycle_position 不一致 → cycle_confidence 降级 low (走既有低置信门, 不新增输出字段); structure_check (方向感知): 仅当提议 cp 为多头侧正暴露 (REGIME_ALPHA_MAP[cp] > 0) 且 > 当前 alpha + 0.005 (加多) 且 close<SMA200 (MA 数据可用时) 才降级; 熊侧空头减仓 (BEAR→BEAR_DEEP/BEAR_DEEP→BEAR_BOTTOM) 与牛侧减仓/清仓 (BULL→DEEP_BULL/DEEP_BULL→BULL_COOLING) 不拦截; market_state 缺 alpha 时回退为仅 cp==BULL 触发",

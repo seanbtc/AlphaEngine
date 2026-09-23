@@ -84,6 +84,11 @@ class StateManager:
                 problem = f"读取失败: {exc}"
             if problem is None:
                 self._state = loaded
+                warning = self._normalize_regime_progress(loaded)
+                if warning:
+                    self._dirty = True
+                    print(f"[StateManager] 告警: {warning} (已归一化为 "
+                          f"{loaded['alpha']['regime_progress']})")
                 return self._state
             self._recover_from_corruption(problem, on_recovered, memory)
             return self._state
@@ -93,7 +98,12 @@ class StateManager:
 
     @staticmethod
     def _validate_state(loaded) -> Optional[str]:
-        """校验 state 结构; 合法返回 None, 否则返回原因字符串."""
+        """校验 state 结构; 合法返回 None, 否则返回原因字符串.
+
+        alpha.regime_progress 非法/越界不在此判定 (不触发损坏恢复): 由
+        _normalize_regime_progress 就地归一化并告警 (脏 progress 会让
+        tick_alpha/step_alpha 抛错)。
+        """
         if not isinstance(loaded, dict):
             return "顶层结构非法 (非 JSON 对象)"
         if loaded.get("version") != 1:
@@ -111,6 +121,37 @@ class StateManager:
             return f"alpha.current 非数值: {value!r}"
         if not (-1.0 <= float(value) <= 1.0):
             return f"alpha.current 越界: {value!r}"
+        return None
+
+    @staticmethod
+    def _normalize_regime_progress(loaded) -> Optional[str]:
+        """alpha.regime_progress 非法/越界 → 就地归一化, 返回告警原因 (None=正常).
+
+        仅归一化, 不触发损坏恢复 (区别于 _validate_state 的返回原因路径):
+        脏 progress (非数值/NaN/越界) 会让 tick_alpha/step_alpha 抛错, 这里统一
+        收敛为 [0,1] 浮点并告警; 归一化值随下一次 save 落盘 (标记 dirty)。
+        """
+        alpha = loaded.get("alpha") if isinstance(loaded, dict) else None
+        if not isinstance(alpha, dict) or "regime_progress" not in alpha:
+            return None
+        value = alpha.get("regime_progress")
+        if isinstance(value, bool):
+            alpha["regime_progress"] = 0.5
+            return f"alpha.regime_progress 非数值: {value!r}"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            alpha["regime_progress"] = 0.5
+            return f"alpha.regime_progress 非数值: {value!r}"
+        if number != number:  # NaN
+            alpha["regime_progress"] = 0.5
+            return f"alpha.regime_progress 非数值: {value!r}"
+        if not isinstance(value, (int, float)):
+            alpha["regime_progress"] = max(0.0, min(1.0, number))
+            return f"alpha.regime_progress 非数值: {value!r}"
+        if not (0.0 <= number <= 1.0):
+            alpha["regime_progress"] = max(0.0, min(1.0, number))
+            return f"alpha.regime_progress 越界: {value!r}"
         return None
 
     def _recover_from_corruption(self, problem: str, on_recovered, memory) -> dict:

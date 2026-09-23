@@ -354,7 +354,7 @@ class ReviewEngine:
 8. **evidence.decay_per_cycle**: 每轮证据衰减量, 范围 [0.005, 0.05]
 9. **confidence_gate.low_confidence_blocks_regime_change**: 低置信时是否阻止 regime 变更, 布尔
 10. **confidence_gate.low_confidence_max_alpha_abs**: 低置信时最大仓位绝对值, 范围 [0.1, 0.5]
-11. **regime_expected_days.REGIME_NAME**: 各 regime 预期持续天数, 范围 [30, 500]
+11. **regime_expected_days.REGIME_NAME**: 各 regime 预期持续天数, 范围 [20, 700] (与 config 覆盖路径同边界)
 12. **regime_alpha_map.REGIME_NAME**: 各 regime 目标 alpha, 范围 [-1.0, 1.0]
 
 ## 分析要求

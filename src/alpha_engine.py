@@ -92,6 +92,9 @@ NEUTRAL_REGIMES = ("INIT", "BEAR_BOTTOM", "BULL_COOLING")
 
 EVIDENCE_CATEGORIES = ["profitability", "institutional", "onchain", "derivatives", "macro"]
 
+# 4 年周期目标天数: sum(REGIME_EXPECTED_DAYS) 应等于该值 (不一致仅告警, 不阻断)
+EXPECTED_DAYS_TOTAL = 1461
+
 
 class AlphaEngine:
     def __init__(self, cfg: dict, state_manager):
@@ -105,16 +108,30 @@ class AlphaEngine:
         self.alpha_map = cfg.get("regime_alpha_map", REGIME_ALPHA_MAP)
         # 各 regime 预期天数: 代码锚表为基准, config.regime_expected_days 可覆盖
         # (校准落盘 overlay 亦写入本字典, 重启后由 params_store 恢复)
-        # config 值 clamp [1, 500] (与校准上界一致, 防止 0/负值除零或超大值)
+        # config 值 clamp [20, 700] (防 0/负值除零或超大值; 校准落盘路径另有边界)
         self.expected_days = dict(REGIME_EXPECTED_DAYS)
         override = cfg.get("regime_expected_days")
         if isinstance(override, dict):
             for key, value in override.items():
                 if key in self.expected_days:
                     try:
-                        self.expected_days[key] = max(1, min(500, int(value)))
+                        self.expected_days[key] = max(20, min(700, int(value)))
                     except (TypeError, ValueError):
                         continue
+        # 合计校验 (不阻断) 只在启动路径 (main → 校准 overlay 之后) 调用一次,
+        # 避免构造期与启动期重复告警; 展示见 --status RegimeDays= 标注。
+
+    def expected_days_sum(self) -> int:
+        """各 regime 预期天数合计 (锚表目标 EXPECTED_DAYS_TOTAL=1461)."""
+        return int(sum(self.expected_days.values()))
+
+    def warn_if_expected_days_mismatch(self) -> int:
+        """合计偏离 1461 时告警 (不阻断), 返回合计值 (校准 overlay 后亦调用)."""
+        total = self.expected_days_sum()
+        if total != EXPECTED_DAYS_TOTAL:
+            print(f"[Alpha] 告警: regime_expected_days 合计={total} != "
+                  f"{EXPECTED_DAYS_TOTAL} (4年周期), 不阻断")
+        return total
 
     # ---- 时间语义 (自然日推进) ----
 
