@@ -3,6 +3,8 @@ import json
 import os
 from datetime import datetime, timedelta
 
+from src.atomic_io import atomic_copy, atomic_write_text
+
 
 class Knowledge:
     def __init__(self, cfg: dict, data_dir: str, analyzer):
@@ -70,9 +72,14 @@ class Knowledge:
         return ""
 
     def save_knowledge_base(self, content: str):
+        """原子覆盖 knowledge_base.md; 覆盖前把旧版备份为 knowledge_base.md.bak."""
         self._ensure_dir()
-        with open(self.kb_file, "w", encoding="utf-8") as f:
-            f.write(content)
+        if os.path.exists(self.kb_file):
+            try:
+                atomic_copy(self.kb_file, self.kb_file + ".bak")
+            except OSError as exc:
+                print(f"[Knowledge] knowledge_base.md 备份失败: {exc}")
+        atomic_write_text(self.kb_file, content)
 
     # ---- 漂移检测 (每轮分析) ----
 
@@ -453,6 +460,9 @@ class Knowledge:
         if compressed:
             ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
             header = f"# Glassnode Alpha Engine Memory\n\n> 上次压缩: {ts}\n\n"
+            backup = memory.backup_memory_md()
+            if backup:
+                print(f"[Knowledge] memory.md 已备份到 {backup}")
             memory.save_memory_md(header + compressed)
             print(f"[Knowledge] Memory compressed from {len(existing)} to {len(compressed)} chars")
             return True

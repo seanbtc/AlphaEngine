@@ -1,6 +1,7 @@
 """钉钉通知模块 (发送经 commons.notify 共享实现)."""
 import os
 import sys
+from datetime import datetime
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
@@ -16,9 +17,29 @@ class DingTalk:
         self._notifier = DingTalkNotifier(
             self.webhook, self.secret, enabled=self.enabled, timeout=10
         )
+        # 失败可观测 (内存计数, 不改变发送语义): print_status 展示
+        self.failure_count = 0
+        self.last_error = ""
+        self.last_failure_at = ""
 
     def send(self, content: str) -> bool:
-        return self._notifier.send(content)
+        try:
+            ok = bool(self._notifier.send(content))
+        except Exception as exc:
+            self._record_failure(exc)
+            return False
+        if not ok and self._configured():
+            # 未配置/禁用 (enabled=false 或 webhook 为空) 的 False 不算失败, 避免状态行误报
+            self._record_failure("send 返回 False")
+        return ok
+
+    def _configured(self) -> bool:
+        return bool(self.enabled) and bool(self.webhook)
+
+    def _record_failure(self, error) -> None:
+        self.failure_count += 1
+        self.last_error = str(error)
+        self.last_failure_at = datetime.utcnow().isoformat() + "Z"
 
     # ---- 模板 ----
 

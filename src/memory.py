@@ -3,6 +3,8 @@ import json
 import os
 from datetime import datetime
 
+from src.atomic_io import atomic_copy, atomic_write_text
+
 
 class Memory:
     def __init__(self, data_dir: str):
@@ -24,8 +26,7 @@ class Memory:
 
     def _write_json(self, filepath, data):
         os.makedirs(self.data_dir, exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_text(filepath, json.dumps(data, ensure_ascii=False, indent=2))
 
     def load_memory_md(self) -> str:
         os.makedirs(self.data_dir, exist_ok=True)
@@ -36,8 +37,19 @@ class Memory:
 
     def save_memory_md(self, content: str):
         os.makedirs(self.data_dir, exist_ok=True)
-        with open(self.memory_file, "w", encoding="utf-8") as f:
-            f.write(content)
+        atomic_write_text(self.memory_file, content)
+
+    def backup_memory_md(self) -> str | None:
+        """把当前 memory.md 备份为 memory.md.bak (覆盖式, 保留最近一份)."""
+        if not os.path.exists(self.memory_file):
+            return None
+        backup = self.memory_file + ".bak"
+        try:
+            atomic_copy(self.memory_file, backup)
+            return backup
+        except OSError as exc:
+            print(f"[Memory] memory.md 备份失败: {exc}")
+            return None
 
     def append_entry(self, entry: str):
         existing = self.load_memory_md()

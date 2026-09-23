@@ -5,8 +5,10 @@ Glassnode Alpha Engine — 主入口.
     python -m src.alpha
     nohup python3 -u -m src.alpha > engine.log 2>&1 &
 """
+import atexit
 import json
 import os
+import signal
 import sys
 import time
 from datetime import datetime, timedelta
@@ -15,6 +17,7 @@ import requests
 
 from src.config_loader import load_config, resolve_data_dir
 from src.memory import Memory
+from src.singleton_lock import SingletonLock
 from src.state_manager import StateManager
 from src.fetcher import Fetcher
 from src.analyzer import Analyzer
@@ -133,13 +136,34 @@ def _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start: float,
     return order
 
 
+def _alert_state_recovery(dingtalk, info: dict) -> None:
+    """state 损坏恢复后的钉钉告警 (通知失败不影响启动)."""
+    reason = info.get("reason", "未知")
+    backup = info.get("backup_path") or "备份失败"
+    if info.get("rebuilt"):
+        title = "state 已从记忆重建"
+        body = (f"原因: {reason}\n备份: {backup}\n"
+                f"重建: regime={info.get('regime')}, alpha={info.get('alpha')}")
+    else:
+        title = "state 损坏且无记忆可重建"
+        body = (f"原因: {reason}\n备份: {backup}\n"
+                f"已使用默认状态 (regime=BEAR, alpha=0.0)")
+    print(f"[State] {title} | " + body.replace("\n", " | "))
+    try:
+        dingtalk.alert(title, body)
+    except Exception as exc:
+        print(f"[State] 恢复告警发送失败 (不影响启动): {exc}")
+
+
 def init_components(cfg: dict):
     data_dir = resolve_data_dir(cfg)
     os.makedirs(data_dir, exist_ok=True)
 
     memory = Memory(data_dir)
     state_mgr = StateManager(data_dir, cfg.get("paths", {}).get("state_file", "state.json"))
-    state_mgr.load()
+    dingtalk = DingTalk(cfg.get("dingtalk", {}))
+    state_mgr.load(on_recovered=lambda info: _alert_state_recovery(dingtalk, info),
+                   memory=memory)
 
     fetcher = Fetcher(cfg.get("fetcher", {}), data_dir)
     ai_cfg = dict(cfg.get("ai_service") or cfg.get("deepseek") or {})
@@ -151,7 +175,6 @@ def init_components(cfg: dict):
     knowledge = Knowledge(cfg.get("knowledge", {}), data_dir, analyzer)
     tradesync = TradeSync(cfg.get("tradesync", {}), data_dir)
     datafeed = DataFeed(cfg.get("datafeed", {}))
-    dingtalk = DingTalk(cfg.get("dingtalk", {}))
     review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine,
                           knowledge, evidence=evidence)
 
@@ -181,6 +204,11 @@ def print_status(components: dict):
             line += (f" | Pending={pending.get('cp')}"
                      f"({engine.pending_count(pending)}/"
                      f"{engine.required_confirmations()})")
+    dingtalk = components.get("dingtalk")
+    failures = int(getattr(dingtalk, "failure_count", 0) or 0)
+    if failures > 0:
+        last_at = getattr(dingtalk, "last_failure_at", "") or "?"
+        line += f" | Notify失败={failures}次 (最近 {last_at})"
     print(line)
 
 
@@ -1106,6 +1134,64 @@ def _run_test_ai(c: dict, urls_only: bool = False):
     print("=" * 60)
 
 
+# ---- 单例锁 ----
+
+def _lock_mode_for_args(*, once: bool, backfill: bool, bulk_only, import_file,
+                        test_ai: bool, status_only: bool) -> str:
+    """按 CLI 语义决定锁模式; 返回 "" 表示豁免 (只读入口).
+
+    --test-ai/--status 只读 (不写状态/帖子), 豁免锁, 允许在常驻实例运行时查询;
+    其余会写 data/ 的入口 (常驻/--once/--backfill/--bulk/--import) 均持锁。
+    """
+    if test_ai or status_only:
+        return ""
+    if backfill:
+        return "backfill"
+    if once:
+        return "once"
+    if bulk_only:
+        return "bulk"
+    if import_file:
+        return "import"
+    return "daemon"
+
+
+def _acquire_lock_or_exit(cfg: dict, mode: str) -> SingletonLock:
+    """获取单例锁; 已有存活实例时打印+钉钉告警并 exit 非 0."""
+    lock = SingletonLock(resolve_data_dir(cfg))
+    ok, holder = lock.acquire(mode)
+    if not ok:
+        pid = (holder or {}).get("pid", "?")
+        started = (holder or {}).get("started_at", "?")
+        held_mode = (holder or {}).get("mode", "?")
+        print(f"[Lock] 已有实例运行中 (pid={pid}, mode={held_mode}, "
+              f"started_at={started}), 拒绝启动")
+        try:
+            DingTalk(cfg.get("dingtalk", {})).alert(
+                "AlphaEngine 启动被拒",
+                f"已有实例运行中 (pid={pid}, mode={held_mode}, started_at={started})")
+        except Exception as exc:
+            print(f"[Lock] 告警发送失败 (不影响退出): {exc}")
+        sys.exit(2)
+    _install_lock_cleanup(lock)
+    print(f"[Lock] 已获取单例锁 (pid={os.getpid()}, mode={mode})")
+    return lock
+
+
+def _install_lock_cleanup(lock: SingletonLock) -> None:
+    """注册退出清理: atexit 覆盖正常/异常退出; SIGTERM 覆盖被 kill (Linux)."""
+    atexit.register(lock.release)
+
+    def _handle_term(signum, frame):
+        lock.release()
+        raise SystemExit(128 + signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_term)
+    except (ValueError, OSError, AttributeError):
+        pass
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
         print("Glassnode Alpha Engine")
@@ -1134,6 +1220,12 @@ def main():
             bulk_only = int(sys.argv[i + 1])
 
     cfg = load_config()
+    lock_mode = _lock_mode_for_args(
+        once=once, backfill=backfill_force, bulk_only=bulk_only,
+        import_file=import_file, test_ai=(test_ai or test_ai_urls),
+        status_only=status_only)
+    if lock_mode:
+        _acquire_lock_or_exit(cfg, lock_mode)
     c = init_components(cfg)
 
     if test_ai_urls:
