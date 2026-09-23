@@ -30,7 +30,7 @@ _DEFAULT_DD_WINDOW = 180
 _DEFAULT_DD_GROUPS = ("B", "D")
 _DEFAULT_HALVING_DATE = "2024-04-20"
 
-_DEFAULT_PHASE = {"top_deviation_pct": 0.30, "top_alpha": 0.90}
+_DEFAULT_PHASE = {"top_deviation_pct": 0.30}
 _DEFAULT_ANALOG = {"b_min_ratio": 0.10, "b_max_ratio": 0.30,
                    "b_min_drawdown": 0.30, "d_ratio": 0.20}
 
@@ -198,8 +198,10 @@ def classify_phase(close, sma200, sma250, slope200, slope250, *,
     """固定规则阶段判定 (按 ④→③→②→① 顺序, 未命中为过渡期).
 
     close/sma200/sma250 为最新值; slope200/slope250 为斜率方向 (up/down/None);
-    ③ 触发: 距200SMA偏离 > top_deviation_pct 或 alpha >= top_alpha 或 regime=BULL_COOLING;
-    阈值可在 cfg.phase 覆盖 (top_deviation_pct / top_alpha)。
+    ③ 触发: 距200SMA偏离 > top_deviation_pct 或 regime=BULL_COOLING;
+    阈值可在 cfg.phase 覆盖 (top_deviation_pct)。
+    alpha 参数仅保留签名兼容 (仓位由引擎按时间自推, 参与判定会形成
+    "时间推进→alpha 升→判顶部" 自反馈回路), 不参与阶段判定。
     区间变更次数 (zone_changes_30d) 仅作 trend 参考, 不参与阶段判定。
     """
     thresholds = dict(_DEFAULT_PHASE)
@@ -212,8 +214,6 @@ def classify_phase(close, sma200, sma250, slope200, slope250, *,
     if ratio is not None and ratio > thresholds["top_deviation_pct"] * 100.0:
         top_reasons.append(
             f"距200SMA {ratio:+.1f}% > {thresholds['top_deviation_pct'] * 100.0:.0f}%")
-    if alpha is not None and alpha >= thresholds["top_alpha"]:
-        top_reasons.append(f"alpha {alpha:+.2f} >= {thresholds['top_alpha']:.2f}")
     if regime == "BULL_COOLING":
         top_reasons.append("regime=BULL_COOLING (牛顶确认)")
     if top_reasons:

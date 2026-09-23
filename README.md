@@ -136,7 +136,7 @@ regime/alpha 一起写入 `state.json` 的 `ma` 字段，供 Web 面板只读展
 - **周期位置**：ATH（收盘/最高价口径 + 日期）、现价与距 ATH 回撤、近 365 日周期低点与低点恢复%、
   距低点/距 ATH/距上次减半（2024-04-20）天数；
 - **阶段判定**：固定规则按 ④→③→②→① 顺序匹配（阈值可配），未命中为"过渡期"：
-  ④熊市（close<SMA200 且 200SMA↓）｜③中后期/顶部（距 200SMA>30% 或 alpha≥0.90 或 regime=BULL_COOLING）｜
+  ④熊市（close<SMA200 且 200SMA↓）｜③中后期/顶部（距 200SMA>30% 或 regime=BULL_COOLING；alpha 仅独立展示不参与判定，防时间自推自反馈）｜
   ②结构确认（250SMA↑ 且 regime∈{RECOVERY,BULL}）｜①复苏早期（regime∈{BEAR_BOTTOM,RECOVERY} 且 close>SMA200 且 250SMA↓）；
 - **趋势关键值**：200/250 SMA 值与斜率、距 200SMA%、近 30/90 日站上 200SMA 天数、区间档位
   （传入 `ma_context` 时复用其 zone/days_above/zone_changes）；

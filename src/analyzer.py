@@ -17,8 +17,14 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from AIService.client import AIClient
 from src.link_reader import read_link_content
-from src.alpha_engine import FORWARD_NEXT_REGIME
+from src.alpha_engine import (EVIDENCE_CATEGORIES, FORWARD_NEXT_REGIME,
+                              REGIME_ALPHA_MAP)
 from src.cycle_context import format_cycle_context
+
+# AI 输出白名单 (与引擎枚举同口径): cycle_position 不含 INIT (AI 不输出该状态),
+# evidence_scores 仅 5 个证据维度; 额外顶层字段容忍 (signal_board 等可选字段).
+_VALID_CYCLE_POSITIONS = tuple(REGIME_ALPHA_MAP)
+_EVIDENCE_CATEGORY_WHITELIST = tuple(EVIDENCE_CATEGORIES)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -668,17 +674,36 @@ class Analyzer:
 
     @staticmethod
     def _validate(result: dict) -> bool:
-        """校验 AI 输出必需字段, 防止残缺结果静默使用默认值."""
+        """校验 AI 输出必需字段/枚举/数值范围, 防止残缺或越界结果静默使用."""
         required = ["cycle_position", "cycle_confidence", "regime_progress",
                     "evidence_scores", "summary", "regime_evidence"]
         for k in required:
             if k not in result:
                 print(f"[Analyzer] VALIDATION: missing required field '{k}'")
                 return False
+        if result.get("cycle_position") not in _VALID_CYCLE_POSITIONS:
+            print(f"[Analyzer] VALIDATION: bad cycle_position: "
+                  f"{result.get('cycle_position')!r}")
+            return False
         scores = result.get("evidence_scores", {})
+        if not isinstance(scores, dict):
+            print(f"[Analyzer] VALIDATION: evidence_scores not a dict: {type(scores)}")
+            return False
         if len(scores) < 5:
             print(f"[Analyzer] VALIDATION: evidence_scores incomplete ({len(scores)}/5)")
             return False
+        for cat, score in scores.items():
+            if cat not in _EVIDENCE_CATEGORY_WHITELIST:
+                print(f"[Analyzer] VALIDATION: unknown evidence category: {cat!r}")
+                return False
+            try:
+                value = float(score)
+            except (TypeError, ValueError):
+                print(f"[Analyzer] VALIDATION: evidence_scores[{cat}] not a number")
+                return False
+            if not (-1.0 <= value <= 1.0):
+                print(f"[Analyzer] VALIDATION: evidence_scores[{cat}] out of range: {value}")
+                return False
         try:
             p = float(result["regime_progress"])
             if not (0.0 <= p <= 1.0):

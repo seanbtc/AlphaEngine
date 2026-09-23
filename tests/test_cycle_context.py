@@ -161,14 +161,24 @@ def test_phase_top_variants():
     by_ratio = cycle_context.classify_phase(140, 100, 95, "up", "up")
     assert by_ratio["code"] == 3 and "距200SMA" in by_ratio["reasons"][0]
 
-    by_alpha = cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                            regime="BULL", alpha=0.95)
-    assert by_alpha["code"] == 3 and "alpha" in by_alpha["reasons"][0]
-
     by_regime = cycle_context.classify_phase(105, 100, 95, "up", "down",
                                              regime="BULL_COOLING")
     assert by_regime["code"] == 3
     assert by_regime["reasons"] == ["regime=BULL_COOLING (牛顶确认)"]
+
+
+def test_phase_alpha_decoupled_from_judgement():
+    # alpha 由引擎按时间自推, 不再参与阶段判定 (防自反馈):
+    # alpha 0.95 且结构非顶部 (距200SMA +5%, 250SMA↓, BULL) → 过渡期而非 ③
+    phase = cycle_context.classify_phase(105, 100, 95, "up", "down",
+                                         regime="BULL", alpha=0.95)
+    assert phase["code"] != 3
+    assert phase["code"] == 0
+    assert all("alpha" not in reason for reason in phase["reasons"])
+    # 相同结构传 alpha=None 结果一致 (alpha 完全不影响判定)
+    assert cycle_context.classify_phase(105, 100, 95, "up", "down",
+                                        regime="BULL") == phase
+    assert "top_alpha" not in cycle_context._DEFAULT_PHASE
 
 
 def test_phase_zone_changes_does_not_trigger_top():
@@ -362,9 +372,10 @@ def test_build_cycle_context_alpha_and_regime_inputs():
     prices += [50.0 + i * 45.0 / 49.0 for i in range(50)]
     fake = _FakeDataFeed(result=_klines_result(prices))
 
-    by_alpha = cycle_context.build_cycle_context(
+    # alpha 0.95 不再触发 ③ (解耦): 结构为复苏早期 → ①
+    high_alpha = cycle_context.build_cycle_context(
         _cfg(), fake, regime={"name": "RECOVERY", "alpha": 0.95})
-    assert by_alpha["phase"]["code"] == 3
+    assert high_alpha["phase"]["code"] == 1
 
     early = cycle_context.build_cycle_context(
         _cfg(), fake, regime={"name": "RECOVERY", "alpha": 0.70})

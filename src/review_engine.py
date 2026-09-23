@@ -5,11 +5,13 @@ from datetime import datetime, timedelta
 
 
 class ReviewEngine:
-    def __init__(self, cfg: dict, data_dir: str, state_manager, alpha_engine, knowledge):
+    def __init__(self, cfg: dict, data_dir: str, state_manager, alpha_engine,
+                 knowledge, evidence=None):
         self.data_dir = data_dir
         self.sm = state_manager
         self.engine = alpha_engine
         self.knowledge = knowledge
+        self.evidence = evidence
         self.price_file = os.path.join(data_dir, "price_history.jsonl")
         self.review_file = os.path.join(data_dir, "review_log.jsonl")
         self.review_day = cfg.get("schedule_day", 1)
@@ -26,23 +28,38 @@ class ReviewEngine:
         with open(self.price_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def should_review(self) -> bool:
-        now = datetime.utcnow()
-        # 必须是每月最后一天
+    @staticmethod
+    def _review_boundary(now: datetime) -> datetime:
+        """最近一个已到的复盘计划时刻 (月末 20:00 UTC); 本月未到则取上月末."""
         from calendar import monthrange
-        last_day = monthrange(now.year, now.month)[1]
-        if now.day != last_day:
-            return False
-        # 晚上 20:00 之后
-        if now.hour < 20:
-            return False
-        # 检查是否已在本月复盘过
+
+        def month_end(year: int, month: int) -> datetime:
+            return datetime(year, month, monthrange(year, month)[1], 20, 0, 0)
+
+        boundary = month_end(now.year, now.month)
+        if boundary > now:
+            if now.month == 1:
+                boundary = month_end(now.year - 1, 12)
+            else:
+                boundary = month_end(now.year, now.month - 1)
+        return boundary
+
+    def should_review(self, now: datetime = None) -> bool:
+        """补偿式触发判断: 按"最近一个已到的计划时刻"(月末 20:00 UTC)比较.
+
+        分析调度 (周二/四/六) 与月末 20:00 不重合, 因此不在当天判断, 而是看
+        最近一个应执行的复盘时刻是否已到且尚未复盘 (last_review_at < 该时刻);
+        错过后在下一个运行日补偿执行, 同一时刻只复盘一次 (幂等).
+        """
+        now = now or datetime.utcnow()
+        boundary = self._review_boundary(now)
         last = self.sm.get("runtime.last_review_at", "")
         if last:
             try:
-                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-                if last_dt.year == now.year and last_dt.month == now.month:
-                    return False  # 本月已复盘
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00")) \
+                    .replace(tzinfo=None)
+                if last_dt >= boundary:
+                    return False  # 本周期已复盘
             except ValueError:
                 pass
         # 最低分析次数门槛
@@ -514,9 +531,12 @@ class ReviewEngine:
                     self.engine.evidence_cfg["high_conf_min_total"] = clamp(param, float(new_val))
                 elif param == "evidence.decay_per_cycle":
                     val = clamp(param, float(new_val))
+                    if self.evidence is None:
+                        errors.append(f"{param}: 证据累加器未注入, 跳过")
+                        continue
                     self.engine.evidence_cfg["decay_per_cycle"] = val
                     self.knowledge.drift_cfg["decay_per_cycle"] = val
-                    self.engine.evidence.decay = val
+                    self.evidence.set_decay(val)
                 elif param == "confidence_gate.low_confidence_blocks_regime_change":
                     self.engine.conf_gate["low_confidence_blocks_regime_change"] = bool(new_val)
                 elif param == "confidence_gate.low_confidence_max_alpha_abs":

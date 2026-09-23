@@ -18,7 +18,8 @@ from src.memory import Memory
 from src.state_manager import StateManager
 from src.fetcher import Fetcher
 from src.analyzer import Analyzer
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator, REGIME_TRANSITIONS
+from src.alpha_engine import (AlphaEngine, EvidenceAccumulator,
+                              REGIME_ALPHA_MAP, REGIME_TRANSITIONS)
 from src.knowledge import Knowledge
 from src.ma_context import build_ma_context, summarize_ma_context
 from src.cycle_context import build_cycle_context
@@ -78,6 +79,11 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
         print(f"[Promo] 推送帖子失败: {e}")
 
 
+def _valid_cycle_position(cp) -> bool:
+    """AI 输出 cp 合法性守卫 (与 analyzer 校验同口径): 仅 7 个 regime."""
+    return cp in REGIME_ALPHA_MAP
+
+
 def _select_progress(rp, ok: bool, cp: str, current_regime: str,
                      old_progress: float) -> float:
     """选择本轮要落盘的 regime_progress (纯函数, 便于测试).
@@ -114,7 +120,8 @@ def init_components(cfg: dict):
     tradesync = TradeSync(cfg.get("tradesync", {}), data_dir)
     datafeed = DataFeed(cfg.get("datafeed", {}))
     dingtalk = DingTalk(cfg.get("dingtalk", {}))
-    review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine, knowledge)
+    review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine,
+                          knowledge, evidence=evidence)
 
     return {
         "cfg": cfg, "data_dir": data_dir,
@@ -294,9 +301,13 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             print("[Backfill]   分析失败，跳过本批")
             continue
 
+        cp = analysis.get("cycle_position", "BEAR")
+        if not _valid_cycle_position(cp):
+            print(f"[Backfill]   非法 cycle_position={cp!r}, 拒绝本批")
+            continue
+
         sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
 
-        cp = analysis.get("cycle_position", "BEAR")
         scores = analysis.get("evidence_scores", {})
         meta = analysis.get("meta", {})
         print(f"[Backfill]   cycle_position={cp}, scores={json.dumps(scores)}, "
@@ -513,6 +524,10 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
         a = analyzer.analyze(batch, ctx, kb,
                              market_state=build_market_state(c, persist_ma=False))
         if a:
+            cp = a.get("cycle_position")
+            if not _valid_cycle_position(cp):
+                print(f"[首次分析]   非法 cycle_position={cp!r}, 拒绝本批")
+                continue
             last_analysis = a
             print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
                   f"progress={a.get('regime_progress','?')}, "

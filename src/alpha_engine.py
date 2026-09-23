@@ -352,6 +352,10 @@ class EvidenceAccumulator:
         self.sm = state_manager
         self.decay = decay_per_cycle
 
+    def set_decay(self, value: float):
+        """设置每轮证据衰减量 (月度复盘校准用)."""
+        self.decay = float(value)
+
     def update(self, regime: str, category: str, score: float):
         """累积某 regime 在某类别上的证据分."""
         by_regime = self.sm.get("evidence.accumulators", {})
