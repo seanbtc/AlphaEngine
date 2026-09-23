@@ -848,6 +848,10 @@ class _IdleFetcher:
 def _idle_components(tmp_path, ma_cfg, datafeed):
     components = _cycle_components(tmp_path, ma_cfg, datafeed)
     components["fetcher"] = _IdleFetcher()
+    # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
+    components["state"].set(
+        "runtime.last_tick_at",
+        (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
     return components
 
 

@@ -6,7 +6,7 @@
 """
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -170,6 +170,9 @@ def _components(tmp_path, analysis, regime="RECOVERY", alpha=0.70,
     sm.set("alpha.current", alpha)
     sm.set("alpha.target", alpha)
     sm.set("alpha.regime_progress", progress)
+    # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
+    sm.set("runtime.last_tick_at",
+           (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
     engine = AlphaEngine(alpha_cfg or {"smoothing": {},
                                        "stability": {"required_confirmations": 1}},
                          sm)

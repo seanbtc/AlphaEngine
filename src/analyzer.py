@@ -106,7 +106,7 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 仓位变化完全由你的方向确认 (cycle_position) 驱动: 确认 RECOVERY → 翻多建仓,
 确认 BEAR_DEEP/BEAR → 回深熊加空。
 
-- 引擎 alpha 每日最多向目标移动 0.02, 目标随你每次输出的 regime_progress 逐日微调
+- 引擎 alpha 按**自然日**推进: 每轮按距上次推进的自然日数折算步长 (单轮上限 0.05, 下限 0.015), 无推文日同样按自然日推进; 目标随你每次输出的 regime_progress 调整
 - 你的 regime_progress 判断直接影响 alpha 目标: 越接近 1.0 表示该位置越接近尾声
 
 ## 判定标准

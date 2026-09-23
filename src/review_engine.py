@@ -3,6 +3,9 @@ import json
 import os
 from datetime import datetime, timedelta
 
+from src.alpha_engine import REGIME_EXPECTED_DAYS
+from src.params_store import append_calibration_log, apply_param, save_overlay
+
 
 class ReviewEngine:
     def __init__(self, cfg: dict, data_dir: str, state_manager, alpha_engine,
@@ -295,14 +298,16 @@ class ReviewEngine:
 
     def _ai_calibration(self, regime_stats: dict, alpha_stats: dict) -> dict:
         """调用 DeepSeek 分析复盘数据, 输出参数调整建议."""
-        from src.alpha_engine import REGIME_EXPECTED_DAYS
-
         analyzer = self.knowledge.analyzer
         if not getattr(analyzer, "enabled", True):
             return self._fallback_calibration(regime_stats, alpha_stats)
 
         # 读取上次复盘记录 (用于对比调整效果)
         previous_adjustments = self._load_last_adjustments()
+
+        # 当前预期天数: 以引擎实际生效值 (含 config 覆盖/历史校准) 为准
+        expected_days = dict(getattr(self.engine, "expected_days", None)
+                             or REGIME_EXPECTED_DAYS)
 
         current_params = {
             "smoothing": {
@@ -321,7 +326,7 @@ class ReviewEngine:
                 "low_confidence_blocks_regime_change": self.engine.conf_gate.get("low_confidence_blocks_regime_change", True),
                 "low_confidence_max_alpha_abs": self.engine.conf_gate.get("low_confidence_max_alpha_abs", 0.3),
             },
-            "regime_expected_days": REGIME_EXPECTED_DAYS,
+            "regime_expected_days": expected_days,
             "regime_alpha_map": self.engine.alpha_map,
         }
 
@@ -340,8 +345,8 @@ class ReviewEngine:
 {json.dumps(current_params, ensure_ascii=False, indent=2)}
 
 ## 可调参数说明与边界
-1. **smoothing.max_change_per_step**: 每日最大 alpha 变化, 范围 [0.01, 0.10], 控制仓位调整速度
-2. **smoothing.min_daily_step**: 每日最小 alpha 变化, 范围 [0.005, 0.05], 确保无推文时也推进
+1. **smoothing.max_change_per_step**: 单轮最大 alpha 变化 (按自然日数折算后的单轮上限), 范围 [0.01, 0.10], 控制仓位调整速度
+2. **smoothing.min_daily_step**: 单轮最小 alpha 变化 (按自然日数折算后的单轮下限), 范围 [0.005, 0.05], 确保无推文时也推进
 3. **smoothing.cooldown_cycles_after_regime_change**: regime 变更后的冷却轮数, 范围 [3, 30]
 4. **evidence.min_categories_for_regime_change**: 触发 regime 变更所需最少证据类别数, 范围 [1, 5]
 5. **evidence.min_total_score_for_regime_change**: 触发 regime 变更所需证据总分, 范围 [0.5, 3.0]
@@ -475,36 +480,19 @@ class ReviewEngine:
             return []
 
     def apply_calibration(self, review_result: dict):
-        """应用 AI 给出的参数调整 (带安全边界)."""
-        from src.alpha_engine import REGIME_EXPECTED_DAYS
+        """应用 AI 给出的参数调整 (带安全边界), 并落盘 params.json + 校准审计.
 
+        - 内存生效: 同一次调用立即作用于 engine/evidence/knowledge
+        - 持久化: data/params.json (键=参数路径, 值=新值; tmp+原子替换),
+          启动时由 params_store.load_overlay/apply_overlay 恢复 (重启不丢失)
+        - 审计: data/calibration_log.jsonl append {ts,source,param,old,new}
+        """
         calibration = review_result.get("calibration", {})
         adjustments = calibration.get("adjustments", [])
         applied = []
         errors = []
-
-        # 参数安全边界
-        bounds = {
-            "smoothing.max_change_per_step": (0.01, 0.10),
-            "smoothing.min_daily_step": (0.005, 0.05),
-            "smoothing.cooldown_cycles_after_regime_change": (3, 30),
-            "evidence.min_categories_for_regime_change": (1, 5),
-            "evidence.min_total_score_for_regime_change": (0.5, 3.0),
-            "evidence.high_conf_min_categories": (1, 3),
-            "evidence.high_conf_min_total": (0.5, 2.5),
-            "evidence.decay_per_cycle": (0.005, 0.05),
-            "confidence_gate.low_confidence_max_alpha_abs": (0.1, 0.5),
-        }
-
-        def clamp(param, value):
-            if param in bounds:
-                lo, hi = bounds[param]
-                return max(lo, min(hi, value))
-            if param.startswith("regime_expected_days."):
-                return max(30, min(500, int(value)))
-            if param.startswith("regime_alpha_map."):
-                return max(-1.0, min(1.0, float(value)))
-            return value
+        persisted = {}
+        log_entries = []
 
         for adj in adjustments:
             param = adj.get("param", "")
@@ -515,61 +503,42 @@ class ReviewEngine:
                 continue
 
             try:
-                if param == "smoothing.max_change_per_step":
-                    self.engine.smoothing["max_change_per_step"] = clamp(param, float(new_val))
-                elif param == "smoothing.min_daily_step":
-                    self.engine.smoothing["min_daily_step"] = clamp(param, float(new_val))
-                elif param == "smoothing.cooldown_cycles_after_regime_change":
-                    self.engine.smoothing["cooldown_cycles_after_regime_change"] = clamp(param, int(new_val))
-                elif param == "evidence.min_categories_for_regime_change":
-                    self.engine.evidence_cfg["min_categories_for_regime_change"] = clamp(param, int(new_val))
-                elif param == "evidence.min_total_score_for_regime_change":
-                    self.engine.evidence_cfg["min_total_score_for_regime_change"] = clamp(param, float(new_val))
-                elif param == "evidence.high_conf_min_categories":
-                    self.engine.evidence_cfg["high_conf_min_categories"] = clamp(param, int(new_val))
-                elif param == "evidence.high_conf_min_total":
-                    self.engine.evidence_cfg["high_conf_min_total"] = clamp(param, float(new_val))
-                elif param == "evidence.decay_per_cycle":
-                    val = clamp(param, float(new_val))
-                    if self.evidence is None:
-                        errors.append(f"{param}: 证据累加器未注入, 跳过")
-                        continue
-                    self.engine.evidence_cfg["decay_per_cycle"] = val
-                    self.knowledge.drift_cfg["decay_per_cycle"] = val
-                    self.evidence.set_decay(val)
-                elif param == "confidence_gate.low_confidence_blocks_regime_change":
-                    self.engine.conf_gate["low_confidence_blocks_regime_change"] = bool(new_val)
-                elif param == "confidence_gate.low_confidence_max_alpha_abs":
-                    self.engine.conf_gate["low_confidence_max_alpha_abs"] = clamp(param, float(new_val))
-                elif param.startswith("regime_expected_days."):
-                    regime_key = param.split(".", 1)[1]
-                    REGIME_EXPECTED_DAYS[regime_key] = clamp(param, int(new_val))
-                elif param.startswith("regime_alpha_map."):
-                    regime_key = param.split(".", 1)[1]
-                    self.engine.alpha_map[regime_key] = clamp(param, float(new_val))
-                else:
-                    errors.append(f"未知参数: {param}")
-                    continue
-
-                final_val = adj.get("new")
-                if param in bounds or param.startswith("regime_"):
-                    final_val = clamp(param, float(new_val) if "." in str(new_val) else new_val)
-                applied.append(f"{param}: {old_val} → {final_val}")
-
-            except (ValueError, TypeError) as e:
+                ok, final_val, error = apply_param(
+                    self.engine, param, new_val,
+                    evidence=self.evidence, knowledge=self.knowledge)
+            except (ValueError, TypeError, ArithmeticError) as e:
                 errors.append(f"{param}: {e}")
+                continue
+
+            if not ok:
+                errors.append(f"{param}: {error}")
+                continue
+
+            applied.append(f"{param}: {old_val} → {final_val}")
+            persisted[param] = final_val
+            log_entries.append({"param": param, "old": old_val, "new": final_val})
+
+        if persisted:
+            try:
+                save_overlay(self.data_dir, persisted)
+                append_calibration_log(self.data_dir, log_entries,
+                                       source="monthly_review")
+                self.sm.set("runtime.last_calibration_at",
+                            datetime.utcnow().isoformat() + "Z")
+            except OSError as exc:
+                print(f"[Review] 校准落盘失败 (内存已生效, 重启将丢失): {exc}")
 
         if applied:
             print("[Review] AI 校准已应用:")
             for a in applied:
-                print(f"  ✓ {a}")
+                print(f"  [OK] {a}")
         else:
             print("[Review] 无需校准")
 
         if errors:
             print("[Review] 应用中的问题:")
             for e in errors:
-                print(f"  ✗ {e}")
+                print(f"  [!!] {e}")
 
         return applied
 
@@ -602,7 +571,7 @@ class ReviewEngine:
         if cal.get("analysis"):
             print(f"\n  AI 分析: {cal['analysis']}")
         if cal.get("warnings"):
-            print(f"\n  ⚠ 警告:")
+            print(f"\n  [WARN] 警告:")
             for w in cal["warnings"]:
                 print(f"    - {w}")
         if cal.get("adjustments"):

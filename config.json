@@ -43,10 +43,24 @@
 
   "alpha": {
     "smoothing": {
-      "_note": "基于BTC 4年周期的alpha推进规则: min_daily_step=每日最小推进(无推文时也推进), max_change_per_step=每日最大推进上限. 动态步长=1/当前regime预期天数, 但不低于min_daily_step.",
+      "_note": "基于BTC 4年周期的alpha推进规则 (自然日折算): 单轮步长 = clamp(距上次推进的自然日数 / 当前regime预期天数, min_daily_step, max_change_per_step). min_daily_step=单轮下限, max_change_per_step=单轮上限; 无推文轮次 progress 同样按自然日推进 (days/expected_days).",
       "max_change_per_step": 0.05,
       "min_daily_step": 0.015,
       "cooldown_cycles_after_regime_change": 10
+    },
+    "time_semantics": {
+      "_note": "自然日推进: state.runtime.last_tick_at 记录上次推进时刻, 每轮 days_elapsed=clamp((now-last_tick_at)/86400, 0, max_catchup_days); 同日重复运行 elapsed≈0 不重复推进; 旧 state 无 last_tick_at 时首轮仅初始化. 注意: tick_cooldown/tick_stability 仍按轮次(决策机会数)计数, 与自然日推进相互独立.",
+      "max_catchup_days": 7
+    },
+    "regime_expected_days": {
+      "_note": "4年周期(1461天)各阶段预期天数, 覆盖代码内 REGIME_EXPECTED_DAYS (等比放大自旧 1270 天锚表); 用于 progress 推进速率与动态步长折算, 需与 src/alpha_engine.py 锚表保持同步.",
+      "BEAR_BOTTOM": 207,
+      "RECOVERY": 103,
+      "BULL": 420,
+      "DEEP_BULL": 104,
+      "BULL_COOLING": 103,
+      "BEAR": 420,
+      "BEAR_DEEP": 104
     },
     "evidence": {
       "min_categories_for_regime_change": 3,

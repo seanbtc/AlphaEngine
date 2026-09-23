@@ -148,6 +148,9 @@ def _components(tmp_path, fetcher, analyzer, regime="BEAR", alpha=-1.00,
     sm.set("alpha.current", alpha)
     sm.set("alpha.target", alpha)
     sm.set("alpha.regime_progress", progress)
+    # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
+    sm.set("runtime.last_tick_at",
+           (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
     engine = AlphaEngine({"smoothing": {},
                           "stability": {"required_confirmations": 1}}, sm)
     return {
@@ -228,9 +231,40 @@ def test_recovery_cycle_clears_outage_and_resumes_ticks(tmp_path, capsys):
     assert sm.get("runtime.outage") == {}
     assert [a[0] for a in comp["dingtalk"].alerts] == ["数据源故障", "数据源恢复"]
     assert "Idle (no new tweets)" in out
-    assert sm.get("alpha.regime_progress") > 0.5      # 恢复正常推进
+    # 故障恢复不补记: 恢复轮锚点已重置为 now → progress 增量≈0
+    assert sm.get("alpha.regime_progress") == pytest.approx(0.5, abs=1e-6)
     assert sm.get("regime.stability_counter") == 1
     assert sm.get("runtime.analysis_count") == 1
+    # 恢复后从下一轮起按自然日正常推进
+    anchor = datetime.fromisoformat(
+        sm.get("runtime.last_tick_at").replace("Z", "+00:00")).replace(tzinfo=None)
+    comp["engine"].tick_alpha(now=anchor + timedelta(days=1))
+    assert sm.get("alpha.regime_progress") > 0.5
+
+
+def test_recovery_does_not_backfill_three_day_outage(tmp_path, capsys):
+    """WP6 建议1: 3 天故障 → 恢复轮 progress 增量≈0 (而非 3/expected)。"""
+    fetcher = _Fetcher(exc=RuntimeError("boom"))
+    comp = _components(tmp_path, fetcher, _Analyzer(None))
+    sm = comp["state"]
+    # 故障开始前锚点为 3 天前 (若恢复补记, 增量会是 3/420)
+    sm.set("runtime.last_tick_at",
+           (datetime.utcnow() - timedelta(days=3)).isoformat() + "Z")
+    run_cycle(comp)   # fetch_error: 故障轮不推进
+    assert sm.get("alpha.regime_progress") == pytest.approx(0.5)
+    capsys.readouterr()
+
+    fetcher.exc = None
+    run_cycle(comp)   # 恢复轮: _clear_outage 重置锚点 → 不补记 3 天
+    out = capsys.readouterr().out
+
+    assert sm.get("runtime.outage") == {}
+    assert "Idle (no new tweets)" in out
+    assert sm.get("alpha.regime_progress") == pytest.approx(0.5, abs=1e-6)
+    # alpha 仅按单轮下限走一步 (0.02), 与故障天数无关 (非 3 天折算)
+    assert sm.get("alpha.current") == pytest.approx(-0.98)
+    three_days = 3 / 420
+    assert abs(sm.get("alpha.regime_progress") - 0.5) < three_days / 100
 
 
 def test_normal_idle_unchanged_without_outage(tmp_path, capsys):

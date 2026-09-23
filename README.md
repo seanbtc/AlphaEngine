@@ -81,17 +81,42 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 
 | 规则 | 参数 | 效果 |
 |---|---|---|
-| 空闲锁定 | 无新推文时 α 不动 | 不被噪音驱动 |
+| 空闲时间推进 | 无新推文时 α 按自然日推进 (不响应噪音) | 周期钟与日历一致, 与调度频率解耦 |
 | 低置信锁定 | confidence=low 时 α 不动 | 不确定时不动 |
 | 每日一步 | 每天只分析一次 (86400s) | 杜绝日内高频跳变 |
-| 步进上限 | ±0.02/次 (2%) | 从 0 到 ±1 需 50 天 (每周约 7 步) |
-| 冷却期 | 10 步 (10天) | regime 变更后禁止再变 |
+| 自然日步长 | `min_daily_step`/`max_change_per_step` (单轮边界 0.015/0.05) | 步长 = 自然日数/regime 预期天数 (2.33 天≈0.023, RECOVERY) |
+| 冷却期 | 10 轮 (决策机会数, 非自然日) | regime 变更后禁止再变 |
 | 共识门槛 | ≥3 类别、总分 ≥2.0 | 防止单一维度误导 |
 | 质量门槛 | `evidence.min_quality_for_regime_change` (默认 5) | 分析质量不足时拒绝 regime 变更 |
 | 连续确认 | `stability.required_confirmations` (默认 2) | 同一提议连续 N 轮分析成功才执行变更 |
 | 交叉验证 | `cross_check.samples` (默认 2, 1=关闭) | 同 prompt 多采样, `cycle_position` 不一致 → 降为 low |
 | 结构一致性 | `cross_check.structure_check.enabled` (默认开) | 提议增加多头暴露且 close<SMA200 → 降为 low (减仓/清仓方向不拦截) |
 | 合法转换 | 预定义转换表 | 禁止非法跳变 |
+
+### 时间语义（自然日推进）
+
+- **progress/alpha 按自然日推进**：`state.runtime.last_tick_at` 记录上次推进时刻，每轮
+  `days_elapsed = clamp((now - last_tick_at) / 86400, 0, max_catchup_days)`（配置
+  `alpha.time_semantics.max_catchup_days`，默认 7 天）。空闲轮 `progress += days_elapsed / 预期天数`；
+  分析轮步长 = `days_elapsed / 预期天数`，再 clamp 到 `min_daily_step`/`max_change_per_step`
+  （仍为"单轮"边界）。按 `schedule.weekdays` 配置的任意调度（如 3 次/周）周期钟都与日历一致
+  ——旧逻辑每轮 `+1/预期天数`，慢 `7/3≈2.33×`；步长旧逻辑因 `1/90 < 下限` 恒为下限，"动态"失效。
+- **幂等与容错**：旧 state 无 `last_tick_at` 时首轮仅初始化锚点（不推进）；同秒/同日重复
+  运行 `elapsed≈0`，不重复推进；停摆超过 `max_catchup_days` 的部分直接丢弃（不补记）；
+  时间倒流不回退锚点。
+- **轮次语义保留**：`tick_cooldown`/`tick_stability` 仍按"轮次"（决策机会数）计数，与连续
+  确认制/冷却门配套，与自然日推进相互独立（以 3 次/周计，10 轮≈3.3 周而非 10 天；
+  具体以 `schedule.weekdays` 配置为准）。
+- **故障恢复不补记**：`fetch_error`/`analysis_failed` 故障期间周期钟冻结（WP5），恢复时
+  `_clear_outage` 把锚点重置为 now —— 故障时长不计入 progress/步长（恢复轮增量≈0），
+  恢复后从下一轮起按自然日推进。
+- **锚表对齐 4 年周期**：`REGIME_EXPECTED_DAYS` 各 regime 预期天数按 1461 天对齐（旧表
+  1270 天等比放大 ≈×1.15 后取整），合计 = 1461；`config.json.alpha.regime_expected_days`
+  可覆盖（值 clamp [1, 500]），需与 `src/alpha_engine.py` 锚表保持同步。
+- **校准落盘**：月度复盘 `apply_calibration` 在内存生效的同时写 `data/params.json`
+  （键=参数路径，值=新值；tmp+原子替换）并 append `data/calibration_log.jsonl`
+  （时间/参数/旧→新/来源）；启动时只读加载 overlay 恢复（非法文件告警并忽略），
+  重启不再丢失校准结果；`--test-ai` 等只读入口不写任何文件。
 
 连续确认细节：提议 `cp ≠ 当前 regime` 时写入 `state.regime.pending_proposal`
 （同一 cp 连续出现计数 +1，换向重置为 1，提议回到当前 regime 或执行成功后清除）；
@@ -274,7 +299,8 @@ glassnode-engine/
     ├── drift_log.jsonl            # 漂移追踪
     ├── prediction_log.jsonl       # 预测日志
     ├── ma_history.jsonl           # 日线均线快照历史 (按日去重, 跨轮连续性)
-    ├── calibration_log.jsonl      # 校准审计
+    ├── params.json                # 校准参数覆盖 (启动时加载, 重启不丢失)
+    ├── calibration_log.jsonl      # 校准审计 (时间/参数/旧→新/来源)
     └── orders/                    # 交易指令输出 (默认关闭)
 ```
 

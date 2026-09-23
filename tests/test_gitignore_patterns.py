@@ -20,6 +20,9 @@ _ARTIFACTS = [
     "data/knowledge_base.md.bak",
     "data/pending_analysis.jsonl",
     "data/pending_analysis.jsonl.tmp",
+    "data/params.json",
+    "data/params.json.tmp",
+    "data/calibration_log.jsonl",
 ]
 
 

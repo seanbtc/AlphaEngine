@@ -17,6 +17,7 @@ import requests
 
 from src.config_loader import load_config, resolve_data_dir
 from src.memory import Memory
+from src.params_store import apply_overlay, load_overlay
 from src.singleton_lock import SingletonLock
 from src.state_manager import StateManager
 from src.fetcher import Fetcher
@@ -180,6 +181,17 @@ def init_components(cfg: dict):
     evidence = EvidenceAccumulator(
         state_mgr, cfg.get("alpha", {}).get("evidence", {}).get("decay_per_cycle", 0.02))
     knowledge = Knowledge(cfg.get("knowledge", {}), data_dir, analyzer)
+
+    # 校准覆盖恢复 (data/params.json): 只读加载, 重启后仍生效;
+    # 非法文件容错告警, 不影响启动。--test-ai 等只读入口同样只读不写。
+    overlay = load_overlay(data_dir)
+    if overlay:
+        applied_overlay = apply_overlay(engine, overlay, evidence=evidence,
+                                        knowledge=knowledge)
+        if applied_overlay:
+            print(f"[Params] 已加载校准覆盖 {len(applied_overlay)} 项: "
+                  + ", ".join(applied_overlay))
+
     tradesync = TradeSync(cfg.get("tradesync", {}), data_dir)
     datafeed = DataFeed(cfg.get("datafeed", {}))
     review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine,
@@ -730,12 +742,17 @@ def _set_outage(components: dict, reason: str, detail: str = "") -> dict:
 
 
 def _clear_outage(components: dict, detail: str = "") -> bool:
-    """清除故障态 (抓取/分析已恢复); 仅在实际处于故障态时恢复告警一次."""
+    """清除故障态 (抓取/分析已恢复); 仅在实际处于故障态时恢复告警一次.
+
+    故障时长不计入周期钟: 同步把自然日锚点重置为 now —— 与 WP5 "故障轮不推进"
+    语义一致, 恢复轮 progress 增量≈0 (不补记故障期间的天数)。
+    """
     sm = components["state"]
     current = sm.get("runtime.outage") or {}
     if not (isinstance(current, dict) and current):
         return False
     sm.set("runtime.outage", {})
+    sm.set("runtime.last_tick_at", datetime.utcnow().isoformat() + "Z")
     reason = current.get("reason", "?")
     since = current.get("since", "?")
     suffix = f", {detail}" if detail else ""
@@ -1094,7 +1111,8 @@ def run_cycle(components: dict) -> bool:
             print("  [Outage] 数据缺失: 本轮不推进 "
                   "alpha/progress/cooldown/stability/evidence")
         else:
-            # 基于4年周期时间推进 alpha (不依赖推文频率)
+            # 基于4年周期时间推进 alpha (按自然日折算, 与调度频率解耦;
+            # cooldown/stability 仍按轮次=决策机会数, 与自然日推进相互独立)
             print("\n--- Idle (no new tweets) ---")
             if fetched_ok:
                 _clear_outage(c, "抓取成功 (无新推文)")
@@ -1115,7 +1133,7 @@ def run_cycle(components: dict) -> bool:
                     "regime": engine.get_regime(),
                     "target_alpha": target,
                     "btc_price": btc_price,
-                    "note": "时间推进: 无推文时按4年周期推进alpha",
+                    "note": "时间推进: 无推文时按4年周期(自然日折算)推进alpha",
                 })
                 dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(),
                                       btc_price, target)

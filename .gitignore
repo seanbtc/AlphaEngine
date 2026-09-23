@@ -10,6 +10,9 @@ data/price_history.jsonl
 data/ma_history.jsonl
 data/pending_analysis.jsonl
 data/pending_analysis.jsonl.tmp
+data/params.json
+data/params.json.tmp
+data/calibration_log.jsonl
 data/.lock
 data/.lock.tmp.*
 data/*.corrupt.*
