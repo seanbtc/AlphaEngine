@@ -103,6 +103,36 @@ def _select_progress(rp, ok: bool, cp: str, current_regime: str,
     return old_progress
 
 
+# 发单一致性: alpha 变化判定阈值 (浮点误差同量级)
+_ALPHA_ORDER_EPS = 1e-9
+
+
+def _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start: float,
+                                 btc_price, *, reason: str):
+    """统一发单钩子: 本轮 alpha 相对周期起点变化时, 把最终值发给 TradeSync.
+
+    任何会改 alpha 的路径 (regime 变更 / deferred_build / SIDE-FIX / step /
+    idle 时间推进) 都在该轮结束时调用本钩子一次, 保证引擎 alpha 与发单指令一致;
+    多点变更只发本轮最终值 (每轮至多一次)。
+    引导路径 (run_first_analysis / run_backfill) 豁免, 不调用本钩子。
+    发送异常或 None (未启用/同向去重/发送失败) 不影响主流程。
+    """
+    final = engine.get_alpha()
+    if abs(final - alpha_cycle_start) <= _ALPHA_ORDER_EPS:
+        return None
+    regime = engine.get_regime()
+    try:
+        order = tradesync.send_order(final, regime, btc_price)
+    except Exception as exc:
+        print(f"  [TradeSync] alpha {alpha_cycle_start:+.4f} → {final:+.4f} | "
+              f"regime={regime} | reason={reason} | 发送异常 (不影响本轮): {exc}")
+        return None
+    status = "已发送" if order else "未生效 (未启用/同向去重/发送失败)"
+    print(f"  [TradeSync] alpha {alpha_cycle_start:+.4f} → {final:+.4f} | "
+          f"regime={regime} | reason={reason} | {status}")
+    return order
+
+
 def init_components(cfg: dict):
     data_dir = resolve_data_dir(cfg)
     os.makedirs(data_dir, exist_ok=True)
@@ -371,6 +401,8 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print(f"[Backfill] REGIME: {current} → {final_regime} ({rc['regime_evidence']})")
         dingtalk.regime_change(current, final_regime, rc["regime_evidence"], target)
 
+    # 引导路径豁免发单: 回溯属一次性状态引导, 不调用 run_cycle 的统一发单钩子,
+    # 不产生 TradeSync 交易指令
     sm.set("alpha.regime_progress", progress)
     sm.set("alpha.deferred_build", False)
     sm.set("alpha.current", target)
@@ -580,6 +612,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
         print(f"[首次分析] Regime 保持 {cp}")
 
     # 5. alpha 直接定位到当前目标 (首次不走步进)
+    # 引导路径豁免发单: 首次分析属状态引导, 不调用 run_cycle 的统一发单钩子
     target = engine.calculate_target_alpha(engine.get_regime(), progress)
     sm.set("alpha.deferred_build", False)
     sm.set("alpha.current", target)
@@ -659,6 +692,9 @@ def run_cycle(components: dict) -> bool:
     if btc_price:
         print(f"[BTC] ${btc_price:,.2f}")
         review.record_price(btc_price, engine.get_regime(), engine.get_alpha())
+
+    # 1.1 发单一致性基准: btc_price 确定后、任何 alpha 变更之前记录本轮起点
+    alpha_cycle_start = engine.get_alpha()
 
     # 1.5 预测审计 (幂等): 到期预测写回结果侧车。
     # 原先只在周日蒸馏时执行, 而当前调度为周二/周四 → 永不触发, 这里改为每轮执行。
@@ -817,13 +853,19 @@ def run_cycle(components: dict) -> bool:
         except Exception as exc:
             print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
+        # 发单一致性: 时间推进改 alpha 也要与 TradeSync 指令保持一致
+        _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start,
+                                     btc_price, reason="idle_tick")
+
         sm.update_runtime()
         sm.save()
         return False
 
     # 6.5 右侧纪律兜底: 仓位符号与周期方向侧冲突 → 先平仓, 本轮不再步进
     clamp_old = engine.get_alpha()
+    order_reason = "step"
     if engine.enforce_side_constraint():
+        order_reason = "side_fix"
         clamp_new = engine.get_alpha()
         clamp_target = engine.calculate_target_alpha(engine.get_regime(), progress)
         print(f"  [SIDE-FIX] Alpha {clamp_old:+.4f} → {clamp_new:+.4f} "
@@ -850,6 +892,9 @@ def run_cycle(components: dict) -> bool:
         engine.tick_stability()
     elif regime_changed_this_cycle:
         # 分两步快速换仓: 变更日只平仓归零, 次日再由 step_alpha 直接定位到目标
+        order_reason = ("deferred_build"
+                        if sm.get("alpha.deferred_build", False)
+                        else "regime_change")
         target_alpha = engine.calculate_target_alpha(engine.get_regime(), progress)
         print(f"  Alpha: 变更日平仓至 {old_alpha:+.4f} (deferred_build), "
               f"次日定位到 {target_alpha:+.4f}")
@@ -864,6 +909,7 @@ def run_cycle(components: dict) -> bool:
         engine.tick_cooldown()
         engine.tick_stability()
     elif conf == "low":
+        order_reason = "low_confidence"
         print(f"  Alpha: 保持不变 (置信度 low, 锁定)")
         engine.tick_cooldown()
         engine.tick_stability()
@@ -885,9 +931,10 @@ def run_cycle(components: dict) -> bool:
             dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price,
                                   engine.calculate_target_alpha(engine.get_regime(), progress))
 
-    # 8. 发送交易指令
-    if alpha_changed:
-        order = tradesync.send_order(new_alpha, engine.get_regime(), btc_price)
+    # 8. 发送交易指令 (统一发单钩子: 任何 alpha 变更路径都补发, 每轮至多一次;
+    #    多点变更只发本轮最终值, 客户端内存去重)
+    _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start, btc_price,
+                                 reason=order_reason)
 
     # 9. 更新 memory (仅当有新分析)
     if has_analysis and analysis:
