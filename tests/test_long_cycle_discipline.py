@@ -226,7 +226,8 @@ def _build_components(tmp_path, analysis, regime="RECOVERY", alpha=0.70,
     sm.set("alpha.target", alpha)
     sm.set("alpha.regime_progress", progress)
 
-    engine = AlphaEngine({"smoothing": {}}, sm)
+    engine = AlphaEngine({"smoothing": {},
+                          "stability": {"required_confirmations": 1}}, sm)
     return {
         "cfg": {"schedule": {"min_analysis_interval_hours": 0}},
         "memory": _FakeMemory(),

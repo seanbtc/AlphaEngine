@@ -41,8 +41,7 @@
       "_note": "基于BTC 4年周期的alpha推进规则: min_daily_step=每日最小推进(无推文时也推进), max_change_per_step=每日最大推进上限. 动态步长=1/当前regime预期天数, 但不低于min_daily_step.",
       "max_change_per_step": 0.05,
       "min_daily_step": 0.015,
-      "cooldown_cycles_after_regime_change": 10,
-      "min_cycles_for_extreme_alpha": 20
+      "cooldown_cycles_after_regime_change": 10
     },
     "evidence": {
       "min_categories_for_regime_change": 3,
@@ -50,7 +49,19 @@
       "high_conf_min_categories": 2,
       "high_conf_min_total": 1.5,
       "decay_per_cycle": 0.01,
-      "stability_window": 5
+      "require_quality": true,
+      "min_quality_for_regime_change": 5
+    },
+    "stability": {
+      "_note": "连续同向确认: 提议 regime ≠ 当前时, 需连续 N 轮'有新推文且分析成功'的同一提议才执行变更 (1=关闭确认, 与旧行为一致); 被其它门(冷却/低置信/质量/共识)拒绝时待确认计数保留; idle 不计数不重置; 首轮/回溯豁免确认",
+      "required_confirmations": 2
+    },
+    "cross_check": {
+      "_note": "单次判断交叉验证: 同一 prompt 采样 samples 次 (1=关闭); 样本 cycle_position 不一致 → cycle_confidence 降级 low (走既有低置信门, 不新增输出字段); structure_check (方向感知): 仅当提议 cp 为多头侧正暴露 (REGIME_ALPHA_MAP[cp] > 0) 且 > 当前 alpha + 0.005 (加多) 且 close<SMA200 (MA 数据可用时) 才降级; 熊侧空头减仓 (BEAR→BEAR_DEEP/BEAR_DEEP→BEAR_BOTTOM) 与牛侧减仓/清仓 (BULL→DEEP_BULL/DEEP_BULL→BULL_COOLING) 不拦截; market_state 缺 alpha 时回退为仅 cp==BULL 触发",
+      "samples": 2,
+      "structure_check": {
+        "enabled": true
+      }
     },
     "confidence_gate": {
       "low_confidence_blocks_regime_change": true,

@@ -92,6 +92,7 @@ class AlphaEngine:
         self.smoothing = cfg.get("smoothing", {})
         self.evidence_cfg = cfg.get("evidence", {})
         self.conf_gate = cfg.get("confidence_gate", {})
+        self.stability_cfg = cfg.get("stability", {})
         self.alpha_map = cfg.get("regime_alpha_map", REGIME_ALPHA_MAP)
 
     # ---- Regime ----
@@ -117,13 +118,76 @@ class AlphaEngine:
         if self.conf_gate.get("low_confidence_blocks_regime_change", True) and confidence == "low":
             return False, "置信度为 low，拒绝 regime 变更"
 
-        if self.evidence_cfg.get("require_quality", False) and meta_quality < 5:
-            return False, f"分析质量太低 ({meta_quality})，拒绝 regime 变更"
+        if self.evidence_cfg.get("require_quality", False):
+            min_quality = self.min_quality_for_regime_change()
+            if meta_quality < min_quality:
+                return False, (f"分析质量太低 (quality={meta_quality} < "
+                               f"min_quality_for_regime_change={min_quality})，"
+                               f"拒绝 regime 变更")
 
         if not self._check_evidence_consensus(evidence_scores, confidence):
             return False, "证据共识不足"
 
         return True, ""
+
+    def min_quality_for_regime_change(self) -> int:
+        """质量门阈值 (alpha.evidence.min_quality_for_regime_change, 默认 5)."""
+        try:
+            value = int(self.evidence_cfg.get("min_quality_for_regime_change", 5))
+        except (TypeError, ValueError):
+            value = 5
+        return max(0, value)
+
+    # ---- 连续同向确认 (pending proposal) ----
+
+    def required_confirmations(self) -> int:
+        """连续同向确认次数 (alpha.stability.required_confirmations, 默认 2; 1=关闭)."""
+        try:
+            value = int(self.stability_cfg.get("required_confirmations", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return max(1, value)
+
+    def get_pending_proposal(self) -> dict:
+        pending = self.sm.get("regime.pending_proposal", {})
+        return pending if isinstance(pending, dict) else {}
+
+    @staticmethod
+    def pending_count(pending: dict) -> int:
+        """pending 计数安全读取: 非法值归零, 不因脏数据中断轮次."""
+        try:
+            return int((pending or {}).get("count", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def note_regime_proposal(self, proposed_regime: str) -> dict:
+        """记录一次同向提议 (仅"有新推文且分析成功"的轮次调用), 返回更新后的 pending.
+
+        同一 cp 连续出现 → count+1; 换 cp → 重置为 1; 提议回到当前 regime → 清除。
+        idle 轮次不调用本方法 (不计数不重置)。
+        """
+        current = self.get_regime()
+        if proposed_regime == current:
+            self.clear_pending_proposal()
+            return {}
+        now = datetime.utcnow().isoformat() + "Z"
+        pending = self.get_pending_proposal()
+        if pending.get("cp") == proposed_regime:
+            pending["count"] = self.pending_count(pending) + 1
+            pending["last_at"] = now
+        else:
+            pending = {"cp": proposed_regime, "count": 1,
+                       "first_at": now, "last_at": now}
+        self.sm.set("regime.pending_proposal", pending)
+        return pending
+
+    def clear_pending_proposal(self):
+        self.sm.set("regime.pending_proposal", {})
+
+    def proposal_ready(self, pending: dict = None) -> bool:
+        """pending 计数是否达到 required_confirmations (可执行 request_regime_change)."""
+        pending = pending if pending is not None else self.get_pending_proposal()
+        return self.pending_count(pending) >= self.required_confirmations()
 
     def _check_evidence_consensus(self, evidence_scores: dict, confidence: str = "medium") -> bool:
         """检查是否有足够多的类别达成共识.
@@ -178,6 +242,7 @@ class AlphaEngine:
     def execute_regime_change(self, new_regime: str, progress: float = 0.0) -> str:
         current = self.get_regime()
         now = datetime.utcnow().isoformat() + "Z"
+        self.clear_pending_proposal()
         self.sm.set("regime.current", new_regime)
         self.sm.set("regime.entered_from", current)
         self.sm.set("regime.started_at", now)

@@ -272,6 +272,15 @@ class Analyzer:
         self.send_tweet_content = bool(cfg.get("send_tweet_content", True))
         # 非 BTC 主题推文过滤 (降噪)
         self.filter_non_btc = bool(cfg.get("filter_non_btc", True))
+        # 单次判断交叉验证 (alpha.cross_check): samples=1 完全回退旧行为
+        cross_check = cfg.get("cross_check") or {}
+        try:
+            samples = int(cross_check.get("samples", 2))
+        except (TypeError, ValueError):
+            samples = 2
+        self.cross_check_samples = max(1, samples)
+        structure = cross_check.get("structure_check") or {}
+        self.structure_check_enabled = bool(structure.get("enabled", True))
         self._image_cache: dict[str, str] = {}  # URL → base64 data URL (重试时避免重复下载)
         self.client = AIClient(endpoint=self.endpoint, timeout=self.timeout)
         if not self.enabled:
@@ -653,7 +662,8 @@ class Analyzer:
             result, retryable = self._call_api(user_msg, images=images)
             if result is not None:
                 if self._validate(result):
-                    return result
+                    result = self._cross_check(result, user_msg, images=images)
+                    return self._apply_structure_check(result, market_state)
                 print("[Analyzer] VALIDATION failed, treating as failure")
                 retryable = True
 
@@ -716,6 +726,98 @@ class Analyzer:
             print(f"[Analyzer] VALIDATION: bad cycle_confidence: {result['cycle_confidence']}")
             return False
         return True
+
+    def _cross_check(self, first: dict, user_msg: str,
+                     images: list[str] = None) -> dict:
+        """单次判断交叉验证: 同一 prompt 采样 samples 次, 比较 cycle_position.
+
+        首样本由调用方保证有效; 额外样本无效则忽略 (不重试, 控制成本);
+        全部一致 → 返回首样本; 不一致 → 复制并降级 cycle_confidence=low
+        (不新增/不改动其它字段, 走既有低置信门)。
+        """
+        samples = self.cross_check_samples
+        if samples <= 1:
+            return first
+        positions = [first.get("cycle_position")]
+        for index in range(2, samples + 1):
+            extra, retryable = self._call_api(user_msg, images=images)
+            if extra is None:
+                print(f"[Analyzer] 交叉验证样本 {index}/{samples} 无效 "
+                      f"(调用失败, retryable={retryable}), 忽略")
+                continue
+            if not self._validate(extra):
+                print(f"[Analyzer] 交叉验证样本 {index}/{samples} 无效 "
+                      f"(输出校验不通过), 忽略")
+                continue
+            positions.append(extra.get("cycle_position"))
+        if len(positions) < 2:
+            print("[Analyzer] 交叉验证: 有效样本不足 2 个, 按首样本返回")
+            return first
+        if len(set(positions)) == 1:
+            print(f"[Analyzer] 交叉验证一致 ({len(positions)} 样本): "
+                  f"cp={positions[0]}")
+            return first
+        print(f"[Analyzer] 交叉验证不一致: 样本 cp={positions} "
+              f"→ 降级 cycle_confidence=low")
+        degraded = dict(first)
+        degraded["cycle_confidence"] = "low"
+        return degraded
+
+    _STRUCTURE_ALPHA_TOLERANCE = 0.005
+
+    @staticmethod
+    def _increases_long_exposure(cp: str, market_state: dict | None) -> bool:
+        """提议 cp 是否为多头侧正暴露且相对当前 alpha 加仓 (容差 0.005).
+
+        仅"目标 alpha > 0 且 > 当前 alpha + 0.005"才触发结构降级:
+        - 熊侧空头减仓 (BEAR→BEAR_DEEP、BEAR_DEEP→BEAR_BOTTOM) 目标 alpha <= 0,
+          在 close<SMA200 时属正常路径, 不得降级;
+        - 牛侧减仓/清仓 (BULL→DEEP_BULL、DEEP_BULL→BULL_COOLING) 目标 alpha <= 当前,
+          不得阻断唯一降风险路径;
+        - market_state 缺 alpha (或非法) 时回退为仅 BULL 触发。
+        """
+        alpha = (market_state or {}).get("alpha")
+        if alpha is None:
+            return cp == "BULL"
+        try:
+            alpha_value = float(alpha)
+        except (TypeError, ValueError):
+            return cp == "BULL"
+        target = float(REGIME_ALPHA_MAP.get(cp, 0.0))
+        if target <= 0:
+            return False
+        return target > alpha_value + Analyzer._STRUCTURE_ALPHA_TOLERANCE
+
+    def _apply_structure_check(self, result: dict,
+                               market_state: dict | None) -> dict:
+        """结构一致性检查: 周期判定与价格结构明显冲突时降 conf 至 low.
+
+        仅当提议 cp 为多头侧正暴露且相对当前 alpha 加仓
+        (REGIME_ALPHA_MAP[cp] > 0 且 > alpha + 0.005) 且 close < SMA200 (MA 数据可用)
+        时降级; 熊侧空头减仓、牛侧减仓/清仓与其余组合不干预。
+        """
+        if not self.structure_check_enabled:
+            return result
+        cp = result.get("cycle_position")
+        if not self._increases_long_exposure(cp, market_state):
+            return result
+        snapshot = ((market_state or {}).get("ma_context") or {}).get("snapshot") or {}
+        price = snapshot.get("price")
+        sma200 = ((snapshot.get("mas") or {}).get("sma200") or {}).get("value")
+        if price is None or sma200 is None:
+            return result
+        try:
+            price = float(price)
+            sma200 = float(sma200)
+        except (TypeError, ValueError):
+            return result
+        if price >= sma200:
+            return result
+        print(f"[Analyzer] 结构一致性冲突: cp={cp} 增加多头暴露 但 close={price:.0f} "
+              f"< SMA200={sma200:.0f} → 降级 cycle_confidence=low")
+        degraded = dict(result)
+        degraded["cycle_confidence"] = "low"
+        return degraded
 
     def _call_api(self, user_msg: str, images: list[str] = None) -> (dict | None, bool):
         """经统一 AI 服务调用。返回 (解析结果, 是否可重试).

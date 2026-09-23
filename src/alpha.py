@@ -112,7 +112,9 @@ def init_components(cfg: dict):
     state_mgr.load()
 
     fetcher = Fetcher(cfg.get("fetcher", {}), data_dir)
-    analyzer = Analyzer(cfg.get("ai_service") or cfg.get("deepseek") or {})
+    ai_cfg = dict(cfg.get("ai_service") or cfg.get("deepseek") or {})
+    ai_cfg["cross_check"] = (cfg.get("alpha") or {}).get("cross_check") or {}
+    analyzer = Analyzer(ai_cfg)
     engine = AlphaEngine(cfg.get("alpha", {}), state_mgr)
     evidence = EvidenceAccumulator(
         state_mgr, cfg.get("alpha", {}).get("evidence", {}).get("decay_per_cycle", 0.02))
@@ -140,8 +142,16 @@ def print_status(components: dict):
     alpha = sm.get_alpha()
     count = sm.get("runtime.analysis_count", 0)
     print(f"\n[Status] Regime={regime} | Alpha={alpha:+.4f} | Analyses={count}")
-    print(f"         Cooldown={sm.get('regime.cooldown_remaining',0)} | "
-          f"Stability={sm.get('regime.stability_counter',0)}")
+    line = (f"         Cooldown={sm.get('regime.cooldown_remaining',0)} | "
+            f"Stability={sm.get('regime.stability_counter',0)}")
+    engine = components.get("engine")
+    if engine is not None:
+        pending = engine.get_pending_proposal()
+        if pending:
+            line += (f" | Pending={pending.get('cp')}"
+                     f"({engine.pending_count(pending)}/"
+                     f"{engine.required_confirmations()})")
+    print(line)
 
 
 def build_market_state(components: dict, price: float = None,
@@ -369,6 +379,8 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     sm.set("alpha.last_change_at", datetime.utcnow().isoformat() + "Z")
     sm.set("regime.cooldown_remaining", 0)
     sm.set("regime.stability_counter", 0)
+    # 回溯为一次性引导: 统一清除待确认提议 (含 final_regime == current 路径)
+    engine.clear_pending_proposal()
 
     print(f"[Backfill] Alpha 直接设为 {target:+.4f} (regime={final_regime})")
 
@@ -717,8 +729,23 @@ def run_cycle(components: dict) -> bool:
                 evidence.update(cp, cat, float(score))
 
             current_regime = engine.get_regime()
-            ok, reason = engine.request_regime_change(cp, scores, conf,
-                                                       meta.get("analysis_quality", 8))
+            # 连续同向确认 (alpha.stability.required_confirmations):
+            # 同一提议需连续 N 轮"有新推文且分析成功"才执行; 被其它门拒绝时 pending 保留;
+            # idle 轮次不计数不重置; 提议回到当前 regime 或执行成功 → 清除。
+            if cp == current_regime:
+                engine.clear_pending_proposal()
+                ok, reason = True, ""
+            else:
+                pending = engine.note_regime_proposal(cp)
+                if engine.proposal_ready(pending):
+                    ok, reason = engine.request_regime_change(
+                        cp, scores, conf, meta.get("analysis_quality", 8))
+                    if ok:
+                        engine.clear_pending_proposal()
+                else:
+                    count = engine.pending_count(pending)
+                    ok, reason = False, (f"待确认 {count}/"
+                                         f"{engine.required_confirmations()}")
             # 周期内进度 → 动态目标 (状态感知):
             # 仅当提议被接受或 AI 描述的正是当前 regime 时才采用新进度;
             # 被拒且指向其它 regime 时保留旧值, 不参与 target 计算.

@@ -87,7 +87,29 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 | 步进上限 | ±0.02/次 (2%) | 从 0 到 ±1 需 50 天 (每周约 7 步) |
 | 冷却期 | 10 步 (10天) | regime 变更后禁止再变 |
 | 共识门槛 | ≥3 类别、总分 ≥2.0 | 防止单一维度误导 |
+| 质量门槛 | `evidence.min_quality_for_regime_change` (默认 5) | 分析质量不足时拒绝 regime 变更 |
+| 连续确认 | `stability.required_confirmations` (默认 2) | 同一提议连续 N 轮分析成功才执行变更 |
+| 交叉验证 | `cross_check.samples` (默认 2, 1=关闭) | 同 prompt 多采样, `cycle_position` 不一致 → 降为 low |
+| 结构一致性 | `cross_check.structure_check.enabled` (默认开) | 提议增加多头暴露且 close<SMA200 → 降为 low (减仓/清仓方向不拦截) |
 | 合法转换 | 预定义转换表 | 禁止非法跳变 |
+
+连续确认细节：提议 `cp ≠ 当前 regime` 时写入 `state.regime.pending_proposal`
+（同一 cp 连续出现计数 +1，换向重置为 1，提议回到当前 regime 或执行成功后清除）；
+仅"有新推文且分析成功"的轮次计数，空闲轮不计数不重置；被冷却/低置信/质量/共识
+等门拒绝时计数保留（下次继续累计）；首轮分析与回溯路径豁免确认（一次性引导），
+但保留其它门。`required_confirmations=1` 等价于旧行为（可回退）。
+
+交叉验证细节：`cross_check.samples>1` 时同一 prompt 调用 AI 多次（首次必须有效，
+否则按原失败流程重试），样本 `cycle_position` 全部一致才按首样本返回；不一致时
+仅把 `cycle_confidence` 降为 `low`（不新增/不改动其它输出字段），由既有低置信门
+阻断 regime 变更与 alpha 步进。`samples=1` 完全回退旧行为。
+
+结构一致性为**方向感知**：仅当提议 cp 为多头侧正暴露（`REGIME_ALPHA_MAP[cp] > 0`）
+且 `> 当前 alpha + 0.005`（加多）且 close < SMA200 时降级。熊侧空头减仓
+（`BEAR→BEAR_DEEP`、`BEAR_DEEP→BEAR_BOTTOM`，目标 alpha ≤ 0）与牛侧减仓/清仓
+（`BULL→DEEP_BULL`、`DEEP_BULL→BULL_COOLING`，目标不高于当前）均不会被拦截——
+前者在弱结构下是正常路径，后者是唯一降风险路径。`market_state` 缺 alpha 时回退为
+仅 `cp == "BULL"` 触发；MA 缺失/stale 不干预。
 
 ### 证据系统
 
