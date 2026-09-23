@@ -186,16 +186,16 @@ class Fetcher:
             print(f"[Fetcher] 读取 https://x.com/{user} ...")
             html = self._fetch_x_web(user)
             if not html:
-                print(f"[Fetcher]   ✗ 无法读取 {user} 的主页")
+                print(f"[Fetcher]   [!!] 无法读取 {user} 的主页")
                 continue
             articles = self._parse_articles(html)
             if len(articles) == 0 and "<article" in html:
                 lenient = self._parse_articles_lenient(html, owner=user)
                 if lenient:
-                    print(f"[Fetcher]   ✓ 标准解析 0 条, 宽松解析 {len(lenient)} 条 "
+                    print(f"[Fetcher]   [OK] 标准解析 0 条, 宽松解析 {len(lenient)} 条 "
                           f"(无 data-testid, 用宽松解析)")
                     articles = lenient
-            print(f"[Fetcher]   ✓ 解析到 {len(articles)} 条推文")
+            print(f"[Fetcher]   [OK] 解析到 {len(articles)} 条推文")
             owner = user.lower()
             for art in articles:
                 tid = art["id"]

@@ -22,7 +22,10 @@
     "papermark_max_chars": 6000,
     "link_max_total_chars": 10000,
     "pdf_timeout_seconds": 30,
-    "filter_non_btc": true
+    "filter_non_btc": true,
+    "_note_image_cache": "图片 base64 缓存 LRU 上限 (重试时避免重复下载): image_cache_max_entries 为条目数, image_cache_max_bytes 为总字节 (0=不限字节, 仅条目上限)",
+    "image_cache_max_entries": 32,
+    "image_cache_max_bytes": 67108864
   },
 
   "fetcher": {
@@ -107,13 +110,8 @@
     },
     "drift": {
       "new_term_trigger_count": 5,
-      "deprecated_term_trigger_count": 10,
       "quality_drop_trigger": 5,
-      "quality_drop_persistence": 3,
-      "auto_calibrate_new_terms": true,
-      "auto_calibrate_thresholds": false,
-      "require_confirm_regime_change": true,
-      "require_confirm_threshold_change": true
+      "quality_drop_persistence": 3
     }
   },
 
@@ -143,13 +141,13 @@
   },
 
   "schedule": {
-    "_note": "daily_time: 运行时间 (北京时间, 如 12:25)。weekdays: 仅在指定星期运行, 0=周一,1=周二,2=周三,3=周四,4=周五,5=周六,6=周日, 留空=每天。min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)",
+    "_note": "daily_time: 运行时间 (北京时间, 如 12:25)。weekdays: 仅在指定星期运行, 0=周一,1=周二,2=周三,3=周四,4=周五,5=周六,6=周日, 留空=每天。min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)。retry_on_fetch_failure: 抓取异常后本轮内重试 1 次 (等待 clamp(retry_delay_seconds, 0, 30) 秒, 避免拖长轮次), 仍失败走 outage 路径",
     "daily_time": "12:25",
     "weekdays": [1, 3],
     "poll_interval_seconds": 86400,
     "min_analysis_interval_hours": 24,
     "retry_on_fetch_failure": true,
-    "retry_delay_seconds": 120
+    "retry_delay_seconds": 30
   },
 
   "review": {
@@ -215,9 +213,9 @@
 
   "dingtalk": {
     "enabled": true,
-    "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=63e160c26acc3dfe3e55be8a86f1a8aa5af3fc8f17b839b7de1af2a2a7b12af8",
+    "webhook_url": "",
     "secret": "",
-    "_note": "钉钉机器人推送。secret 为加签密钥(可选)。"
+    "_note": "钉钉机器人推送。凭证优先读环境变量 (webhook: DINGTALK_WEBHOOK, 兼容 DINGTALK_WEBHOOK_URL; 加签密钥: DINGTALK_SECRET, 可选); 此处留空或填 ${DINGTALK_WEBHOOK} 占位即可, 明文 token 不得入库。环境变量与 config 均为空时通知禁用并告警 (不崩)。"
   },
 
   "promo": {
@@ -230,7 +228,6 @@
     "enabled": true,
     "batch_size": 5,
     "bulk_fetch_limit": 2000,
-    "max_analysis_samples": 200,
-    "max_total_tweets": 50
+    "max_analysis_samples": 200
   }
 }

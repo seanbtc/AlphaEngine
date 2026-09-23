@@ -121,10 +121,31 @@ class Knowledge:
 
     # ---- 预测审计 ----
 
-    def log_prediction(self, cycle_position: str, confidence: str, btc_price: float = None):
+    def log_prediction(self, cycle_position: str, confidence: str, btc_price: float = None,
+                       prompt_hash: str = None, model: str = None,
+                       temperature: float = None):
+        """记录一条预测。
+
+        追溯字段: prompt_hash 可选 (缺省取 analyzer.prompt_hash, 再回退模块常量
+        PROMPT_HASH; 最终兜底 "unknown"), 写入时必带该键;
+        model/temperature 从 AIService 调用链取 (响应 model / 请求 temperature),
+        拿不到时省略字段 (不写 null, 便于按字段存在性过滤)。
+        """
         if btc_price is None:
             # DataFeed 不可用时用历史最后已知价格兜底, 避免预测价格全为 null (审计空转)
             btc_price = self._last_known_price()
+        if prompt_hash is None:
+            prompt_hash = getattr(self.analyzer, "prompt_hash", None)
+        if prompt_hash is None:
+            try:
+                from src.analyzer import PROMPT_HASH
+                prompt_hash = PROMPT_HASH
+            except Exception:
+                prompt_hash = "unknown"
+        if model is None:
+            model = getattr(self.analyzer, "last_call_model", None)
+        if temperature is None:
+            temperature = getattr(self.analyzer, "last_call_temperature", None)
         ts = datetime.utcnow().isoformat() + "Z"
         entry = {
             "ts": ts,
@@ -133,7 +154,16 @@ class Knowledge:
             "confidence": confidence,
             "btc_price": btc_price,
             "verified": False,
+            "prompt_hash": prompt_hash,
         }
+        model_text = str(model or "").strip()
+        if model_text:
+            entry["model"] = model_text
+        if temperature is not None:
+            try:
+                entry["temperature"] = float(temperature)
+            except (TypeError, ValueError):
+                pass
         self._append_jsonl(self.prediction_log_file, entry)
 
     def _prediction_id(self, pred: dict) -> str:

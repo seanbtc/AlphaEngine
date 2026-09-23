@@ -17,7 +17,6 @@ class ReviewEngine:
         self.evidence = evidence
         self.price_file = os.path.join(data_dir, "price_history.jsonl")
         self.review_file = os.path.join(data_dir, "review_log.jsonl")
-        self.review_day = cfg.get("schedule_day", 1)
         self.min_cycles = cfg.get("min_cycles_before_review", 20)
 
     def record_price(self, price: float, regime: str, alpha: float):

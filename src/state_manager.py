@@ -57,6 +57,7 @@ class StateManager:
                 "last_calibration_at": "",
                 "last_review_at": "",
                 "last_tick_at": "",
+                "last_prompt_hash": "",
                 "uptime_started_at": datetime.utcnow().isoformat() + "Z",
                 "outage": {},
             },

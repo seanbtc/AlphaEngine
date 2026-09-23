@@ -2,11 +2,13 @@
 AI 分析器 (经统一 AIService 调用) — 输出 cycle_position + 证据评分 + 元分析.
 """
 import base64
+import hashlib
 import json
 import os
 import re
 import sys
 import time
+from collections import OrderedDict
 from datetime import datetime
 
 import requests
@@ -241,6 +243,71 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
   risks ≤2条; tweet_draft 可不输出 (省略该字段); 不要输出任何 JSON 以外的文字
 """
 
+# SYSTEM_PROMPT 指纹 (sha256 前 12 位): 预测日志/state 对账"某轮判断由哪版 prompt 产生";
+# prompt 改动即变, 同 prompt 稳定不变。
+PROMPT_HASH = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
+
+
+def _config_int(cfg: dict, key: str, default: int, minimum: int) -> int:
+    """读取整数配置: 非法值回退 default, 结果不低于 minimum."""
+    try:
+        value = int(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+class _ImageCache:
+    """图片 base64 缓存 (LRU): 条目数与总字节双上限, 防长驻进程内存持续增长.
+
+    - 命中/写入均刷新 LRU 顺序; 失败结果 (None) 同样占一个条目 (避免重试重复下载);
+    - max_bytes=0 表示不限字节 (仅条目上限); 单条超限时至少保留最新一条。
+    """
+
+    def __init__(self, max_entries: int = 32, max_bytes: int = 64 * 1024 * 1024):
+        self.max_entries = max(1, int(max_entries))
+        self.max_bytes = max(0, int(max_bytes))
+        self._items: OrderedDict = OrderedDict()
+        self._bytes = 0
+
+    @staticmethod
+    def _size_of(value) -> int:
+        return len(value) if isinstance(value, str) else 0
+
+    def get(self, url, default=None):
+        if url not in self._items:
+            return default
+        self._items.move_to_end(url)
+        return self._items[url]
+
+    def put(self, url, value) -> None:
+        self._bytes -= self._size_of(self._items.pop(url, None))
+        self._items[url] = value
+        self._bytes += self._size_of(value)
+        self._evict()
+
+    def _evict(self) -> None:
+        while self._items and (
+                len(self._items) > self.max_entries
+                or (self.max_bytes and self._bytes > self.max_bytes
+                    and len(self._items) > 1)):
+            _, value = self._items.popitem(last=False)
+            self._bytes -= self._size_of(value)
+
+    def __contains__(self, url) -> bool:
+        return url in self._items
+
+    def __getitem__(self, url):
+        if url not in self._items:
+            raise KeyError(url)
+        return self.get(url)
+
+    def __setitem__(self, url, value) -> None:
+        self.put(url, value)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
 
 class Analyzer:
     def __init__(self, cfg: dict):
@@ -286,7 +353,17 @@ class Analyzer:
         self.cross_check_samples = max(1, samples)
         structure = cross_check.get("structure_check") or {}
         self.structure_check_enabled = bool(structure.get("enabled", True))
-        self._image_cache: dict[str, str] = {}  # URL → base64 data URL (重试时避免重复下载)
+        # prompt/模型版本 (可追溯): prompt_hash 为 SYSTEM_PROMPT 指纹;
+        # last_call_* 在 _call_api 成功时更新 (模型取自 AIService 响应, 温度为请求值)
+        self.prompt_hash = PROMPT_HASH
+        self.last_call_model: str | None = None
+        self.last_call_temperature: float | None = None
+        # 图片 base64 缓存 (LRU 双上限, 重试时避免重复下载)
+        self.image_cache_max_entries = _config_int(cfg, "image_cache_max_entries", 32, 1)
+        self.image_cache_max_bytes = _config_int(
+            cfg, "image_cache_max_bytes", 64 * 1024 * 1024, 0)
+        self._image_cache = _ImageCache(self.image_cache_max_entries,
+                                        self.image_cache_max_bytes)
         self.client = AIClient(endpoint=self.endpoint, timeout=self.timeout)
         if not self.enabled:
             print("[Analyzer] WARNING: AI 服务已禁用 (ai_service.enabled=false)")
@@ -894,6 +971,14 @@ class Analyzer:
         self._last_image_error = False
         content = response.get("content") or ""
         usage = response.get("usage") or {}
+        # 记录本轮实际调用元数据 (供 prediction_log 追溯; 拿不到时保持 None)
+        model_name = str(response.get("model") or "").strip()
+        self.last_call_model = model_name or None
+        try:
+            self.last_call_temperature = (float(self.temperature)
+                                          if self.temperature is not None else None)
+        except (TypeError, ValueError):
+            self.last_call_temperature = None
         print(f"[Analyzer] Got {len(content)} chars | model={response.get('model')} "
               f"| tokens: in={usage.get('prompt_tokens', '?')} "
               f"out={usage.get('completion_tokens', '?')} "

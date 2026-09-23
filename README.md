@@ -91,6 +91,8 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 | 连续确认 | `stability.required_confirmations` (默认 2) | 同一提议连续 N 轮分析成功才执行变更 |
 | 交叉验证 | `cross_check.samples` (默认 2, 1=关闭) | 同 prompt 多采样, `cycle_position` 不一致 → 降为 low |
 | 结构一致性 | `cross_check.structure_check.enabled` (默认开) | 提议增加多头暴露且 close<SMA200 → 降为 low (减仓/清仓方向不拦截) |
+| 抓取重试 | `schedule.retry_on_fetch_failure` / `retry_delay_seconds` | 抓取异常本轮内重试 1 次 (等待 clamp(delay, 0, 30) 秒), 仍失败走 outage |
+| 图片缓存上限 | `ai_service.image_cache_max_entries` (32) / `image_cache_max_bytes` (64MiB) | 视觉图片 base64 LRU 上限, 防长驻进程内存持续增长 |
 | 合法转换 | 预定义转换表 | 禁止非法跳变 |
 
 ### 时间语义（自然日推进）
@@ -229,10 +231,22 @@ pip install snscrape   # 可选：批量历史抓取
   },
   "dingtalk": {
     "enabled": true,
-    "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+    "webhook_url": ""                     // 留空或填 ${DINGTALK_WEBHOOK} 占位; 凭证走环境变量
   }
 }
 ```
+
+钉钉凭证优先读环境变量（部署侧由工作区根 `.env` 经 `start_all.py` 加载，本地可自行 export）：
+
+```bash
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
+DINGTALK_SECRET=SEC...    # 可选, 加签机器人
+```
+
+- 读取优先级：`DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）/ `DINGTALK_SECRET` > `config.json`；
+- `config.json` 的 `webhook_url`/`secret` 留空或填 `${DINGTALK_WEBHOOK}` 占位即可（占位视为未配置），**明文 token 不得入库**；
+- 环境变量与 config 均为空且 `enabled=true` → 启动打印告警，通知自动禁用（不崩、不影响主流程）；
+- `.env` 已被 `.gitignore` 忽略，不要提交。
 
 ### 首次运行（需海外网络）
 
@@ -352,7 +366,16 @@ BULL(+1.0) → DEEP_BULL(+0.3) → BULL_COOLING(0) → BEAR(-1.0) → BEAR_DEEP(
 
 - **新术语**：同一新指标在推文中出现 ≥5 次 → 钉钉告警
 - **质量骤降**：连续 3 轮 analysis_quality ≤5 → 钉钉告警
-- **术语弃用**：旧指标连续 10 轮不出现 → 标记弃用
+
+### 预测日志（prompt/模型可追溯）
+
+每条预测（`data/prediction_log.jsonl`）记录本轮判断的版本信息：
+
+- `prompt_hash`：`SYSTEM_PROMPT` 的 sha256 前 12 位（模块级常量 `PROMPT_HASH`，prompt 改动即变、同 prompt 稳定）；旧记录无该字段，审计读取兼容（不强制存在）；
+- `model`：取自 AIService 响应（服务端实际映射的模型）；拿不到时省略字段；
+- `temperature`：请求温度（客户端配置值）；拿不到时省略字段。
+
+`state.runtime.last_prompt_hash` 随每轮分析成功同步，便于对账"某轮判断由哪版 prompt 产生"。
 
 ### 知识蒸馏（每周日 0 UTC）
 
@@ -366,6 +389,8 @@ AI 自动运行：
 程序 Ctrl+C 正常退出时自动保存 state.json。若文件损坏，从 alpha_history.json 重建。
 
 ## 钉钉推送
+
+凭证配置见「配置」节：优先环境变量 `DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）/ `DINGTALK_SECRET`（部署侧由工作区根 `.env` 加载），`config.json` 仅保留空值或 `${DINGTALK_WEBHOOK}` 占位；均未配置时通知禁用并告警。
 
 | 事件 | 推送内容 |
 |---|---|
@@ -433,6 +458,6 @@ AI 自动运行：
 
 ## 安全注意事项
 
-- `config.json` 内含 API key 和 webhook token，**不应提交到公开仓库**
-- 建议生产环境改用环境变量读取敏感配置
+- `config.json` 不应包含 API key / webhook token 等敏感信息；钉钉凭证走环境变量或 `.env`（已 gitignore），**明文 token 不得入库**
+- 若凭证曾以明文提交过，应到钉钉后台轮换 token（历史提交无法撤回），并只更新服务器 `.env`
 - `data/` 目录下的文件均为运行时数据，无需版本控制

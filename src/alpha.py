@@ -112,6 +112,22 @@ def _select_progress(rp, ok: bool, cp: str, current_regime: str,
 _ALPHA_ORDER_EPS = 1e-9
 
 
+def _record_ai_call_meta(sm, analyzer) -> None:
+    """把本轮 AI 调用元数据 (prompt 指纹) 同步到 state.runtime (可追溯)."""
+    sm.set("runtime.last_prompt_hash", getattr(analyzer, "prompt_hash", "") or "")
+
+
+def _fetch_retry_delay(value) -> float:
+    """fetch 重试等待秒数 = clamp(value, 0, 30); 非法值回退 0 (不等待)."""
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if delay != delay:  # NaN
+        return 0.0
+    return max(0.0, min(30.0, delay))
+
+
 def _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start: float,
                                  btc_price, *, reason: str):
     """统一发单钩子: 本轮 alpha 相对周期起点变化时, 把最终值发给 TradeSync.
@@ -339,7 +355,6 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         c["evidence"].reset()
 
     batch_size = backfill_cfg.get("batch_size", 10)
-    max_total = backfill_cfg.get("max_total_tweets", 50)
     bulk_limit = backfill_cfg.get("bulk_fetch_limit", 2000)
     max_samples = backfill_cfg.get("max_analysis_samples", 200)
 
@@ -406,6 +421,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             continue
 
         sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+        _record_ai_call_meta(sm, analyzer)
 
         scores = analysis.get("evidence_scores", {})
         meta = analysis.get("meta", {})
@@ -636,6 +652,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
                   f"progress={a.get('regime_progress','?')}, "
                   f"conf={a.get('cycle_confidence','?')}")
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            _record_ai_call_meta(sm, analyzer)
             sm.update_runtime()
     if not last_analysis:
         print("[首次分析] 分析失败, 等待每日轮询重试")
@@ -945,6 +962,7 @@ def run_cycle(components: dict) -> bool:
     if locked:
         print("[Fetch] Skipped (analysis lock)")
     else:
+        sched_cfg = cfg.get("schedule", {}) or {}
         try:
             new_tweets = fetcher.fetch()
             fetched_ok = True
@@ -953,6 +971,23 @@ def run_cycle(components: dict) -> bool:
             fetch_detail = f"{type(e).__name__}: {e}"
             print(f"[Fetch] Error: {e}")
             new_tweets = []
+            # 抓取重试 (schedule.retry_on_fetch_failure): 本轮内重试 1 次,
+            # 等待 clamp(retry_delay_seconds, 0, 30) 秒; 仍失败 → 走 outage 路径
+            if sched_cfg.get("retry_on_fetch_failure", False):
+                delay = _fetch_retry_delay(sched_cfg.get("retry_delay_seconds", 0))
+                print(f"[Fetch] 重试 1/1 (等待 {delay:g}s) ...")
+                if delay > 0:
+                    time.sleep(delay)
+                try:
+                    new_tweets = fetcher.fetch()
+                    fetched_ok = True
+                    fetch_error = False
+                    fetch_detail = ""
+                    print("[Fetch] 重试成功")
+                except Exception as retry_exc:
+                    fetch_detail = f"{type(retry_exc).__name__}: {retry_exc}"
+                    print(f"[Fetch] 重试失败: {retry_exc}")
+                    new_tweets = []
 
     # 2.5 失败推文重放: 队列非空时从 tweets.jsonl 取回并与当轮新推文合并
     new_tweets = _merge_pending_replay(c, new_tweets, locked)
@@ -977,6 +1012,7 @@ def run_cycle(components: dict) -> bool:
 
         if analysis:
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            _record_ai_call_meta(sm, analyzer)
             pending_store = c.get("pending")
             if pending_store is not None:
                 try:
@@ -1017,7 +1053,7 @@ def run_cycle(components: dict) -> bool:
             if drift_alerts:
                 print("\n[DRIFF ALERTS]")
                 for a in drift_alerts:
-                    print(f"  ⚠ {a}")
+                    print(f"  [WARN] {a}")
                     dingtalk.alert("风格漂移", a)
 
             # 5. 证据累积 + Regime 变更

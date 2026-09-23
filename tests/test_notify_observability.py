@@ -79,7 +79,9 @@ def test_disabled_not_counted():
     assert dt.last_failure_at == ""
 
 
-def test_empty_webhook_not_counted():
+def test_empty_webhook_not_counted(monkeypatch):
+    for name in ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET"):
+        monkeypatch.delenv(name, raising=False)
     dt = DingTalk({"enabled": True, "webhook_url": ""})
 
     assert dt.send("x") is False

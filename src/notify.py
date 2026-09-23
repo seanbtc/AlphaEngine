@@ -1,5 +1,12 @@
-"""钉钉通知模块 (发送经 commons.notify 共享实现)."""
+"""钉钉通知模块 (发送经 commons.notify 共享实现).
+
+凭证读取优先级: 环境变量 > config.json。
+- webhook: DINGTALK_WEBHOOK (兼容 DINGTALK_WEBHOOK_URL)
+- secret:  DINGTALK_SECRET (加签, 可选)
+config 中留空或填 ${DINGTALK_WEBHOOK} 占位即可; 两处均无 → 通知禁用并告警。
+"""
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -8,19 +15,44 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from commons.notify import DingTalkNotifier
 
+_ENV_WEBHOOK_NAMES = ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL")
+_ENV_SECRET_NAMES = ("DINGTALK_SECRET",)
+_PLACEHOLDER_RE = re.compile(r"^\$\{[A-Za-z0-9_]+\}$")
+
+
+def _resolve_credential(env_names, config_value):
+    """按 环境变量 > config 解析凭证; 返回 (值, 来源). 占位值视为未配置。"""
+    for name in env_names:
+        value = str(os.getenv(name, "") or "").strip()
+        if value and not _PLACEHOLDER_RE.match(value):
+            return value, f"env:{name}"
+    value = str(config_value or "").strip()
+    if not value or _PLACEHOLDER_RE.match(value):
+        return "", ""
+    return value, "config"
+
 
 class DingTalk:
     def __init__(self, cfg: dict):
         self.enabled = cfg.get("enabled", False)
-        self.webhook = cfg.get("webhook_url", "").strip()
-        self.secret = cfg.get("secret", "").strip()
+        self.webhook, self.webhook_source = _resolve_credential(
+            _ENV_WEBHOOK_NAMES, cfg.get("webhook_url", ""))
+        self.secret, self.secret_source = _resolve_credential(
+            _ENV_SECRET_NAMES, cfg.get("secret", ""))
         self._notifier = DingTalkNotifier(
-            self.webhook, self.secret, enabled=self.enabled, timeout=10
+            self.webhook, self.secret, enabled=self.enabled, timeout=10,
+            quiet_errors=True
         )
         # 失败可观测 (内存计数, 不改变发送语义): print_status 展示
         self.failure_count = 0
         self.last_error = ""
         self.last_failure_at = ""
+        if self.enabled and not self.webhook:
+            print("[DingTalk] WARNING: 未配置 webhook "
+                  "(环境变量 DINGTALK_WEBHOOK/DINGTALK_WEBHOOK_URL 与 config "
+                  "dingtalk.webhook_url 均为空), 通知已禁用")
+        elif self.enabled and self.webhook_source:
+            print(f"[DingTalk] webhook 来源: {self.webhook_source}")
 
     def send(self, content: str) -> bool:
         try:
