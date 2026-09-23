@@ -164,7 +164,7 @@
   },
 
   "cycle_context": {
-    "_note": "周期定位与历史类比 (辅助 AI 结合判断; 失败/数据不足则该段缺省并报 [Cycle] 日志)。数据来自 DataFeed /klines (日线, 需 ≥min_bars 根; kline_limit 建议 3000 覆盖全历史); cache_ttl_seconds 为取数缓存秒数。stats.windows 为前瞻收益窗口(交易日); lookback_days 为周期低点回看天数; merge_gap_days 为相邻信号去抖合并间隔; dd_window/dd_groups 为前瞻最大回撤窗口与输出组(B/D)。phase 阈值: top_deviation_pct 距200SMA偏离 (③ 另含 regime=BULL_COOLING; alpha 由引擎时间自推, 仅独立展示不参与判定; 近30日区间变更次数仅作参考不参与判定); analog 为四组类比条件阈值 (B: 距200SMA 10-30% 且距ATH>30%; D: 距200SMA 首入>20%); halving_date 最近一次减半日期。",
+    "_note": "周期定位与历史类比 (辅助 AI 结合判断; 失败/数据不足则该段缺省并报 [Cycle] 日志)。数据来自 DataFeed /klines (日线, 需 ≥min_bars 根; kline_limit 建议 3000 覆盖全历史); cache_ttl_seconds 为取数缓存秒数。stats.windows 为前瞻收益窗口(交易日); lookback_days 为周期低点回看天数; merge_gap_days 为相邻信号去抖合并间隔; dd_window/dd_groups 为前瞻最大回撤窗口与输出组(B/D)。top_risk 为顶部风险(价格结构警示): 阶段③ 触发 = top_risk.active 或 regime=BULL_COOLING (原距200SMA>30% 独立触发已移除, 距离仅在 trend 展示); alpha 由引擎时间自推, 仅独立展示不参与判定; 近30日区间变更次数仅作参考不参与判定; analog 为四组类比条件阈值 (B: 距200SMA 10-30% 且距ATH>30%; D: 距200SMA 首入>20%); halving_date 最近一次减半日期。",
     "enabled": true,
     "interval": "1d",
     "kline_limit": 3000,
@@ -177,8 +177,18 @@
       "dd_window": 180,
       "dd_groups": ["B", "D"]
     },
-    "phase": {
-      "top_deviation_pct": 0.30
+    "top_risk": {
+      "_note": "顶部风险 (价格结构警示, 带滞回 + since 锁存; 须与链上/宏观/新闻证据结合判断, 不单独构成结论)。进入 — 连续 enter_confirm_days 日满足基础条件 [距滚动 drawdown_window_days 日最高收盘回撤 ≥ enter_drawdown_pct 且 收盘跌破 structure_ma 且 收盘高于 200SMA (require_above_200sma)], 或当日回撤 ≥ enter_immediate_drawdown_pct 立即进入; 退出 — 收盘 > structure_ma (结构修复) 或 回撤收窄至 ≥ exit_drawdown_pct (exit_below_200sma=true 时收盘跌破 200SMA 也退出)。since 为当前风险簇最初激活日: 新激活距簇首 ≤ since_latch_days 交易日则沿用, 否则重置。阈值按幅度解释 (正负均可)。回放: 原距200SMA>30% 口径牛市误报 52.5%/25.5% 且漏 2025-10 浅顶; 滞回口径 W1 3 段/占比 27.1%, W2 14 段/22.8%, 2021-11-08/2025-10-06 命中 +10d/+5d, 2025 顶后 3 段且 since 恒为 2025-10-11。",
+      "enabled": true,
+      "drawdown_window_days": 90,
+      "enter_drawdown_pct": 0.10,
+      "enter_confirm_days": 2,
+      "enter_immediate_drawdown_pct": -0.11,
+      "exit_drawdown_pct": -0.09,
+      "exit_below_200sma": false,
+      "structure_ma": "sma50",
+      "require_above_200sma": true,
+      "since_latch_days": 30
     },
     "analog": {
       "b_min_ratio": 0.10,

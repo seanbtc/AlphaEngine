@@ -2,7 +2,19 @@
 
 数据流:
     DataFeed 服务 /klines (1d, Binance U 本位) → 日线 OHLC → ATH / 周期低点 / 200·250 SMA
-    → 固定规则阶段判定 + 四组历史类比统计 (A/B/C/D, 收盘口径) → 结构化 dict → prompt 小节
+    → 顶部风险 (价格结构警示) + 固定规则阶段判定 + 四组历史类比统计 (A/B/C/D, 收盘口径)
+    → 结构化 dict → prompt 小节
+
+顶部风险 (top_risk, 价格结构警示, 须与链上/宏观/新闻证据结合判断, 不单独构成结论):
+    进入 — 连续 enter_confirm_days 日满足基础条件 (距滚动 N 日最高收盘回撤 ≥ enter_drawdown_pct
+    且 收盘跌破结构均线 (默认 SMA50) 且 收盘仍高于 200SMA), 或当日回撤 ≥
+    enter_immediate_drawdown_pct 立即进入; 退出 — 收盘 > 结构均线 (结构修复) 或 回撤收窄至
+    ≥ exit_drawdown_pct (可选 exit_below_200sma=true 时收盘跌破 200SMA 也退出)。
+    since 为当前风险簇最初激活日 (新激活距簇首 ≤ since_latch_days 交易日则沿用, 否则重置)。
+    阶段 ③ 触发 = top_risk.active 或 regime=BULL_COOLING。
+    回放选型: 原"距200SMA>30%"口径牛市误报占比 52.5%/25.5% 且漏掉 2025-10 浅顶 (+17.8%);
+    纯状态口径 (90日回撤10%+跌破SMA50+仍在200SMA上) 占比 12.7%/14.9% 但顶后 6 段闪烁;
+    滞回口径顶后收敛为 3 段且 since 稳定, 两顶 ±10 交易日内命中。
 
 四组类比定义 (收盘口径, 连续日去重取区间首日):
     A 首次上穿 200SMA     (前一日 close≤SMA200 且当日 close>SMA200)
@@ -30,7 +42,12 @@ _DEFAULT_DD_WINDOW = 180
 _DEFAULT_DD_GROUPS = ("B", "D")
 _DEFAULT_HALVING_DATE = "2024-04-20"
 
-_DEFAULT_PHASE = {"top_deviation_pct": 0.30}
+_DEFAULT_TOP_RISK = {"enabled": True, "drawdown_window_days": 90,
+                     "enter_drawdown_pct": 0.10, "enter_confirm_days": 2,
+                     "enter_immediate_drawdown_pct": 0.11,
+                     "exit_drawdown_pct": 0.09, "exit_below_200sma": False,
+                     "structure_ma": "sma50", "require_above_200sma": True,
+                     "since_latch_days": 30}
 _DEFAULT_ANALOG = {"b_min_ratio": 0.10, "b_max_ratio": 0.30,
                    "b_min_drawdown": 0.30, "d_ratio": 0.20}
 
@@ -191,29 +208,149 @@ def _extract_regime(regime, alpha=None):
     return (str(name) if name else None), alpha
 
 
+# ---- 顶部风险 (价格结构警示) ----
+
+def _confirmed(base, index, days):
+    """连续 days 日 (含当日) 均满足 base; 数据不足返回 False."""
+    if days <= 1:
+        return bool(base[index]) if 0 <= index < len(base) else False
+    if index - days + 1 < 0:
+        return False
+    return all(base[index - offset] for offset in range(days))
+
+
+def compute_top_risk(dates, closes, sma200, structure_ma, *, cfg=None):
+    """顶部风险状态 (价格结构警示, 纯计算, 带滞回 + since 锁存).
+
+    进入 (二者其一):
+      a. 连续 enter_confirm_days 日满足基础条件 (确认日进入, since=确认段首日);
+      b. 当日 dd90 ≤ -enter_immediate_drawdown_pct (立即进入)。
+    基础条件: 距滚动 drawdown_window_days 日最高收盘回撤 ≥ enter_drawdown_pct (含等号,
+    浮点容差 1e-9) 且 收盘 < structure_ma (默认 SMA50) 且 收盘 > 200SMA
+    (require_above_200sma=true, 防熊市触发)。
+    退出: 收盘 > structure_ma (结构修复) 或 dd90 ≥ -exit_drawdown_pct
+    (exit_below_200sma=true 时收盘跌破 200SMA 也退出)。
+    since 锁存: 新激活距当前簇首 ≤ since_latch_days 交易日时沿用簇首 since, 否则重置;
+    激活期间持续沿用 (可能早于当前激活段首日)。阈值正负均可 (按幅度取绝对值)。
+    预热期 (结构均线/200SMA 未就绪) 不激活; enabled=false 恒不激活。
+    """
+    thresholds = dict(_DEFAULT_TOP_RISK)
+    thresholds.update(cfg or {})
+    window = int(thresholds.get("drawdown_window_days") or 90)
+    enter_dd = -abs(float(thresholds.get("enter_drawdown_pct") or 0.0)) * 100.0
+    immediate_dd = -abs(float(thresholds.get("enter_immediate_drawdown_pct") or 0.0)) * 100.0
+    exit_dd = -abs(float(thresholds.get("exit_drawdown_pct") or 0.0)) * 100.0
+    try:
+        confirm_days = max(1, int(thresholds.get("enter_confirm_days", 2)))
+    except (TypeError, ValueError):
+        confirm_days = 2
+    try:
+        latch_days = max(0, int(thresholds.get("since_latch_days", 30)))
+    except (TypeError, ValueError):
+        latch_days = 30
+    exit_below = bool(thresholds.get("exit_below_200sma", False))
+    structure_name = str(thresholds.get("structure_ma") or "sma50").upper()
+    require_above = bool(thresholds.get("require_above_200sma", True))
+    enabled = bool(thresholds.get("enabled", True))
+    structure_ma = structure_ma or []
+    sma200 = sma200 or []
+
+    drawdowns, base, immediate, exits = [], [], [], []
+    for index, close in enumerate(closes):
+        start = max(0, index - window + 1)
+        drawdown = _pct_change(close, max(closes[start:index + 1]))
+        drawdowns.append(drawdown)
+        ma_value = structure_ma[index] if index < len(structure_ma) else None
+        long_value = sma200[index] if index < len(sma200) else None
+        is_base = bool(
+            enabled
+            and drawdown is not None and drawdown <= enter_dd + 1e-9
+            and ma_value is not None and close < ma_value
+            and (not require_above
+                 or (long_value is not None and close > long_value)))
+        base.append(is_base)
+        immediate.append(bool(
+            is_base and drawdown is not None and drawdown <= immediate_dd + 1e-9))
+        exits.append(bool(
+            (ma_value is not None and close > ma_value)
+            or (drawdown is not None and drawdown >= exit_dd - 1e-9)
+            or (exit_below and long_value is not None and close < long_value)))
+
+    total = len(closes)
+    active_list = [False] * total
+    since_list = [None] * total
+    mode_list = [None] * total
+    anchor_since, anchor_index = None, None
+    for index in range(total):
+        active_list[index] = bool(index > 0 and active_list[index - 1]
+                                  and not exits[index])
+        if not active_list[index] and (immediate[index]
+                                       or _confirmed(base, index, confirm_days)):
+            active_list[index] = True
+            run_start = index if immediate[index] else index - confirm_days + 1
+            if anchor_since is not None and anchor_index is not None \
+                    and (index - anchor_index) <= latch_days:
+                since_list[index] = anchor_since
+            else:
+                since_list[index] = dates[run_start] \
+                    if dates and 0 <= run_start < len(dates) else None
+                anchor_since, anchor_index = since_list[index], run_start
+            mode_list[index] = "immediate" if immediate[index] else "confirmed"
+        elif active_list[index] and since_list[index] is None:
+            since_list[index] = since_list[index - 1]
+            mode_list[index] = mode_list[index - 1]
+
+    last = total - 1
+    active = bool(active_list[last]) if last >= 0 else False
+    since = since_list[last] if active else None
+    distance = (_pct_change(closes[last], sma200[last])
+                if last >= 0 and last < len(sma200) else None)
+    reasons = []
+    if active:
+        entry_text = "立即进入" if mode_list[last] == "immediate" \
+            else f"连续{confirm_days}日确认"
+        reasons.append(
+            f"距{window}日最高收盘回撤 {drawdowns[last]:+.1f}% ({entry_text})")
+        reasons.append(f"收盘跌破 {structure_name} ({structure_ma[last]:,.0f})")
+        if distance is not None:
+            suffix = "长期趋势未破" if distance > 0 else "已跌破长期趋势"
+            reasons.append(f"距200SMA {distance:+.1f}% ({suffix})")
+    return {
+        "enabled": enabled,
+        "active": active,
+        "since": since,
+        "reasons": reasons,
+        "drawdown_from_90d_high_pct": round(drawdowns[last], 2)
+        if last >= 0 and drawdowns[last] is not None else None,
+        "distance_200sma_pct": round(distance, 2) if distance is not None else None,
+        "drawdown_window_days": window,
+        "structure_ma": structure_name.lower(),
+    }
+
+
 # ---- 阶段判定 ----
 
 def classify_phase(close, sma200, sma250, slope200, slope250, *,
-                   regime=None, alpha=None, cfg=None):
+                   regime=None, alpha=None, cfg=None, top_risk=None):
     """固定规则阶段判定 (按 ④→③→②→① 顺序, 未命中为过渡期).
 
     close/sma200/sma250 为最新值; slope200/slope250 为斜率方向 (up/down/None);
-    ③ 触发: 距200SMA偏离 > top_deviation_pct 或 regime=BULL_COOLING;
-    阈值可在 cfg.phase 覆盖 (top_deviation_pct)。
+    ③ 触发: top_risk.active (价格结构警示, 由 compute_top_risk 计算)
+    或 regime=BULL_COOLING; 距200SMA偏离不再单独触发 (仅 trend 展示)。
     alpha 参数仅保留签名兼容 (仓位由引擎按时间自推, 参与判定会形成
     "时间推进→alpha 升→判顶部" 自反馈回路), 不参与阶段判定。
     区间变更次数 (zone_changes_30d) 仅作 trend 参考, 不参与阶段判定。
+    cfg 参数仅保留签名兼容 (顶部阈值改由 cycle_context.top_risk 配置,
+    经 compute_top_risk 生效)。
     """
-    thresholds = dict(_DEFAULT_PHASE)
-    thresholds.update((cfg or {}).get("phase") or {})
     ratio = _pct_change(close, sma200)
     if ratio is not None and ratio < 0 and slope200 == "down":
         return {"label": _PHASE_LABELS[4], "code": 4,
                 "reasons": [f"close<SMA200 ({ratio:+.1f}%) 且 200SMA斜率↓"]}
     top_reasons = []
-    if ratio is not None and ratio > thresholds["top_deviation_pct"] * 100.0:
-        top_reasons.append(
-            f"距200SMA {ratio:+.1f}% > {thresholds['top_deviation_pct'] * 100.0:.0f}%")
+    if isinstance(top_risk, dict) and top_risk.get("active"):
+        top_reasons.extend(list(top_risk.get("reasons") or [])
+                           or ["顶部风险结构激活"])
     if regime == "BULL_COOLING":
         top_reasons.append("regime=BULL_COOLING (牛顶确认)")
     if top_reasons:
@@ -411,9 +548,17 @@ def compute_cycle_context(bars, cfg=None, *, ma_context=None, regime=None,
         if zone_changes is None:
             zone_changes = computed_changes
 
+    top_cfg = dict(_DEFAULT_TOP_RISK)
+    top_cfg.update(cfg.get("top_risk") or {})
+    structure_key = str(top_cfg.get("structure_ma") or "sma50").lower()
+    structure_ma = sma_series(closes, 50) if structure_key == "sma50" \
+        else ema_series(closes, 50)
+    top_risk = compute_top_risk(dates, closes, sma200, structure_ma, cfg=top_cfg)
+
     regime_name, alpha = _extract_regime(regime, alpha)
     phase = classify_phase(close, sma200[last], sma250[last], slope200, slope250,
-                           regime=regime_name, alpha=alpha, cfg=cfg)
+                           regime=regime_name, alpha=alpha, cfg=cfg,
+                           top_risk=top_risk)
 
     masks = _analog_masks(closes, sma200, sma250, slope_lookback, analog_cfg)
     analogs = {}
@@ -459,6 +604,7 @@ def compute_cycle_context(bars, cfg=None, *, ma_context=None, regime=None,
             "days_since_halving": (reference - halving).days if halving else None,
         },
         "phase": phase,
+        "top_risk": top_risk,
         "trend": {
             "sma200": round(sma200[last], 2) if sma200[last] is not None else None,
             "sma250": round(sma250[last], 2) if sma250[last] is not None else None,
@@ -659,6 +805,20 @@ def format_cycle_context(ctx):
     phase_reason = "；".join(phase.get("reasons") or []) or "?"
     lines.append(f"- 阶段: {phase.get('label') or '?'} "
                  f"(code={phase.get('code', 0)}) | 依据: {phase_reason}")
+    top_risk = ctx.get("top_risk")
+    if isinstance(top_risk, dict) and top_risk:
+        if not top_risk.get("enabled", True):
+            lines.append("- 顶部风险: 已关闭 (config)")
+        elif top_risk.get("active"):
+            window = top_risk.get("drawdown_window_days") or _DEFAULT_TOP_RISK[
+                "drawdown_window_days"]
+            lines.append(
+                f"- 顶部风险: 激活(自 {top_risk.get('since') or '?'}, "
+                f"距{window}日高点 {_fmt_pct(top_risk.get('drawdown_from_90d_high_pct'))}, "
+                f"距200SMA {_fmt_pct(top_risk.get('distance_200sma_pct'))}, "
+                f"跌破{str(top_risk.get('structure_ma') or 'sma50').upper()})")
+        else:
+            lines.append("- 顶部风险: 无")
     lines.append(
         f"- 趋势: 200SMA {_fmt_price(trend.get('sma200'))}"
         f"({_fmt_pct(trend.get('dist_200_pct'))},{trend.get('slope200') or '?'})"

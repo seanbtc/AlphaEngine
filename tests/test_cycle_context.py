@@ -158,13 +158,35 @@ def test_phase_bear():
 
 
 def test_phase_top_variants():
-    by_ratio = cycle_context.classify_phase(140, 100, 95, "up", "up")
-    assert by_ratio["code"] == 3 and "距200SMA" in by_ratio["reasons"][0]
+    by_risk = cycle_context.classify_phase(
+        105, 100, 95, "up", "down",
+        top_risk={"active": True,
+                  "reasons": ["距90日最高收盘回撤 -12.0% (阈值 -10%)"]})
+    assert by_risk["code"] == 3
+    assert by_risk["reasons"][0].startswith("距90日")
 
     by_regime = cycle_context.classify_phase(105, 100, 95, "up", "down",
                                              regime="BULL_COOLING")
     assert by_regime["code"] == 3
     assert by_regime["reasons"] == ["regime=BULL_COOLING (牛顶确认)"]
+
+    both = cycle_context.classify_phase(
+        105, 100, 95, "up", "down", regime="BULL_COOLING",
+        top_risk={"active": True, "reasons": ["距90日最高收盘回撤 -12.0%"]})
+    assert both["code"] == 3 and len(both["reasons"]) == 2
+
+
+def test_phase_distance_alone_no_longer_triggers_top():
+    # 旧 top_deviation_pct 口径已移除: 距200SMA +40% 不再单独触发 ③
+    phase = cycle_context.classify_phase(140, 100, 95, "up", "up")
+    assert phase["code"] == 0
+    assert "top_deviation_pct" not in cycle_context._DEFAULT_TOP_RISK
+
+
+def test_phase_top_risk_inactive_does_not_trigger():
+    phase = cycle_context.classify_phase(
+        105, 100, 95, "up", "down", top_risk={"active": False, "reasons": []})
+    assert phase["code"] == 0
 
 
 def test_phase_alpha_decoupled_from_judgement():
@@ -178,7 +200,7 @@ def test_phase_alpha_decoupled_from_judgement():
     # 相同结构传 alpha=None 结果一致 (alpha 完全不影响判定)
     assert cycle_context.classify_phase(105, 100, 95, "up", "down",
                                         regime="BULL") == phase
-    assert "top_alpha" not in cycle_context._DEFAULT_PHASE
+    assert "top_alpha" not in cycle_context._DEFAULT_TOP_RISK
 
 
 def test_phase_zone_changes_does_not_trigger_top():
@@ -187,7 +209,7 @@ def test_phase_zone_changes_does_not_trigger_top():
         112, 100, 95, "up", "down", regime="RECOVERY",
         cfg={"phase": {"top_zone_changes": 3}})
     assert phase["code"] == 1
-    assert "top_zone_changes" not in cycle_context._DEFAULT_PHASE
+    assert "top_zone_changes" not in cycle_context._DEFAULT_TOP_RISK
 
 
 def test_phase_confirmed_and_early_recovery():
@@ -210,12 +232,162 @@ def test_phase_transition_and_precedence():
     assert bear_wins["code"] == 4
 
 
-def test_phase_threshold_config_override():
-    loose = cycle_context.classify_phase(112, 100, 95, "up", "down")
-    strict = cycle_context.classify_phase(
-        112, 100, 95, "up", "down", cfg={"phase": {"top_deviation_pct": 0.10}})
-    assert loose["code"] == 0          # 默认 30% 阈值: 12% 不触发
-    assert strict["code"] == 3         # 收紧到 10%: 触发顶部规则
+# ---- 顶部风险 (compute_top_risk: 滞回进入/退出 + since 锁存) ----
+
+def test_top_risk_confirm_entry_boundary_and_since():
+    # 100 → 90: 回撤恰好 -10.00% (阈值含等号), 第 2 日确认进入, since=确认段首日
+    dates = _dates(4)
+    risk = cycle_context.compute_top_risk(
+        dates, [100.0, 100.0, 90.0, 90.0],
+        [80.0] * 4, [95.0] * 4)
+
+    assert risk["enabled"] is True
+    assert risk["active"] is True
+    assert risk["since"] == dates[2]
+    assert "连续2日确认" in risk["reasons"][0]
+    assert risk["drawdown_from_90d_high_pct"] == pytest.approx(-10.0)
+    assert risk["distance_200sma_pct"] == pytest.approx(12.5)
+    assert risk["drawdown_window_days"] == 90
+    assert risk["structure_ma"] == "sma50"
+    assert any("SMA50" in reason for reason in risk["reasons"])
+
+
+def test_top_risk_immediate_entry_boundary():
+    # 回撤恰好 -11.00%: 无需确认, 首日立即进入
+    dates = _dates(2)
+    risk = cycle_context.compute_top_risk(
+        dates, [100.0, 89.0], [80.0] * 2, [95.0] * 2)
+    assert risk["active"] is True
+    assert risk["since"] == dates[1]
+    assert "立即进入" in risk["reasons"][0]
+
+
+def test_top_risk_exit_paths():
+    dates = _dates(5)
+    # 结构修复: 收盘 > SMA50 (回撤仍深, 未达 dd 退出线)
+    structure_exit = cycle_context.compute_top_risk(
+        dates, [200.0, 200.0, 150.0, 150.0, 160.0],
+        [100.0] * 5, [155.0, 155.0, 155.0, 155.0, 158.0])
+    assert structure_exit["active"] is False
+
+    # 回撤收窄至恰好 -9.00% (≥ 退出线) 退出
+    dd_exit = cycle_context.compute_top_risk(
+        dates, [100.0, 100.0, 90.0, 90.0, 91.0],
+        [80.0] * 5, [95.0] * 5)
+    assert dd_exit["active"] is False
+
+
+def test_top_risk_exit_below_200sma_optional():
+    dates = _dates(4)
+    closes = [200.0, 200.0, 150.0, 160.0]
+    long_ma = [100.0, 100.0, 100.0, 165.0]     # 第 4 日收盘 160 < 200SMA 165
+    structure = [155.0, 155.0, 155.0, 170.0]
+
+    default = cycle_context.compute_top_risk(dates, closes, long_ma, structure)
+    assert default["active"] is True           # 默认不因跌破 200SMA 退出
+    assert any("已跌破长期趋势" in reason for reason in default["reasons"])
+
+    option = cycle_context.compute_top_risk(
+        dates, closes, long_ma, structure, cfg={"exit_below_200sma": True})
+    assert option["active"] is False
+
+
+def test_top_risk_since_latch_within_and_outside_window():
+    # 进入 → 退出 → 再进入: 距簇首 ≤30 交易日沿用簇首 since; >30 重置
+    dates = _dates(40)
+    within = [100.0] * 40
+    within[2] = within[3] = 90.0               # 首次进入 (连续2日), since=dates[2]
+    within[4] = 100.0                          # 收盘 > SMA50 → 退出
+    within[6] = within[7] = 90.0               # 再进入 (距簇首 4 交易日)
+    within[8:] = [90.0] * 32                   # 保持激活
+    latched = cycle_context.compute_top_risk(dates, within, [80.0] * 40, [95.0] * 40)
+    assert latched["active"] is True
+    assert latched["since"] == dates[2]
+
+    outside = [100.0] * 40
+    outside[2] = outside[3] = 90.0             # 首次进入
+    outside[4] = 100.0                         # 退出
+    outside[35] = outside[36] = 90.0           # 再进入 (距簇首 34 交易日 > 30)
+    outside[37:] = [90.0] * 3
+    reset = cycle_context.compute_top_risk(dates, outside, [80.0] * 40, [95.0] * 40)
+    assert reset["active"] is True
+    assert reset["since"] == dates[35]
+
+
+def test_top_risk_threshold_config_override():
+    # 回撤 -8% 低于默认 10% 阈值不激活; 阈值放宽到 8% (连续2日) 后激活
+    dates = _dates(3)
+    closes = [100.0, 92.0, 92.0]
+    default = cycle_context.compute_top_risk(
+        dates, closes, [80.0] * 3, [95.0] * 3)
+    assert default["active"] is False
+
+    loose = cycle_context.compute_top_risk(
+        dates, closes, [80.0] * 3, [95.0] * 3,
+        cfg={"enter_drawdown_pct": 0.08})
+    assert loose["active"] is True
+
+
+def test_top_risk_warmup_and_disabled():
+    dates = _dates(3)
+    # 结构均线/200SMA 预热期未就绪 → 不激活
+    warmup = cycle_context.compute_top_risk(
+        dates, [100.0, 90.0, 90.0], [None] * 3, [None] * 3)
+    assert warmup["active"] is False
+    assert warmup["reasons"] == []
+
+    # enabled=false: 条件满足也不激活 (③ 仅剩 regime=BULL_COOLING)
+    disabled = cycle_context.compute_top_risk(
+        dates, [100.0, 90.0, 90.0], [80.0] * 3, [95.0] * 3,
+        cfg={"enabled": False})
+    assert disabled["enabled"] is False
+    assert disabled["active"] is False
+    assert disabled["reasons"] == []
+
+    # 收盘跌破 200SMA → 不激活 (防熊市触发)
+    below = cycle_context.compute_top_risk(
+        dates, [100.0, 90.0, 90.0], [95.0] * 3, [98.0] * 3)
+    assert below["active"] is False
+
+
+def test_top_risk_insufficient_data():
+    risk = cycle_context.compute_top_risk([], [], [], [])
+    assert risk["active"] is False
+    assert risk["since"] is None
+    assert risk["drawdown_from_90d_high_pct"] is None
+    assert risk["distance_200sma_pct"] is None
+
+    one = cycle_context.compute_top_risk(["2026-01-01"], [100.0], [80.0], [95.0])
+    assert one["active"] is False and one["since"] is None
+
+
+def test_top_risk_ema50_structure_override():
+    dates = _dates(3)
+    risk = cycle_context.compute_top_risk(
+        dates, [100.0, 90.0, 90.0], [80.0] * 3, [95.0] * 3,
+        cfg={"structure_ma": "ema50"})
+    assert risk["structure_ma"] == "ema50"
+    assert risk["active"] is True
+    assert any("EMA50" in reason for reason in risk["reasons"])
+
+
+def test_cycle_context_computes_top_risk_and_phase3():
+    # 300 根爬升后 12% 回撤: 收盘跌破 SMA50 但仍在 SMA200 上 → top_risk 激活 → ③
+    prices = _rising_prices(300, base=100.0, step=1.0)   # 末值 399
+    prices.append(350.0)                                  # 回撤 -12.3%
+    context = cycle_context.compute_cycle_context(_dated(prices), _cfg(min_bars=1))
+
+    top_risk = context["top_risk"]
+    assert top_risk["active"] is True
+    assert top_risk["since"] == _dates(len(prices))[-1]
+    assert context["phase"]["code"] == 3
+    assert any("回撤" in reason for reason in context["phase"]["reasons"])
+
+    # 收复 SMA50 后回落为未激活 (且阶段不再为 ③)
+    prices.append(400.0)
+    recovered = cycle_context.compute_cycle_context(_dated(prices), _cfg(min_bars=1))
+    assert recovered["top_risk"]["active"] is False
+    assert recovered["phase"]["code"] == 0
 
 
 # ---- 类比统计 (小序列手工可验) ----
@@ -432,6 +604,10 @@ def _sample_context():
                   "days_since_halving": 886},
         "phase": {"label": "结构确认", "code": 2,
                   "reasons": ["250SMA斜率↑ 且 regime=RECOVERY"]},
+        "top_risk": {"enabled": True, "active": False, "since": None,
+                     "reasons": [], "drawdown_from_90d_high_pct": 0.0,
+                     "distance_200sma_pct": 22.76, "drawdown_window_days": 90,
+                     "structure_ma": "sma50"},
         "trend": {"sma200": 70773.8, "sma250": 71567.48, "slope200": "up",
                   "slope250": "down", "dist_200_pct": 22.76,
                   "days_above_200_30d": 30, "days_above_200_90d": 36,
@@ -477,6 +653,7 @@ def test_format_cycle_context_key_lines_and_limit():
     assert "低点恢复 +48.2%" in text
     assert "距减半 886 天" in text
     assert "- 阶段: 结构确认 (code=2)" in text
+    assert "- 顶部风险: 无" in text
     assert "250SMA 71,567.48(down)" in text
     assert "- 当前区间: 强势多头区 | 近30日区间变更 4 次" in text
     assert "A 首次上穿200SMA (n=26, 去抖20)" in text
@@ -491,6 +668,30 @@ def test_format_cycle_context_empty_variants():
     assert cycle_context.format_cycle_context(None) == ""
     assert cycle_context.format_cycle_context({}) == ""
     assert cycle_context.format_cycle_context("bad") == ""
+
+
+def test_format_cycle_context_top_risk_active_and_disabled():
+    active = _sample_context()
+    active["top_risk"] = {
+        "enabled": True, "active": True, "since": "2025-10-11",
+        "reasons": ["距90日最高收盘回撤 -11.3% (阈值 -10%)"],
+        "drawdown_from_90d_high_pct": -11.27, "distance_200sma_pct": 3.69,
+        "drawdown_window_days": 90, "structure_ma": "sma50"}
+    text = cycle_context.format_cycle_context(active)
+    assert ("- 顶部风险: 激活(自 2025-10-11, 距90日高点 -11.3%, "
+            "距200SMA +3.7%, 跌破SMA50)") in text
+
+    disabled = _sample_context()
+    disabled["top_risk"] = {
+        "enabled": False, "active": False, "since": None, "reasons": [],
+        "drawdown_from_90d_high_pct": None, "distance_200sma_pct": None,
+        "drawdown_window_days": 90, "structure_ma": "sma50"}
+    assert "- 顶部风险: 已关闭 (config)" in cycle_context.format_cycle_context(disabled)
+
+    # 旧版上下文 (无 top_risk 字段) 不渲染该行 (向后兼容)
+    legacy = _sample_context()
+    legacy.pop("top_risk")
+    assert "顶部风险" not in cycle_context.format_cycle_context(legacy)
 
 
 # ---- Analyzer 渲染 / prompt / 输出字段 ----
@@ -514,7 +715,10 @@ def test_format_market_state_omits_cycle_section_without_context():
 
 def test_system_prompt_mentions_cycle_context():
     for phrase in ("周期定位与历史类比用于辅助判断 cycle_position/confidence",
-                   "样本量小仅作参考"):
+                   "样本量小仅作参考",
+                   "顶部风险为**价格结构警示**",
+                   "须与链上/宏观/新闻证据 (Glassnode 内容) 结合判断",
+                   "不单独构成结论"):
         assert phrase in SYSTEM_PROMPT
 
 
@@ -553,6 +757,8 @@ def test_build_market_state_attaches_cycle_context(tmp_path):
 
     assert state["cycle_context"]["source"] == "datafeed"
     assert state["cycle_context"]["cycle"]["close"] == pytest.approx(249.5)
+    assert state["cycle_context"]["top_risk"]["enabled"] is True
+    assert state["cycle_context"]["top_risk"]["active"] is False
     assert state["regime"] == "BEAR"
 
 
@@ -628,14 +834,23 @@ def test_real_payload_smoke():
     assert analogs["D"]["fwd_180d_max_dd"]["median"] == pytest.approx(-15.65, abs=0.01)
     assert analogs["D"]["fwd_180d_max_dd"]["worst"] == pytest.approx(-50.06, abs=0.01)
 
-    # 当前 RECOVERY + 价>200SMA + 250SMA↓ → ① 复苏早期 (区间抖动不再误判为③)
+    # 当前 RECOVERY + 价>200SMA + 250SMA↓ → ① 复苏早期 (顶部风险未激活, 不再误判为③)
     assert context["phase"]["code"] == 1
     assert context["phase"]["label"] == "复苏早期"
     assert "250SMA未转正" in context["phase"]["reasons"][0]
     assert context["trend"]["zone_changes_30d"] is not None   # 仅作趋势参考
 
+    top_risk = context["top_risk"]
+    assert top_risk["enabled"] is True
+    assert top_risk["active"] is False          # 现价即 90 日新高, 回撤 0
+    assert top_risk["drawdown_from_90d_high_pct"] == pytest.approx(0.0)
+    assert top_risk["distance_200sma_pct"] == pytest.approx(22.76, abs=0.05)
+    assert top_risk["since"] is None
+    assert top_risk["structure_ma"] == "sma50"
+
     text = cycle_context.format_cycle_context(context)
     assert "- 阶段: 复苏早期 (code=1)" in text
+    assert "- 顶部风险: 无" in text
     assert "250SMA未转正" in text
     assert "ATH收盘 124,628.50 (2025-10-06)" in text
     assert "距ATH -30.3%" in text
