@@ -18,6 +18,7 @@ if _REPO_ROOT not in sys.path:
 from AIService.client import AIClient
 from src.link_reader import read_link_content
 from src.alpha_engine import FORWARD_NEXT_REGIME
+from src.cycle_context import format_cycle_context
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -63,6 +64,12 @@ SYSTEM_PROMPT = """你是一位资深的加密货币链上数据分析师。你�
 
 均线用于辅助判断周期位置是否与价格结构一致, 不构成短期交易信号;
 若价格结构与周期位置明显背离 (如 BEAR 但价格在 200SMA 上方), 需在 regime_evidence 中说明。
+
+## 周期定位与历史类比 (辅助参考)
+
+每轮评审锚点会给出日线周期定位 (ATH/周期低点/回撤/距减半)、固定规则阶段判定与四组历史类比统计
+(A 首次上穿200SMA / B 当前状态 / C 250SMA转正 / D 距200SMA>20%)。
+周期定位与历史类比用于辅助判断 cycle_position/confidence, 样本量小仅作参考。
 
 ## 仓位纪律 (确认即定位, 跨零线先平仓)
 
@@ -505,7 +512,8 @@ class Analyzer:
         if parts:
             text = ("## 当前引擎状态 (锚点, 请基于此连续性判断)\n"
                     + "\n".join(parts) + "\n")
-        return text + self._format_ma_context(market_state.get("ma_context"))
+        return (text + self._format_ma_context(market_state.get("ma_context"))
+                + format_cycle_context(market_state.get("cycle_context")))
 
     @staticmethod
     def _fmt_k(value) -> str:

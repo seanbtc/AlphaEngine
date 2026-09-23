@@ -21,6 +21,7 @@ from src.analyzer import Analyzer
 from src.alpha_engine import AlphaEngine, EvidenceAccumulator, REGIME_TRANSITIONS
 from src.knowledge import Knowledge
 from src.ma_context import build_ma_context, summarize_ma_context
+from src.cycle_context import build_cycle_context
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
@@ -183,6 +184,18 @@ def build_market_state(components: dict, price: float = None,
                 state["ma_context"] = ma_context
         except Exception as exc:
             print(f"[MA] 均线上下文构建失败 (不影响本轮): {exc}")
+    # 周期定位与历史类比 (日线): 辅助 AI 结合判断; 失败不阻塞主流程
+    cycle_cfg = (components.get("cfg") or {}).get("cycle_context") or {}
+    if cycle_cfg.get("enabled", False):
+        try:
+            cycle_context = build_cycle_context(
+                cycle_cfg, client=components.get("datafeed"),
+                ma_context=state.get("ma_context"),
+                regime={"name": regime, "alpha": engine.get_alpha()})
+            if cycle_context:
+                state["cycle_context"] = cycle_context
+        except Exception as exc:
+            print(f"[Cycle] 周期上下文构建失败 (不影响本轮): {exc}")
     return state
 
 

@@ -128,6 +128,28 @@ Binance U 本位口径），计算 5/10/20 EMA + 50/100/200/250 SMA，向 AI 提
 regime/alpha 一起写入 `state.json` 的 `ma` 字段，供 Web 面板只读展示（`--test-ai`/回溯
 等只读路径不写）；Web 侧由 `Web/web.py::load_alpha_engine_ma` 读取。
 
+### 周期上下文（cycle_context）
+
+在均线结构之外，每轮 AI 评审还会收到"周期定位与历史类比"小节（`src/cycle_context.py`，
+纯计算、无新依赖），固定包含：
+
+- **周期位置**：ATH（收盘/最高价口径 + 日期）、现价与距 ATH 回撤、近 365 日周期低点与低点恢复%、
+  距低点/距 ATH/距上次减半（2024-04-20）天数；
+- **阶段判定**：固定规则按 ④→③→②→① 顺序匹配（阈值可配），未命中为"过渡期"：
+  ④熊市（close<SMA200 且 200SMA↓）｜③中后期/顶部（距 200SMA>30% 或 alpha≥0.90 或 regime=BULL_COOLING）｜
+  ②结构确认（250SMA↑ 且 regime∈{RECOVERY,BULL}）｜①复苏早期（regime∈{BEAR_BOTTOM,RECOVERY} 且 close>SMA200 且 250SMA↓）；
+- **趋势关键值**：200/250 SMA 值与斜率、距 200SMA%、近 30/90 日站上 200SMA 天数、区间档位
+  （传入 `ma_context` 时复用其 zone/days_above/zone_changes）；
+- **四组历史类比**（收盘口径，连续日去重 + 相邻≤5 交易日去抖，前瞻 30/90/180/365 交易日中位/正收益率/极值）：
+  A 首次上穿 200SMA｜B 当前状态（>200SMA、200↑、250↓、距 200SMA 10-30%、距 ATH>30%）｜
+  C 250SMA 斜率转正｜D 距 200SMA>20% 首入；B/D 附未来 180 日最大回撤中位/最差；
+- **风险提示**：样本量、预热（200SMA 自 2020-07、250SMA 自 2020-09）、截断剔除与阈值去抖说明。
+
+数据来自 DataFeed `/klines`（`kline_limit=3000` 覆盖全历史，`min_bars=300` 兜底），失败/stale/
+数据不足时该段整体缺省并打印 `[Cycle]` 日志，主流程继续；`--test-ai`/回溯等只读路径同样只读不落盘。
+周期定位与历史类比仅辅助判断 cycle_position/confidence，样本量小（尤其 B），不构成短期交易信号。
+配置见 `config.json` → `cycle_context`（统计窗口、去抖间隔、阶段/类比阈值、减半日期）。
+
 ## 快速开始
 
 ### 安装
@@ -201,6 +223,7 @@ glassnode-engine/
 │   ├── analyzer.py                # DeepSeek API (system prompt + JSON 修复)
 │   ├── alpha_engine.py            # Regime 状态机 + 证据累积 + α 平滑
 │   ├── ma_context.py              # 日线均线结构 (区间/趋势/事件 + 历史快照)
+│   ├── cycle_context.py           # 周期定位/阶段判定/四组历史类比 (辅助参考)
 │   ├── state_manager.py           # state.json 持久化 + 脏写合批
 │   ├── memory.py                  # 双存储 (memory.md + metrics + alpha_history)
 │   ├── knowledge.py               # 蒸馏/漂移检测/预测审计

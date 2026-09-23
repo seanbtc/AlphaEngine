@@ -147,6 +147,33 @@
     }
   },
 
+  "cycle_context": {
+    "_note": "周期定位与历史类比 (辅助 AI 结合判断; 失败/数据不足则该段缺省并报 [Cycle] 日志)。数据来自 DataFeed /klines (日线, 需 ≥min_bars 根; kline_limit 建议 3000 覆盖全历史); cache_ttl_seconds 为取数缓存秒数。stats.windows 为前瞻收益窗口(交易日); lookback_days 为周期低点回看天数; merge_gap_days 为相邻信号去抖合并间隔; dd_window/dd_groups 为前瞻最大回撤窗口与输出组(B/D)。phase 阈值: top_deviation_pct 距200SMA偏离 / top_alpha 周期仓位 (③ 另含 regime=BULL_COOLING; 近30日区间变更次数仅作参考不参与判定); analog 为四组类比条件阈值 (B: 距200SMA 10-30% 且距ATH>30%; D: 距200SMA 首入>20%); halving_date 最近一次减半日期。",
+    "enabled": true,
+    "interval": "1d",
+    "kline_limit": 3000,
+    "min_bars": 300,
+    "cache_ttl_seconds": 300,
+    "stats": {
+      "windows": [30, 90, 180, 365],
+      "lookback_days": 365,
+      "merge_gap_days": 5,
+      "dd_window": 180,
+      "dd_groups": ["B", "D"]
+    },
+    "phase": {
+      "top_deviation_pct": 0.30,
+      "top_alpha": 0.90
+    },
+    "analog": {
+      "b_min_ratio": 0.10,
+      "b_max_ratio": 0.30,
+      "b_min_drawdown": 0.30,
+      "d_ratio": 0.20
+    },
+    "halving_date": "2024-04-20"
+  },
+
   "dingtalk": {
     "enabled": true,
     "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=63e160c26acc3dfe3e55be8a86f1a8aa5af3fc8f17b839b7de1af2a2a7b12af8",
