@@ -33,7 +33,12 @@
     "retweet_whitelist": ["n3ocortex"],
     "_note_web": "web_fallback: x.com 不可达时解析 web/ 目录保存的 X 主页 HTML; web_dir 为网页目录 (相对项目根)",
     "web_fallback": true,
-    "web_dir": "web"
+    "web_dir": "web",
+    "_note_reachability": "x.com 可达性缓存: 探测失败后超过 reachability_ttl_seconds 秒允许复探 (成功结果进程内缓存); 0=每次复探",
+    "reachability_ttl_seconds": 900,
+    "_note_replay": "分析失败推文落 data/pending_analysis.jsonl, 下轮优先重放; pending_max_items 为队列上限 (超出丢弃最旧), pending_max_age_days 为超龄丢弃天数 (丢弃时告警一次)",
+    "pending_max_items": 100,
+    "pending_max_age_days": 7
   },
 
   "alpha": {

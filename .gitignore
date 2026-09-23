@@ -8,6 +8,8 @@ web/*_files/
 web/
 data/price_history.jsonl
 data/ma_history.jsonl
+data/pending_analysis.jsonl
+data/pending_analysis.jsonl.tmp
 data/.lock
 data/.lock.tmp.*
 data/*.corrupt.*

@@ -25,6 +25,7 @@ from src.alpha_engine import (AlphaEngine, EvidenceAccumulator,
                               REGIME_ALPHA_MAP, REGIME_TRANSITIONS)
 from src.knowledge import Knowledge
 from src.ma_context import build_ma_context, summarize_ma_context
+from src.pending_analysis import PendingAnalysis
 from src.cycle_context import build_cycle_context
 from src.tradesync import TradeSync
 from src.datafeed import DataFeed
@@ -165,7 +166,13 @@ def init_components(cfg: dict):
     state_mgr.load(on_recovered=lambda info: _alert_state_recovery(dingtalk, info),
                    memory=memory)
 
-    fetcher = Fetcher(cfg.get("fetcher", {}), data_dir)
+    fetcher_cfg = cfg.get("fetcher", {})
+    fetcher = Fetcher(fetcher_cfg, data_dir)
+    pending = PendingAnalysis(
+        data_dir,
+        max_items=fetcher_cfg.get("pending_max_items", 100),
+        max_age_days=fetcher_cfg.get("pending_max_age_days", 7),
+    )
     ai_cfg = dict(cfg.get("ai_service") or cfg.get("deepseek") or {})
     ai_cfg["cross_check"] = (cfg.get("alpha") or {}).get("cross_check") or {}
     analyzer = Analyzer(ai_cfg)
@@ -185,7 +192,7 @@ def init_components(cfg: dict):
         "engine": engine, "evidence": evidence,
         "knowledge": knowledge, "tradesync": tradesync,
         "datafeed": datafeed, "dingtalk": dingtalk,
-        "review": review,
+        "review": review, "pending": pending,
     }
 
 
@@ -197,6 +204,10 @@ def print_status(components: dict):
     print(f"\n[Status] Regime={regime} | Alpha={alpha:+.4f} | Analyses={count}")
     line = (f"         Cooldown={sm.get('regime.cooldown_remaining',0)} | "
             f"Stability={sm.get('regime.stability_counter',0)}")
+    outage = sm.get("runtime.outage") or {}
+    if isinstance(outage, dict) and outage:
+        line += (f" | Outage={outage.get('reason', '?')}"
+                 f"(since {outage.get('since', '?')})")
     engine = components.get("engine")
     if engine is not None:
         pending = engine.get_pending_proposal()
@@ -209,6 +220,14 @@ def print_status(components: dict):
     if failures > 0:
         last_at = getattr(dingtalk, "last_failure_at", "") or "?"
         line += f" | Notify失败={failures}次 (最近 {last_at})"
+    pending_store = components.get("pending")
+    if pending_store is not None:
+        try:
+            pending_tweets = pending_store.count()
+        except Exception:
+            pending_tweets = 0
+        if pending_tweets > 0:
+            line += f" | PendingTweets={pending_tweets}"
     print(line)
 
 
@@ -679,6 +698,168 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     return True
 
 
+# ---- 故障语义: outage 标记 + 失败推文重放 ----
+
+def _set_outage(components: dict, reason: str, detail: str = "") -> dict:
+    """进入/维持数据源故障态 (runtime.outage).
+
+    首次进入按 reason 钉钉告警一次; 故障持续期间只更新 reason/detail,
+    保留原 since 且不重复告警; 恢复由 _clear_outage 清除。
+    """
+    sm = components["state"]
+    current = sm.get("runtime.outage") or {}
+    if isinstance(current, dict) and current:
+        updated = dict(current)
+        if updated.get("reason") != reason or updated.get("detail") != str(detail)[:200]:
+            updated["reason"] = reason
+            updated["detail"] = str(detail)[:200]
+            sm.set("runtime.outage", updated)
+        return updated
+    record = {"since": datetime.utcnow().isoformat() + "Z",
+              "reason": reason, "detail": str(detail)[:200]}
+    sm.set("runtime.outage", record)
+    print(f"[Outage] 数据源故障: {reason} | {record['detail']} (since {record['since']})")
+    dingtalk = components.get("dingtalk")
+    if dingtalk is not None:
+        try:
+            dingtalk.alert("数据源故障",
+                           f"原因: {reason}\n详情: {record['detail']}\n开始: {record['since']}")
+        except Exception as exc:
+            print(f"[Outage] 故障告警发送失败 (不影响主流程): {exc}")
+    return record
+
+
+def _clear_outage(components: dict, detail: str = "") -> bool:
+    """清除故障态 (抓取/分析已恢复); 仅在实际处于故障态时恢复告警一次."""
+    sm = components["state"]
+    current = sm.get("runtime.outage") or {}
+    if not (isinstance(current, dict) and current):
+        return False
+    sm.set("runtime.outage", {})
+    reason = current.get("reason", "?")
+    since = current.get("since", "?")
+    suffix = f", {detail}" if detail else ""
+    print(f"[Outage] 数据源恢复: {reason} → OK (since {since}{suffix})")
+    dingtalk = components.get("dingtalk")
+    if dingtalk is not None:
+        try:
+            dingtalk.alert("数据源恢复",
+                           f"故障原因: {reason}\n开始: {since}\n"
+                           f"本轮: {detail or '抓取/分析成功'}")
+        except Exception as exc:
+            print(f"[Outage] 恢复告警发送失败 (不影响主流程): {exc}")
+    return True
+
+
+def _alert_pending_drops(components: dict, pending, stats: dict) -> None:
+    """队列超龄/超上限丢弃时告警一次 (发送失败不影响主流程)."""
+    dropped = int(stats.get("expired", 0)) + int(stats.get("overflow", 0))
+    if not dropped:
+        return
+    body = (f"超龄(>{pending.max_age_days:g}天)丢弃 {stats.get('expired', 0)} 条 | "
+            f"超上限({pending.max_items})丢弃 {stats.get('overflow', 0)} 条")
+    print(f"[Pending] {body}")
+    dingtalk = components.get("dingtalk")
+    if dingtalk is not None:
+        try:
+            dingtalk.alert("推文重放队列丢弃", body)
+        except Exception as exc:
+            print(f"[Pending] 丢弃告警发送失败 (不影响主流程): {exc}")
+
+
+def _enqueue_pending_analysis(components: dict, tweets: list,
+                              reason: str = "analysis_failed") -> dict:
+    """把本轮未被分析的推文 (分析失败/未进窗口) 落入待分析队列.
+
+    队列 I/O 异常只记日志不抛出; 超龄/超上限丢弃时告警一次。
+    """
+    pending = components.get("pending")
+    if pending is None:
+        return {}
+    ids = [str(t.get("id", "") or "") for t in (tweets or []) if t.get("id")]
+    try:
+        stats = pending.add(ids, reason=reason)
+    except Exception as exc:
+        print(f"[Pending] 队列写入失败 (不影响主流程): {exc}")
+        return {}
+    if stats.get("added"):
+        print(f"[Pending] 入队 {stats['added']} 条 "
+              f"(原因: {reason}, 队列 {stats['total']} 条)")
+    _alert_pending_drops(components, pending, stats)
+    return stats
+
+
+def _merge_pending_replay(components: dict, new_tweets: list, locked: bool) -> list:
+    """把待分析队列中的推文从 tweets.jsonl 取回, 与当轮新推文合并 (优先重放).
+
+    合并顺序: 当轮新推文在前、重放项在后 —— `Analyzer._format_tweets` 只取
+    `tweets[-20:]`, 该顺序保证重放项优先进入分析窗口; 未进窗口的部分由
+    run_cycle 保留/回队列下轮重试 (不静默丢弃)。
+    锁定轮/队列为空时原样返回; 已不在 tweets.jsonl 的 ID 直接移出;
+    队列 I/O 异常只记日志不抛出 (返回原列表)。
+    """
+    if locked:
+        return new_tweets
+    pending = components.get("pending")
+    if pending is None:
+        return new_tweets
+
+    def _on_corrupt(message: str):
+        dingtalk = components.get("dingtalk")
+        if dingtalk is not None:
+            dingtalk.alert("推文重放队列损坏", message)
+
+    try:
+        queued = pending.load(on_error=_on_corrupt)
+        if not queued:
+            return new_tweets
+        have = {str(t.get("id", "") or "") for t in new_tweets}
+        ids = [it["id"] for it in queued if it["id"] not in have]
+        if not ids:
+            return new_tweets
+        found = components["fetcher"].get_tweets_by_ids(ids)
+        found_ids = {str(t.get("id", "") or "") for t in found}
+        missing = [i for i in ids if i not in found_ids]
+        if missing:
+            pending.remove(missing)
+            print(f"[Pending] {len(missing)} 条推文不在 tweets.jsonl, 已移出队列")
+        if not found:
+            return new_tweets
+        merged = new_tweets + found
+        print(f"[Pending] 重放 {len(found)} 条失败推文 (队列 {len(queued)} 条)")
+        return merged
+    except Exception as exc:
+        print(f"[Pending] 重放队列处理失败 (不影响主流程): {exc}")
+        return new_tweets
+
+
+def _handled_tweet_ids(analyzer, tweets: list) -> list:
+    """本轮真正被处理的推文 ID (进入 prompt 窗口的 + 被 BTC 过滤的).
+
+    Analyzer 未记录 (兼容无该接口的 stub) 时回退为全部入参, 保持旧语义;
+    未进窗口的 ID 不在返回值内 → 保留队列下轮重试。
+    """
+    ids = [str(t.get("id", "") or "") for t in tweets if t.get("id")]
+    sent = getattr(analyzer, "last_sent_tweet_ids", None)
+    filtered = getattr(analyzer, "last_filtered_tweet_ids", None)
+    if sent is None or filtered is None:
+        return ids
+    handled = {str(i) for i in sent} | {str(i) for i in filtered}
+    return [i for i in ids if i in handled]
+
+
+def _all_tweets_filtered(analyzer) -> bool:
+    """本批是否全部被 BTC 过滤 (无推文进入 prompt 但有被过滤项).
+
+    该情形是"无有效新闻"而非故障: 不入队、不置 outage。
+    """
+    sent = getattr(analyzer, "last_sent_tweet_ids", None)
+    filtered = getattr(analyzer, "last_filtered_tweet_ids", None)
+    if sent is None or filtered is None:
+        return False
+    return not sent and bool(filtered)
+
+
 def run_cycle(components: dict) -> bool:
     """运行一次完整分析循环。返回是否有新推文被分析."""
     c = components
@@ -738,33 +919,68 @@ def run_cycle(components: dict) -> bool:
         except Exception as e:
             print(f"[Audit] 预测审计异常 (不影响本轮分析): {e}")
 
-    # 2. 抓取新推文
+    # 2. 抓取新推文 (区分"数据源故障"与"无新闻": 异常 → fetch_error)
     new_tweets = []
+    fetch_error = False
+    fetched_ok = False
+    fetch_detail = ""
     print("\n--- Fetch ---")
     if locked:
         print("[Fetch] Skipped (analysis lock)")
     else:
         try:
             new_tweets = fetcher.fetch()
+            fetched_ok = True
         except Exception as e:
+            fetch_error = True
+            fetch_detail = f"{type(e).__name__}: {e}"
             print(f"[Fetch] Error: {e}")
             new_tweets = []
+
+    # 2.5 失败推文重放: 队列非空时从 tweets.jsonl 取回并与当轮新推文合并
+    new_tweets = _merge_pending_replay(c, new_tweets, locked)
 
     has_analysis = False
     analysis = None
     regime_changed_this_cycle = False
+    idle_cycle = not new_tweets
 
     if new_tweets:
-        # 3. 分析 (只在有新推文时)
+        # 3. 分析 (只在有新推文/重放推文时)
         print("\n--- Analyze ---")
         kb = knowledge.load_knowledge_base()
         ctx = memory.get_context_for_ai()
         market_state = build_market_state(c, btc_price)
         _record_ma_state(sm, market_state)
-        analysis = analyzer.analyze(new_tweets, ctx, kb, market_state=market_state)
+        try:
+            analysis = analyzer.analyze(new_tweets, ctx, kb, market_state=market_state)
+        except Exception as exc:
+            print(f"  Analysis error: {type(exc).__name__}: {exc}")
+            analysis = None
 
         if analysis:
             sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            pending_store = c.get("pending")
+            if pending_store is not None:
+                try:
+                    # 只移除真正被处理的 (进入 prompt 窗口 + 被 BTC 过滤);
+                    # 未进 20 条窗口的保留队列下轮重试 (防静默丢推文)
+                    handled_ids = _handled_tweet_ids(analyzer, new_tweets)
+                    handled_set = set(handled_ids)
+                    removed = pending_store.remove(handled_ids)
+                    if removed:
+                        print(f"[Pending] 分析成功, 移出队列 {removed} 条")
+                    unhandled = [t for t in new_tweets
+                                 if str(t.get("id", "") or "") not in handled_set]
+                    if unhandled:
+                        print(f"[Pending] {len(unhandled)} 条未进分析窗口, 留队列下轮重试")
+                        _enqueue_pending_analysis(c, unhandled, "window_overflow")
+                except Exception as exc:
+                    print(f"[Pending] 队列清理失败 (不影响主流程): {exc}")
+            if fetched_ok:
+                _clear_outage(c, "抓取/分析成功")
+            else:
+                _set_outage(c, "fetch_error", fetch_detail)
 
         if analysis:
             cp = analysis.get("cycle_position", "BEAR")
@@ -841,34 +1057,68 @@ def run_cycle(components: dict) -> bool:
             knowledge.log_prediction(cp, conf, btc_price)
 
             has_analysis = True
+        elif _all_tweets_filtered(analyzer):
+            # 全部被 BTC 过滤 ≠ 故障: 视为无有效新闻, 走 idle (不入队/不置 outage);
+            # 同时把被过滤条目从重放队列移出 (与成功轮 sent∪filtered 语义对齐,
+            # 否则纯 altcoin 条目会每轮重放且永远失败)
+            print("  [Analyzer] 本批全部被 BTC 过滤跳过 (视为无有效新闻)")
+            pending_store = c.get("pending")
+            if pending_store is not None:
+                try:
+                    skipped_ids = getattr(analyzer, "last_filtered_tweet_ids", []) or []
+                    removed = pending_store.remove(skipped_ids)
+                    if removed:
+                        print(f"[Pending] 过滤跳过, 移出队列 {removed} 条")
+                except Exception as exc:
+                    print(f"[Pending] 队列清理失败 (不影响主流程): {exc}")
+            idle_cycle = True
         else:
             print("  Analysis failed, skipping evidence update.")
+            stats = _enqueue_pending_analysis(c, new_tweets, "analysis_failed")
+            detail = "AI 分析失败"
+            if stats.get("total") is not None:
+                detail += (f", {stats.get('added', 0)} 条入重放队列 "
+                           f"(队列 {stats['total']} 条)")
+            _set_outage(c, "analysis_failed", detail)
             sm.update_runtime()
             sm.save()
             return False
-    else:
-        # 无新推文: 基于4年周期时间推进 alpha (不依赖推文频率)
-        print("\n--- Idle (no new tweets) ---")
-        old_alpha = engine.get_alpha()
-        new_alpha, alpha_changed = engine.tick_alpha()
-        evidence.decay_all()
-        engine.tick_cooldown()
-        engine.tick_stability()
 
-        if alpha_changed:
-            progress = float(sm.get("alpha.regime_progress", 0.5))
-            target = engine.calculate_target_alpha(engine.get_regime(), progress)
-            print(f"  Alpha (time-based): {old_alpha:+.4f} → {new_alpha:+.4f} "
-                  f"(target={target:+.2f}, progress={progress:.2f})")
-            memory.append_alpha({
-                "date": datetime.utcnow().isoformat() + "Z",
-                "alpha": new_alpha,
-                "regime": engine.get_regime(),
-                "target_alpha": target,
-                "btc_price": btc_price,
-                "note": "时间推进: 无推文时按4年周期推进alpha",
-            })
-            dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price, target)
+    if idle_cycle:
+        # 无新推文 (或全部被过滤跳过)
+        if fetch_error:
+            # 数据源故障: 视为数据缺失, 本轮不推进周期钟 (alpha/progress/cooldown/
+            # stability/evidence 全部冻结), 价格/审计/MA 摘要与 state 保存照常
+            print("\n--- Idle (fetch_error) ---")
+            _set_outage(c, "fetch_error", fetch_detail)
+            print("  [Outage] 数据缺失: 本轮不推进 "
+                  "alpha/progress/cooldown/stability/evidence")
+        else:
+            # 基于4年周期时间推进 alpha (不依赖推文频率)
+            print("\n--- Idle (no new tweets) ---")
+            if fetched_ok:
+                _clear_outage(c, "抓取成功 (无新推文)")
+            old_alpha = engine.get_alpha()
+            new_alpha, alpha_changed = engine.tick_alpha()
+            evidence.decay_all()
+            engine.tick_cooldown()
+            engine.tick_stability()
+
+            if alpha_changed:
+                progress = float(sm.get("alpha.regime_progress", 0.5))
+                target = engine.calculate_target_alpha(engine.get_regime(), progress)
+                print(f"  Alpha (time-based): {old_alpha:+.4f} → {new_alpha:+.4f} "
+                      f"(target={target:+.2f}, progress={progress:.2f})")
+                memory.append_alpha({
+                    "date": datetime.utcnow().isoformat() + "Z",
+                    "alpha": new_alpha,
+                    "regime": engine.get_regime(),
+                    "target_alpha": target,
+                    "btc_price": btc_price,
+                    "note": "时间推进: 无推文时按4年周期推进alpha",
+                })
+                dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(),
+                                      btc_price, target)
 
         # 空闲周期也刷新 K 线趋势摘要 (Web 展示用): 只读历史不写 ma_history,
         # DataFeed 不可用/异常不阻塞 alpha 时间推进.
@@ -885,7 +1135,9 @@ def run_cycle(components: dict) -> bool:
         _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start,
                                      btc_price, reason="idle_tick")
 
-        sm.update_runtime()
+        if not fetch_error:
+            # 故障轮不计入分析计数, 仅保存状态 (outage/MA 摘要)
+            sm.update_runtime()
         sm.save()
         return False
 

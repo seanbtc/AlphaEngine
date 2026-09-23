@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
@@ -44,9 +45,16 @@ class Fetcher:
             web_dir = os.path.normpath(
                 os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), web_dir))
         self.web_dir = web_dir
+        raw_ttl = config.get("reachability_ttl_seconds", 900)
+        try:
+            ttl = 900.0 if raw_ttl is None or raw_ttl == "" else float(raw_ttl)
+        except (TypeError, ValueError):
+            ttl = 900.0
+        self.reachability_ttl = max(0.0, ttl)
         self.data_dir = data_dir
         self.tweets_file = os.path.join(data_dir, "tweets.jsonl")
         self._x_com_reachable = None
+        self._x_com_checked_at = None
 
     def _load_existing_ids(self) -> set:
         ids = set()
@@ -127,6 +135,22 @@ class Fetcher:
             print(f"[Fetcher] x.com 不可达: {type(e).__name__}: {e}")
             return False
 
+    def _x_com_is_reachable(self) -> bool:
+        """可达性探测 (带缓存 TTL): None=未探测; 失败结果超过 TTL 允许复探.
+
+        成功结果保持进程内缓存 (与旧行为一致, 不额外增加探测请求)。
+        """
+        now = time.monotonic()
+        if self._x_com_reachable is None:
+            self._x_com_reachable = self._check_x_com()
+            self._x_com_checked_at = now
+        elif not self._x_com_reachable and self._x_com_checked_at is not None:
+            if now - self._x_com_checked_at >= self.reachability_ttl:
+                print(f"[Fetcher] 可达性缓存过期 ({self.reachability_ttl:.0f}s), 重新探测 x.com")
+                self._x_com_reachable = self._check_x_com()
+                self._x_com_checked_at = now
+        return bool(self._x_com_reachable)
+
     def _fetch_x_web(self, user: str) -> str:
         """抓取 X 主页 HTML, 返回页面内容或空字符串."""
         url = f"https://x.com/{user}"
@@ -155,10 +179,7 @@ class Fetcher:
         seen_ids = set()
         tracked = {u.lower() for u in self.usernames}
 
-        if self._x_com_reachable is None:
-            self._x_com_reachable = self._check_x_com()
-
-        if not self._x_com_reachable:
+        if not self._x_com_is_reachable():
             return all_tweets
 
         for user in self.usernames:
@@ -618,6 +639,34 @@ class Fetcher:
         tweets = _read_jsonl_tail(self.tweets_file, count)
         tweets.sort(key=lambda t: t.get("id", ""))
         return tweets
+
+    def get_tweets_by_ids(self, ids) -> list[dict]:
+        """按 ID 从 tweets.jsonl 取回推文 (失败推文重放用), 保持入参顺序.
+
+        缺失的 ID 直接跳过; 空入参/文件不存在返回 []。
+        """
+        wanted = [str(i) for i in ids if str(i)]
+        if not wanted or not os.path.exists(self.tweets_file):
+            return []
+        wanted_set = set(wanted)
+        found = {}
+        with open(self.tweets_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                tid = str(obj.get("id", "") or "")
+                if tid in wanted_set and tid not in found:
+                    found[tid] = obj
+                    if len(found) == len(wanted_set):
+                        break
+        return [found[tid] for tid in wanted if tid in found]
 
     def load_all_tweets(self) -> list[dict]:
         """一次性加载所有推文 (仅在 backfill/import 时使用)."""

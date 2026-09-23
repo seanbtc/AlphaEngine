@@ -18,6 +18,8 @@ _ARTIFACTS = [
     "data/state.json.corrupt.20260923T082622Z.1",
     "data/memory.md.bak",
     "data/knowledge_base.md.bak",
+    "data/pending_analysis.jsonl",
+    "data/pending_analysis.jsonl.tmp",
 ]
 
 

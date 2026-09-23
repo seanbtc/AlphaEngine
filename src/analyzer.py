@@ -268,6 +268,9 @@ class Analyzer:
         self.link_max_total_chars = int(cfg.get("link_max_total_chars", 10000) or 10000)
         self.pdf_timeout = int(cfg.get("pdf_timeout_seconds", 30) or 30)
         self._last_image_error = False
+        # 故障语义: 记录本轮真正进入 prompt 窗口/被过滤的推文 ID (重放队列精确移除用)
+        self.last_sent_tweet_ids: list[str] = []
+        self.last_filtered_tweet_ids: list[str] = []
         # 测试: false 时只传推文 URL, 不传正文
         self.send_tweet_content = bool(cfg.get("send_tweet_content", True))
         # 非 BTC 主题推文过滤 (降噪)
@@ -307,11 +310,13 @@ class Analyzer:
                 yield "", str(ref or "")
 
     def _format_tweets(self, tweets: list[dict]) -> str:
+        window = tweets[-20:] if tweets else []  # 最多 20 条
+        self.last_sent_tweet_ids = [str(t.get("id", "") or "") for t in window if t.get("id")]
         if not tweets:
             return "(无新推文)"
         lines = []
         ref_total = 0
-        for i, t in enumerate(tweets[-20:], 1):  # 最多 20 条
+        for i, t in enumerate(window, 1):
             date_str = t.get("date", "?")[:16]
             url = Analyzer._tweet_url(t)
             if not self.send_tweet_content:
@@ -473,17 +478,23 @@ class Analyzer:
         return True
 
     def _filter_btc_tweets(self, tweets: list[dict]) -> list[dict]:
-        """过滤非 BTC 主题推文, 返回保留列表."""
+        """过滤非 BTC 主题推文, 返回保留列表; 记录被丢弃的推文 ID."""
         if not self.filter_non_btc:
+            self.last_filtered_tweet_ids = []
             return tweets
         kept = []
         dropped = []
+        dropped_ids = []
         for t in tweets:
             content = (t.get("content", "") or "")
             if self._is_btc_relevant(content):
                 kept.append(t)
             else:
                 dropped.append(t.get("url", "?"))
+                tid = str(t.get("id", "") or "")
+                if tid:
+                    dropped_ids.append(tid)
+        self.last_filtered_tweet_ids = dropped_ids
         if dropped:
             print(f"[Analyzer] 过滤 {len(dropped)} 条非BTC主题推文: "
                   f"{', '.join(dropped[:5])}{'...' if len(dropped) > 5 else ''}")
@@ -596,6 +607,8 @@ class Analyzer:
     def analyze(self, new_tweets: list[dict], memory_context: str,
                 knowledge_base: str = "", retries: int = 1,
                 market_state: dict | None = None) -> dict | None:
+        self.last_sent_tweet_ids = []
+        self.last_filtered_tweet_ids = []
         if not self.enabled:
             print("[Analyzer] Cannot run: AI 服务已禁用 (ai_service.enabled=false)")
             return None
