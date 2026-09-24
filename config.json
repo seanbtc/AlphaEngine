@@ -233,8 +233,12 @@
   },
 
   "promo": {
-    "_note": "分析帖子推送给 Promo (HTTP POST, env PROMO_EVENTS_URL); 推送失败即丢弃。",
-    "enabled": true
+    "_note": "分析帖子推送给 Promo (HTTP POST, env PROMO_EVENTS_URL); 推送失败即丢弃。term_replacements 仅作用于发往 Promo 的载荷文本 (钉钉/记忆/知识库/AI 原始输出保持原文): 大小写不敏感、按序替换, 用于避让 Promo 屏蔽词 (交易平台品牌名); 配置缺失/非法/替换后为空 → 原文透传并日志。",
+    "enabled": true,
+    "term_replacements": [
+      {"pattern": "Coinbase Premium", "replacement": "美资现货溢价"},
+      {"pattern": "coinbase", "replacement": "美资平台"}
+    ]
   },
 
   "backfill": {

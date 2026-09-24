@@ -470,6 +470,10 @@ AI 自动运行：
 | **分析结果** | 🧠 周期位置 + 信号板 |
 | **风格漂移** | ⚠ 新术语/质量骤降 |
 
+## Promo 帖子推送
+
+编号帖子经 HTTP POST 推送至 Promo 事件服务（`PROMO_EVENTS_URL`），失败即丢弃、不写文件桥。仅**发往 Promo 的载荷文本**按 `promo.term_replacements` 做品牌词避让（大小写不敏感、按序替换，如 `Coinbase Premium` → `美资现货溢价`）；钉钉消息、记忆/知识库与 AI 原始输出保持原文。配置缺失/非法、替换后为空 → 原文透传并打日志。
+
 ## 接入 TradeSync
 
 `config.json` 中启用：

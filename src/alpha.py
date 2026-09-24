@@ -8,6 +8,7 @@ Glassnode Alpha Engine — 主入口.
 import atexit
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -66,16 +67,66 @@ def _push_promo_event(record: dict) -> bool:
     return bool(body.get("ok", True))
 
 
+def _apply_promo_term_replacements(text: str, promo_cfg: dict) -> str:
+    """对**仅发往 Promo 的载荷文本**应用 promo.term_replacements (品牌词避让)。
+
+    规则按序应用且大小写不敏感 (pattern 按字面量匹配, 不做正则解释);
+    钉钉消息/记忆/知识库/AI 原始输出保持原文。
+    配置缺失/非法、单条规则非法、替换异常或替换后为空 → 原文透传 + 日志。
+    """
+    rules = promo_cfg.get("term_replacements")
+    if rules is None:
+        print("[Promo] 未配置 promo.term_replacements, 原文透传")
+        return text
+    if not isinstance(rules, list):
+        print(f"[Promo] promo.term_replacements 非列表 ({type(rules).__name__}), 原文透传")
+        return text
+    result = text
+    applied = 0
+    for rule in rules:
+        if not isinstance(rule, dict):
+            print(f"[Promo] 忽略非法术语规则 (非对象): {rule!r}")
+            continue
+        pattern = rule.get("pattern")
+        replacement = rule.get("replacement")
+        if not isinstance(pattern, str) or not pattern:
+            print(f"[Promo] 忽略非法术语规则 (pattern 缺失): {rule!r}")
+            continue
+        if not isinstance(replacement, str):
+            print(f"[Promo] 忽略非法术语规则 (replacement 缺失): {rule!r}")
+            continue
+        try:
+            result = re.sub(re.escape(pattern), lambda _m: replacement,
+                            result, flags=re.IGNORECASE)
+        except re.error as exc:
+            print(f"[Promo] 术语替换异常 ({pattern!r}: {exc}), 原文透传")
+            return text
+        applied += 1
+    if not result.strip():
+        print("[Promo] 术语替换后文本为空, 原文透传")
+        return text
+    if result != text:
+        print(f"[Promo] 术语替换已应用 (规则 {applied} 条)")
+    return result
+
+
 def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
-    """把编号帖子推送给 Promo: 仅 HTTP 推送, 失败即丢弃 (不写文件桥, 过期不候)。"""
-    promo_cfg = cfg.get("promo", {})
+    """把编号帖子推送给 Promo: 仅 HTTP 推送, 失败即丢弃 (不写文件桥, 过期不候)。
+
+    载荷文本在此应用 promo.term_replacements (品牌词避让): 仅影响 Promo 载荷,
+    钉钉消息/记忆/知识库/AI 原始输出不受影响; 替换失败/为空时原文透传。
+    """
+    promo_cfg = cfg.get("promo") or {}
+    if not isinstance(promo_cfg, dict):
+        return
     if not promo_cfg.get("enabled", False) or not post_text:
         return
+    payload_text = _apply_promo_term_replacements(post_text, promo_cfg)
     try:
         record = build_event("AlphaEngine", "alpha_post", {
             "ts": datetime.utcnow().isoformat() + "Z",
             "post_no": post_no,
-            "content": post_text,
+            "content": payload_text,
             "cycle": cycle,
             "alpha": alpha,
         })

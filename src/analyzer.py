@@ -229,6 +229,14 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
   }
 }
 
+## 发帖/摘要措辞 (品牌词避让)
+
+- summary、tweet_draft 等对外发布的文案中, 行情指标与叙述避免出现交易平台品牌名
+  (如 Coinbase、Binance、OKX 等, 含大小写变体);
+- 通用指标一律使用中文表述, 示例: "Coinbase Premium" → "美资现货溢价"/
+  "美资溢价指数", "Asia Premium" → "亚洲溢价";
+- 本要求仅约束措辞, 不改变输出 JSON 字段、字段含义与任何判定逻辑。
+
 ## 关键规则
 - 不要编造数字, 没提到的指标不要出现在 evidence_scores 或 signal_board 中
 - 参考历史记忆中的 alpha 趋势, 如果 regime 要变更需在 regime_evidence 中明确说明
