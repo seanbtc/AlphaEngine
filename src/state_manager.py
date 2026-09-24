@@ -93,7 +93,8 @@ class StateManager:
             self._recover_from_corruption(problem, on_recovered, memory)
             return self._state
         self._state = self._default_state()
-        self.save()
+        # 新建默认状态必须落盘: 此刻 _dirty 为 False, 非 force 会被脏门控跳过
+        self.save(force=True)
         return self._state
 
     @staticmethod
@@ -246,6 +247,9 @@ class StateManager:
         state["runtime"]["analysis_count"] += 1
         state["runtime"]["last_analysis_at"] = datetime.utcnow().isoformat() + "Z"
         self._state = state
+        # 本方法直接改内存而未走 set(): 必须置脏, 否则 save() 会被脏门控
+        # 静默跳过 (复盘轮 set+save 清脏后, 内存已 +1 但磁盘停在旧快照)。
+        self._dirty = True
         self.save()
 
     @staticmethod
