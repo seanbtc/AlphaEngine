@@ -30,7 +30,7 @@
 
   "fetcher": {
     "username": "glassnode",
-    "usernames": ["glassnode", "n3ocortex", "ai_9684xtpa", "Murphychen888", "evilcos", "0xCryptoChan", "EmberCN", "lookonchain", "whale_alert", "FarsideUK", "hupzy_agent"],
+    "usernames": ["glassnode",  "n3ocortex"],
     "max_tweets_per_fetch": 20,
     "timeout_seconds": 20,
     "retweet_whitelist": ["n3ocortex"],
