@@ -9,6 +9,7 @@ web/
 data/price_history.jsonl
 data/ma_history.jsonl
 data/shadow/
+data/xwatch/
 data/pending_analysis.jsonl
 data/pending_analysis.jsonl.tmp
 data/params.json

@@ -1,0 +1,7 @@
+{
+  "accounts": ["ai_9684xtpa", "Murphychen888", "evilcos", "0xCryptoChan", "EmberCN", "lookonchain", "whale_alert", "FarsideUK", "hupzy_agent"],
+  "data_dir": "data/xwatch",
+  "max_per_account": 20,
+  "with_replies": false,
+  "request_interval_seconds": 0.5
+}
