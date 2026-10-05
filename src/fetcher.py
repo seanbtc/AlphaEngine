@@ -9,6 +9,33 @@ from html.parser import HTMLParser
 
 import requests
 
+from src.fx_client import FxClient
+
+
+def _coerce_positive_int(value, default: int, maximum: int = None) -> int:
+    """配置值归一化: 非法/非正 -> default; 可选上限 clamp.
+
+    OverflowError: 病态值 (如 JSON 1e400 -> inf) 调 int(inf) 抛出。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        n = default
+    if n < 1:
+        n = default
+    if maximum is not None:
+        n = min(n, maximum)
+    return n
+
+
+def _coerce_enabled(value) -> bool:
+    """enabled 归一化: 字符串白名单 false/0/no/off (忽略大小写/空白) -> False,
+    其余字符串 -> True; 非字符串保持 bool() 现行为。
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off")
+    return bool(value)
+
 
 def _read_jsonl_tail(filepath: str, count: int) -> list[dict]:
     """读取 JSONL 文件末尾 N 行，不加载全部."""
@@ -55,6 +82,21 @@ class Fetcher:
         self.tweets_file = os.path.join(data_dir, "tweets.jsonl")
         self._x_com_reachable = None
         self._x_com_checked_at = None
+
+        # fxtwitter 加装源 (默认关闭; 缺省/非法配置归一 = 旧行为逐点一致;
+        # enabled 字符串白名单: false/0/no/off -> False, 其余字符串 -> True)
+        fx_cfg = config.get("fxtwitter")
+        if not isinstance(fx_cfg, dict):
+            fx_cfg = {}
+        self.fx_enabled = _coerce_enabled(fx_cfg.get("enabled", False))
+        self.fx_mode = str(fx_cfg.get("mode", "fallback") or "fallback").strip().lower()
+        self.fx_max_tweets = _coerce_positive_int(
+            fx_cfg.get("max_tweets"), 20, maximum=100)
+        self.fx_with_replies = bool(fx_cfg.get("with_replies", False))
+        kw_cfg = config.get("keywords")
+        self.keywords = [str(k).strip() for k in (kw_cfg if isinstance(kw_cfg, list) else [])
+                         if str(k).strip()]
+        self.fx_client = FxClient(fx_cfg, retweet_whitelist=self.retweet_whitelist)
 
     def _load_existing_ids(self) -> set:
         ids = set()
@@ -220,6 +262,75 @@ class Fetcher:
                 })
         return all_tweets
 
+    def _fetch_fx(self, existing: list[dict]) -> list[dict]:
+        """fxtwitter 加装源: 关键词始终执行 + 账号时间线按 mode 补入.
+
+        - mode=fallback (默认): 时间线仅在现有结果为空时作为兜底补入;
+          mode=always: 时间线总是补入。
+        - 关键词为独立路径: 结果的作者不做 tracked 作者过滤 (转推规则已在
+          FxClient 内按 retweet_whitelist 处理)。
+        - 仅返回 fx 侧推文 (已批内 id 去重); 异常全部内部消化, 绝不抛出。
+        """
+        if not self.fx_enabled:
+            return []
+        tweets: list[dict] = []
+        seen: set = set()
+
+        def _absorb(batch: list[dict]) -> None:
+            for t in batch or []:
+                if not isinstance(t, dict):  # 双保险: 客户端返回非 dict 元素
+                    continue
+                tid = str(t.get("id", ""))
+                if tid and tid not in seen:
+                    seen.add(tid)
+                    tweets.append(t)
+
+        if self.fx_mode == "always" or not existing:
+            for user in self.usernames:
+                print(f"[Fetcher] fx 读取时间线 @{user} (count={self.fx_max_tweets}, "
+                      f"with_replies={self.fx_with_replies}) ...")
+                try:
+                    got = self.fx_client.fetch_user_timeline(
+                        user, count=self.fx_max_tweets,
+                        with_replies=self.fx_with_replies)
+                    print(f"[Fetcher]   fx @{user}: {len(got)} 条")
+                    _absorb(got)
+                except Exception as exc:  # 客户端约定不抛, 此处双保险
+                    print(f"[Fetcher]   fx 时间线异常 (已忽略): "
+                          f"{type(exc).__name__}: {str(exc)[:120]}")
+                    continue
+
+        for q in self.keywords:
+            print(f"[Fetcher] fx 搜索 \"{q}\" (count={self.fx_max_tweets}) ...")
+            try:
+                got = self.fx_client.search(q, count=self.fx_max_tweets)
+                print(f"[Fetcher]   fx 搜索: {len(got)} 条")
+                _absorb(got)
+            except Exception as exc:  # 客户端约定不抛, 此处双保险
+                print(f"[Fetcher]   fx 搜索异常 (已忽略): "
+                      f"{type(exc).__name__}: {str(exc)[:120]}")
+                continue
+        return tweets
+
+    def _merge_fx(self, current: list[dict]) -> list[dict]:
+        """把 fx 加装源结果并入现有列表 (id 去重, 不改变现有条目).
+
+        disabled 时原样返回 current (与旧行为逐点一致)。
+        """
+        if not self.fx_enabled:
+            return current
+        fx_tweets = self._fetch_fx(current)
+        if not fx_tweets:
+            return current
+        seen = {str(t.get("id", "")) for t in current}
+        merged = list(current)
+        for t in fx_tweets:
+            tid = str(t.get("id", ""))
+            if tid and tid not in seen:
+                seen.add(tid)
+                merged.append(t)
+        return merged
+
     def fetch(self) -> list[dict]:
         print("[Fetcher] === 开始抓取推文 ===")
         existing_ids = self._load_existing_ids()
@@ -232,6 +343,9 @@ class Fetcher:
             for t in web_new:
                 if t["id"] not in existing_ids:
                     all_tweets.append(t)
+
+        # fx 加装源 (默认关): 关键词始终 + 时间线 mode=fallback 仅现有为空时补入
+        all_tweets = self._merge_fx(all_tweets)
 
         all_tweets.sort(key=lambda t: t["id"])
         if len(all_tweets) > self.max_tweets:
@@ -258,6 +372,9 @@ class Fetcher:
         """
         print("[Fetcher] === 测试模式: 读取 x.com 推文 (不保存) ===")
         all_tweets = self._fetch_live_tweets()
+
+        # fx 加装源与 fetch() 同语义 (只读预览, 不落盘)
+        all_tweets = self._merge_fx(all_tweets)
 
         all_tweets.sort(key=lambda t: t["id"])
         print(f"[Fetcher] === 测试读取: 共 {len(all_tweets)} 条推文 ===")

@@ -41,7 +41,10 @@
     "reachability_ttl_seconds": 900,
     "_note_replay": "分析失败推文落 data/pending_analysis.jsonl, 下轮优先重放; pending_max_items 为队列上限 (超出丢弃最旧), pending_max_age_days 为超龄丢弃天数 (丢弃时告警一次)",
     "pending_max_items": 100,
-    "pending_max_age_days": 7
+    "pending_max_age_days": 7,
+    "_note_fxtwitter": "fxtwitter 加装源 (免费 API v2, 无 key, 默认关闭=零行为变化)。enabled=true 后: 账号时间线 mode=fallback 仅当现有 x.com/web 结果为空时补入 (always=总是补入), 每源单页 max_tweets 条 (clamp [1,100]), with_replies 是否含回复, timeout_seconds 为请求超时 (clamp [1,120]s); keywords 为搜索词列表 (始终执行, 独立路径, 作者不做 tracked 过滤, 支持 from:/min_faves: 等操作符)。异常内部消化 (打印 [FxClient]/[Fetcher] 日志), 不影响现有抓取/outage/重放/截断语义。",
+    "fxtwitter": {"enabled": false, "mode": "fallback", "max_tweets": 20, "with_replies": false, "timeout_seconds": 20},
+    "keywords": []
   },
 
   "alpha": {
