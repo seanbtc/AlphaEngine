@@ -303,12 +303,16 @@ pip install snscrape   # 可选：批量历史抓取
 钉钉凭证优先读环境变量（部署侧由工作区根 `.env` 经 `start_all.py` 加载，本地可自行 export）：
 
 ```bash
-DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
-DINGTALK_SECRET=SEC...    # 可选, 加签机器人
+ALPHAENGINE_DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx  # 服务专属 (优先, 与 Sentinel 等分离)
+ALPHAENGINE_DINGTALK_SECRET=SEC...    # 可选, 专属加签机器人
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx  # 共享回退
+DINGTALK_SECRET=SEC...    # 可选, 共享加签机器人
 ```
 
-- 读取优先级：`DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）/ `DINGTALK_SECRET` > `config.json`；
+- 读取优先级：`ALPHAENGINE_DINGTALK_WEBHOOK`（服务专属）> `DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）> `config.json`；secret 同理（`ALPHAENGINE_DINGTALK_SECRET` > `DINGTALK_SECRET` > config）；
+- 专属变量缺失时自动回退共享变量（兼容现状）；可用专属变量做服务级覆盖，与其它服务（如 Sentinel）分离；
 - `config.json` 的 `webhook_url`/`secret` 留空或填 `${DINGTALK_WEBHOOK}` 占位即可（占位视为未配置），**明文 token 不得入库**；
+- 启动日志只打印凭证来源名与 webhook 掩码（access_token 末 6 位），不打印完整 URL/token；
 - 环境变量与 config 均为空且 `enabled=true` → 启动打印告警，通知自动禁用（不崩、不影响主流程）；
 - `.env` 已被 `.gitignore` 忽略，不要提交。
 
@@ -461,7 +465,7 @@ AI 自动运行：
 
 ## 钉钉推送
 
-凭证配置见「配置」节：优先环境变量 `DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）/ `DINGTALK_SECRET`（部署侧由工作区根 `.env` 加载），`config.json` 仅保留空值或 `${DINGTALK_WEBHOOK}` 占位；均未配置时通知禁用并告警。
+凭证配置见「配置」节：优先服务专属环境变量 `ALPHAENGINE_DINGTALK_WEBHOOK` / `ALPHAENGINE_DINGTALK_SECRET`，缺失时回退共享 `DINGTALK_WEBHOOK`（兼容 `DINGTALK_WEBHOOK_URL`）/ `DINGTALK_SECRET`（部署侧由工作区根 `.env` 加载），`config.json` 仅保留空值或 `${DINGTALK_WEBHOOK}` 占位；均未配置时通知禁用并告警。日志只打印来源名与 webhook 掩码（access_token 末 6 位）。
 
 | 事件 | 推送内容 |
 |---|---|

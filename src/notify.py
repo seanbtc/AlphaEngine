@@ -1,13 +1,16 @@
 """钉钉通知模块 (发送经 commons.notify 共享实现).
 
-凭证读取优先级: 环境变量 > config.json。
-- webhook: DINGTALK_WEBHOOK (兼容 DINGTALK_WEBHOOK_URL)
-- secret:  DINGTALK_SECRET (加签, 可选)
-config 中留空或填 ${DINGTALK_WEBHOOK} 占位即可; 两处均无 → 通知禁用并告警。
+凭证读取优先级: 服务专属环境变量 > 共享环境变量 > config.json。
+- webhook: ALPHAENGINE_DINGTALK_WEBHOOK (专属) > DINGTALK_WEBHOOK
+  (兼容 DINGTALK_WEBHOOK_URL) > config dingtalk.webhook_url
+- secret:  ALPHAENGINE_DINGTALK_SECRET (专属) > DINGTALK_SECRET (加签, 可选) > config
+config 中留空或填 ${DINGTALK_WEBHOOK} 占位即可; 均无 → 通知禁用并告警。
+日志只打来源名与 webhook 掩码 (access_token 末 6 位), 不打印完整 URL。
 """
 import os
 import re
 import sys
+import urllib.parse
 from datetime import datetime
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,9 +18,25 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from commons.notify import DingTalkNotifier
 
-_ENV_WEBHOOK_NAMES = ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL")
-_ENV_SECRET_NAMES = ("DINGTALK_SECRET",)
+_ENV_WEBHOOK_NAMES = ("ALPHAENGINE_DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK",
+                      "DINGTALK_WEBHOOK_URL")
+_ENV_SECRET_NAMES = ("ALPHAENGINE_DINGTALK_SECRET", "DINGTALK_SECRET")
 _PLACEHOLDER_RE = re.compile(r"^\$\{[A-Za-z0-9_]+\}$")
+
+
+def mask_webhook(webhook) -> str:
+    """返回 webhook 中 access_token 的掩码串 (仅保留末 6 位; 规则同 Sentinel).
+
+    只输出掩码本身, 不含 URL/查询键名, 供日志安全展示。
+    """
+    raw = str(webhook or "").strip()
+    if not raw:
+        return "<未配置>"
+    parsed = urllib.parse.urlsplit(raw)
+    token = (urllib.parse.parse_qs(parsed.query).get("access_token") or [""])[0]
+    if not token:
+        return "<已配置>"
+    return ("*" * max(len(token) - 6, 0)) + token[-6:]
 
 
 def _resolve_credential(env_names, config_value):
@@ -49,10 +68,15 @@ class DingTalk:
         self.last_failure_at = ""
         if self.enabled and not self.webhook:
             print("[DingTalk] WARNING: 未配置 webhook "
-                  "(环境变量 DINGTALK_WEBHOOK/DINGTALK_WEBHOOK_URL 与 config "
-                  "dingtalk.webhook_url 均为空), 通知已禁用")
-        elif self.enabled and self.webhook_source:
-            print(f"[DingTalk] webhook 来源: {self.webhook_source}")
+                  "(环境变量 ALPHAENGINE_DINGTALK_WEBHOOK/DINGTALK_WEBHOOK/"
+                  "DINGTALK_WEBHOOK_URL 与 config dingtalk.webhook_url 均为空), "
+                  "通知已禁用")
+        elif self.enabled:
+            if self.webhook_source:
+                print(f"[DingTalk] webhook 来源: {self.webhook_source} "
+                      f"(掩码: {mask_webhook(self.webhook)})")
+            if self.secret_source:
+                print(f"[DingTalk] secret 来源: {self.secret_source}")
 
     def send(self, content: str) -> bool:
         try:

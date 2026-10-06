@@ -80,7 +80,8 @@ def test_disabled_not_counted():
 
 
 def test_empty_webhook_not_counted(monkeypatch):
-    for name in ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET"):
+    for name in ("ALPHAENGINE_DINGTALK_WEBHOOK", "ALPHAENGINE_DINGTALK_SECRET",
+                 "DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET"):
         monkeypatch.delenv(name, raising=False)
     dt = DingTalk({"enabled": True, "webhook_url": ""})
 

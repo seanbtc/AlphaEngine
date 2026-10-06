@@ -232,7 +232,7 @@
     "enabled": true,
     "webhook_url": "",
     "secret": "",
-    "_note": "钉钉机器人推送。凭证优先读环境变量 (webhook: DINGTALK_WEBHOOK, 兼容 DINGTALK_WEBHOOK_URL; 加签密钥: DINGTALK_SECRET, 可选); 此处留空或填 ${DINGTALK_WEBHOOK} 占位即可, 明文 token 不得入库。环境变量与 config 均为空时通知禁用并告警 (不崩)。"
+    "_note": "钉钉机器人推送。凭证优先读环境变量 (webhook: ALPHAENGINE_DINGTALK_WEBHOOK 服务专属 > DINGTALK_WEBHOOK, 兼容 DINGTALK_WEBHOOK_URL; 加签密钥: ALPHAENGINE_DINGTALK_SECRET 服务专属 > DINGTALK_SECRET, 可选; 专属变量用于与其它服务 (如 Sentinel) 分离); 此处留空或填 ${DINGTALK_WEBHOOK} 占位即可, 明文 token 不得入库。环境变量与 config 均为空时通知禁用并告警 (不崩)。"
   },
 
   "promo": {

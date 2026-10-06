@@ -6,9 +6,10 @@ _ALPHA_ROOT = Path(__file__).resolve().parents[1]
 if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
-from src.notify import DingTalk  # noqa: E402
+from src.notify import DingTalk, mask_webhook  # noqa: E402
 
-_ENV_NAMES = ("DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET")
+_ENV_NAMES = ("ALPHAENGINE_DINGTALK_WEBHOOK", "ALPHAENGINE_DINGTALK_SECRET",
+              "DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK_URL", "DINGTALK_SECRET")
 
 
 def _clear_env(monkeypatch):
@@ -203,3 +204,137 @@ def test_send_exception_does_not_leak_token(monkeypatch, capsys):
     assert "SUPER_SECRET_TOKEN" not in out
     assert dt.failure_count == 1
     assert dt.last_error
+
+
+# ---- 服务专属 env (ALPHAENGINE_DINGTALK_*): 专属 > 共享 > 别名 > config ----
+
+_TOKEN_URL = ("https://oapi.dingtalk.com/robot/send"
+              "?access_token=SUPER_SECRET_TOKEN_123456")
+
+
+def test_priority_matrix_service_over_shared_over_alias_over_config(monkeypatch):
+    cases = [
+        ("https://alpha.example/hook", "https://shared.example/hook",
+         "https://alias.example/hook", "https://config.example/hook",
+         "https://alpha.example/hook", "env:ALPHAENGINE_DINGTALK_WEBHOOK"),
+        ("", "https://shared.example/hook", "https://alias.example/hook",
+         "https://config.example/hook", "https://shared.example/hook",
+         "env:DINGTALK_WEBHOOK"),
+        ("", "", "https://alias.example/hook", "https://config.example/hook",
+         "https://alias.example/hook", "env:DINGTALK_WEBHOOK_URL"),
+        ("", "", "", "https://config.example/hook", "https://config.example/hook",
+         "config"),
+    ]
+    for service, shared, alias, config, expected, source in cases:
+        _clear_env(monkeypatch)
+        if service:
+            monkeypatch.setenv("ALPHAENGINE_DINGTALK_WEBHOOK", service)
+        if shared:
+            monkeypatch.setenv("DINGTALK_WEBHOOK", shared)
+        if alias:
+            monkeypatch.setenv("DINGTALK_WEBHOOK_URL", alias)
+
+        dt = DingTalk({"enabled": True, "webhook_url": config})
+
+        assert dt.webhook == expected
+        assert dt.webhook_source == source
+
+
+def test_service_secret_priority_matrix(monkeypatch):
+    cases = [
+        ("alpha-secret", "shared-secret", "config-secret", "alpha-secret",
+         "env:ALPHAENGINE_DINGTALK_SECRET"),
+        ("", "shared-secret", "config-secret", "shared-secret",
+         "env:DINGTALK_SECRET"),
+        ("", "", "config-secret", "config-secret", "config"),
+    ]
+    for service, shared, config, expected, source in cases:
+        _clear_env(monkeypatch)
+        if service:
+            monkeypatch.setenv("ALPHAENGINE_DINGTALK_SECRET", service)
+        if shared:
+            monkeypatch.setenv("DINGTALK_SECRET", shared)
+
+        dt = DingTalk({"enabled": True,
+                       "webhook_url": "https://config.example/hook",
+                       "secret": config})
+
+        assert dt.secret == expected
+        assert dt.secret_source == source
+
+
+def test_service_env_absent_falls_back_to_shared(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://shared.example/hook")
+    monkeypatch.setenv("DINGTALK_SECRET", "shared-secret")
+
+    dt = DingTalk({"enabled": True, "webhook_url": ""})
+
+    assert dt.webhook == "https://shared.example/hook"
+    assert dt.webhook_source == "env:DINGTALK_WEBHOOK"
+    assert dt.secret == "shared-secret"
+    assert dt.secret_source == "env:DINGTALK_SECRET"
+
+
+def test_service_env_placeholder_or_blank_skips_to_shared(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALPHAENGINE_DINGTALK_WEBHOOK",
+                       "${ALPHAENGINE_DINGTALK_WEBHOOK}")
+    monkeypatch.setenv("ALPHAENGINE_DINGTALK_SECRET", "   ")
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://shared.example/hook")
+    monkeypatch.setenv("DINGTALK_SECRET", "shared-secret")
+
+    dt = DingTalk({"enabled": True, "webhook_url": ""})
+
+    assert dt.webhook == "https://shared.example/hook"
+    assert dt.webhook_source == "env:DINGTALK_WEBHOOK"
+    assert dt.secret == "shared-secret"
+    assert dt.secret_source == "env:DINGTALK_SECRET"
+
+
+def test_all_levels_missing_disabled_with_warning(monkeypatch, capsys):
+    _clear_env(monkeypatch)
+
+    dt = DingTalk({"enabled": True, "webhook_url": ""})
+
+    assert dt._configured() is False
+    out = capsys.readouterr().out
+    assert "通知已禁用" in out
+    assert "ALPHAENGINE_DINGTALK_WEBHOOK" in out
+
+
+# ---- 日志: 只出现来源名与掩码 (不泄露完整 token) ----
+
+def test_mask_webhook_keeps_last_six():
+    masked = mask_webhook(_TOKEN_URL)
+
+    assert masked.endswith("123456")
+    assert "SUPER_SECRET_TOKEN" not in masked
+    assert mask_webhook("") == "<未配置>"
+
+
+def test_log_shows_source_and_mask_only(monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ALPHAENGINE_DINGTALK_WEBHOOK", _TOKEN_URL)
+    monkeypatch.setenv("ALPHAENGINE_DINGTALK_SECRET", "SUPER_SECRET_SIGN_KEY")
+
+    dt = DingTalk({"enabled": True, "webhook_url": ""})
+
+    out = capsys.readouterr().out
+    assert "env:ALPHAENGINE_DINGTALK_WEBHOOK" in out
+    assert "env:ALPHAENGINE_DINGTALK_SECRET" in out
+    assert "SUPER_SECRET_TOKEN" not in out
+    assert "SUPER_SECRET_SIGN_KEY" not in out
+    assert "*" in out
+    assert dt.webhook == _TOKEN_URL
+
+
+def test_shared_env_log_masks_token(monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("DINGTALK_WEBHOOK", _TOKEN_URL)
+
+    DingTalk({"enabled": True, "webhook_url": ""})
+
+    out = capsys.readouterr().out
+    assert "env:DINGTALK_WEBHOOK" in out
+    assert "SUPER_SECRET_TOKEN" not in out
