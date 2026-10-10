@@ -1,7 +1,35 @@
 {
-  "accounts": ["ai_9684xtpa", "Murphychen888", "evilcos", "0xCryptoChan", "EmberCN", "lookonchain", "whale_alert", "FarsideUK", "hupzy_agent"],
+  "_pool_note": "pool 为账号池治理元数据（tier/日期/备注），xwatch 运行时忽略；新增/评审/移除流程见 tools/README.md",
+  "accounts": [
+    "ai_9684xtpa", "evilcos", "0xCryptoChan", "EmberCN", "lookonchain",
+    "FarsideUK", "hupzy_agent",
+    "Dune", "DefiLlama", "glassnode", "willywoo", "nansen_ai",
+    "MessariCrypto", "cryptoquant_com", "SlowMist_Team", "l2beat",
+    "tokenterminal"
+  ],
   "data_dir": "data/xwatch",
   "max_per_account": 20,
   "with_replies": false,
-  "request_interval_seconds": 0.5
+  "request_interval_seconds": 0.5,
+  "pool": {
+    "ai_9684xtpa":    {"tier": "active", "since": "2026-10-05"},
+    "evilcos":        {"tier": "active", "since": "2026-10-05"},
+    "0xCryptoChan":   {"tier": "active", "since": "2026-10-05"},
+    "EmberCN":        {"tier": "active", "since": "2026-10-05"},
+    "lookonchain":    {"tier": "active", "since": "2026-10-05"},
+    "FarsideUK":      {"tier": "trial", "added": "2026-10-05", "review_after": "2026-11-10", "note": "降为观察（1 个月复评）：ETF 流量数据播报为主"},
+    "hupzy_agent":    {"tier": "trial", "added": "2026-10-05", "review_after": "2026-11-10", "note": "降为观察（1 个月复评）：AI agent 视角，留存价值待评"},
+    "Dune":           {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "数据平台官方（实测活跃）"},
+    "DefiLlama":      {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "数据平台/工具（实测活跃）"},
+    "glassnode":      {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "链上指标方法"},
+    "willywoo":       {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "链上数据分析（原帖活跃；n3ocortex 以转推其为主，故直跟本人）"},
+    "nansen_ai":      {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "数据平台"},
+    "MessariCrypto":  {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "研究数据（现名 Blockworks Data）"},
+    "cryptoquant_com": {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "链上数据快报"},
+    "SlowMist_Team":  {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "安全事件根因（中文）"},
+    "l2beat":         {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "L2 技术数据；转推占比待抽查（联创 @bkiepuszewski 为备选）"},
+    "tokenterminal":  {"tier": "trial", "added": "2026-10-11", "review_after": "2026-10-25", "note": "数据洞察；原创密度待抽查"},
+    "whale_alert":    {"tier": "removed", "removed_at": "2026-10-11", "reason": "纯转账播报，与「前沿数据/技术」定位不符"},
+    "Murphychen888":  {"tier": "removed", "removed_at": "2026-10-11", "reason": "行情结构观点，非数据/技术向"}
+  }
 }

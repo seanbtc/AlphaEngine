@@ -2,16 +2,18 @@
 
 覆盖:
 - 配置解析: 默认值/非法值回退/accounts 清洗去重/缺文件与坏 JSON;
-- 随仓库配置: 9 观察账号与固定参数;
+- 随仓库配置: 17 账号名单 + pool 治理元数据一致性;
 - 采集: 跨两次运行按 id 去重只追加新条目;
 - 单账号异常隔离: 失败账号记 last_error, 其它账号照常, 账号间 sleep;
 - dry-run 零写盘 (run_once 与 CLI 两级);
 - state.json 结构 + 原子写 (无 .tmp 残留);
 - 汇总计数与报告文本; main 退出码 (2/1/0);
+- 账号验证卡 --check: 转推过滤计数/留存样本/频率/失败路径/CLI;
 - 坏数据行跳过。
 """
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,8 @@ if str(_ALPHA_ROOT) not in sys.path:
 
 from tools.xwatch import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
+    check_account,
+    format_check,
     format_summary,
     load_config,
     main,
@@ -123,15 +127,32 @@ def test_load_config_missing_and_invalid(tmp_path):
         load_config(str(bad))
 
 
-def test_shipped_config_matches_observation_accounts():
+def test_shipped_config_matches_pool():
     config = load_config(DEFAULT_CONFIG_PATH)
-    assert config["accounts"] == [
-        "ai_9684xtpa", "Murphychen888", "evilcos", "0xCryptoChan", "EmberCN",
-        "lookonchain", "whale_alert", "FarsideUK", "hupzy_agent"]
+    expected = [
+        "ai_9684xtpa", "evilcos", "0xCryptoChan", "EmberCN", "lookonchain",
+        "FarsideUK", "hupzy_agent", "Dune", "DefiLlama", "glassnode",
+        "willywoo", "nansen_ai", "MessariCrypto", "cryptoquant_com",
+        "SlowMist_Team", "l2beat", "tokenterminal",
+    ]
+    assert config["accounts"] == expected
     assert config["data_dir"] == "data/xwatch"
     assert config["max_per_account"] == 20
     assert config["with_replies"] is False
     assert config["request_interval_seconds"] == 0.5
+
+    raw = json.loads(Path(DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"))
+    pool = raw.get("pool") or {}
+    assert pool, "治理元数据 pool 缺失"
+    active = {key.lower() for key, meta in pool.items()
+              if meta.get("tier") != "removed"}
+    assert active == {handle.lower() for handle in expected}
+    removed = {key.lower() for key, meta in pool.items()
+               if meta.get("tier") == "removed"}
+    assert {"whale_alert", "murphychen888"} <= removed
+    for key, meta in pool.items():
+        if meta.get("tier") == "trial":
+            assert meta.get("review_after"), f"{key} 缺 review_after"
 
 
 # ---- 采集: 去重 ----
@@ -312,3 +333,109 @@ def test_read_tweet_index_skips_bad_lines(tmp_path):
     assert ids == {"1", "2"}
     assert counts == {"a": 2}
     assert read_tweet_index(str(tmp_path / "missing.jsonl")) == (set(), {})
+
+
+# ---- 账号验证卡 (--check; 只读) ----
+
+class _FakeRawClient:
+    """--check 用假客户端: 固定返回 payload, 记录请求 (不触网)."""
+
+    def __init__(self, payload=None):
+        self.payload = payload
+        self.calls = []
+
+    def _get_json(self, url, params):
+        self.calls.append({"url": url, "params": dict(params)})
+        return self.payload
+
+
+_BASE = datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc)
+
+
+def _raw_item(tid, author="Dune", text="tweet", reposted_by=None,
+              minutes_ago=0, kind="status"):
+    item = {
+        "type": kind,
+        "id": str(tid),
+        "text": text,
+        "author": {"screen_name": author},
+        "created_timestamp": int(
+            (_BASE - timedelta(minutes=minutes_ago)).timestamp()),
+        "url": f"https://x.com/{author}/status/{tid}",
+    }
+    if reposted_by:
+        item["reposted_by"] = {"screen_name": reposted_by}
+    return item
+
+
+def test_check_account_counts_samples_and_span():
+    payload = {"code": 200, "results": [
+        _raw_item(3, text="brand new data tool", minutes_ago=0),
+        _raw_item(2, text="analysis thread", minutes_ago=1440),
+        _raw_item(1, text="reposted thing", minutes_ago=2880,
+                  author="someone", reposted_by="Dune"),
+    ]}
+    client = _FakeRawClient(payload)
+    result = check_account("@Dune", client=client, count=7)
+    assert result["ok"] is True and result["handle"] == "Dune"
+    assert (result["raw"], result["reposts"], result["kept"]) == (3, 1, 2)
+    assert client.calls[0]["params"]["count"] == 7
+    assert "Dune" in client.calls[0]["url"]
+    assert len(result["samples"]) == 2
+    assert result["latest"].startswith("2026-10-10T")
+    assert result["span_days"] == 1.0
+    assert result["rate_per_day"] == 2.0
+
+
+def test_check_account_failure_paths():
+    assert check_account("  ", client=_FakeRawClient(None))["error"] == "空 handle"
+    missing = check_account("x", client=_FakeRawClient(None))
+    assert missing["ok"] is False and "拉取失败" in missing["error"]
+    bad = check_account("x", client=_FakeRawClient({"code": 404}))
+    assert bad["ok"] is False and "结构异常" in bad["error"]
+    empty = check_account("x", client=_FakeRawClient({"code": 200, "results": []}))
+    assert empty["ok"] is True and empty["kept"] == 0 and empty["samples"] == []
+
+
+def test_check_account_skips_non_status_and_bad_items():
+    payload = {"code": 200, "results": [
+        _raw_item(1, text="good", minutes_ago=0),
+        {"type": "tombstone", "id": "2", "text": "x"},
+        "junk",
+        _raw_item(3, text="", minutes_ago=10),  # 空文本 -> 映射丢弃
+    ]}
+    result = check_account("Dune", client=_FakeRawClient(payload))
+    assert result["raw"] == 3  # dict 条目计数 (含 tombstone/空文本)
+    assert result["kept"] == 1
+
+
+def test_format_check_renders_ok_and_failure():
+    ok = check_account("Dune", client=_FakeRawClient({"code": 200, "results": [
+        _raw_item(1, text="hello world", minutes_ago=5)]}))
+    fail = check_account("bad", client=_FakeRawClient(None))
+    text = format_check([ok, fail])
+    assert "== @Dune | 拉取 1 条 (转推 0) | 留存 1 条" in text
+    assert "hello world" in text
+    assert "@bad | [失败]" in text
+    assert "合计: 2 账号 (可拉取 1)" in text
+
+
+def test_main_check_mode(tmp_path, monkeypatch, capsys):
+    payload = {"code": 200,
+               "results": [_raw_item(1, text="hello", minutes_ago=0)]}
+    config_path = tmp_path / "cfg.json"
+    config_path.write_text(json.dumps({
+        "accounts": [], "request_interval_seconds": 0}), encoding="utf-8")
+
+    monkeypatch.setattr("tools.xwatch.FxClient",
+                        lambda cfg=None: _FakeRawClient(payload))
+    assert main(["--config", str(config_path),
+                 "--check", "Dune,nobody", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [row["handle"] for row in rows] == ["Dune", "nobody"]
+    assert all(row["ok"] for row in rows)
+
+    # 全部失败 -> 退出码 1
+    monkeypatch.setattr("tools.xwatch.FxClient",
+                        lambda cfg=None: _FakeRawClient(None))
+    assert main(["--config", str(config_path), "--check", "Dune"]) == 1

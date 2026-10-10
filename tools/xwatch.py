@@ -12,6 +12,7 @@
     python3 tools/xwatch.py
     py -3 tools/xwatch.py --dry-run
     py -3 tools/xwatch.py --config tools/xwatch_config.json
+    py -3 tools/xwatch.py --check "Dune,SlowMist_Team"   # 账号验证卡 (只读)
 
 行为:
 - 逐账号拉取时间线 (count=max_per_account, with_replies 可配), 账号间 sleep;
@@ -19,6 +20,9 @@
   schema 与 fx_client 映射一致);
 - 单账号异常隔离 (记录 last_error 后继续其它账号, 整体不崩);
 - state.json 原子写; --dry-run 零写盘;
+- --check 账号验证卡 (只读, 不写盘): 对候选账号拉取时间线, 输出
+  "拉取数 / 转推数 / 过滤转推后的留存条数与样本 / 发帖频率" ——
+  与采集同款过滤语义, 供账号池新增准入 (见 tools/README.md);
 - 退出码: 0=全部成功或部分成功; 1=全部失败/状态写失败; 2=配置缺失或非法。
 """
 import argparse
@@ -34,7 +38,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from src.atomic_io import atomic_write_json  # noqa: E402
-from src.fx_client import FxClient  # noqa: E402
+from src.fx_client import (  # noqa: E402
+    FxClient,
+    build_user_timeline_request,
+    map_results,
+)
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "xwatch_config.json")
@@ -325,6 +333,98 @@ def format_summary(summary, dry_run=False):
     return "\n".join(lines)
 
 
+# ---- 账号验证卡 (--check; 只读, 不写盘) ----
+
+def check_account(handle, *, client, count=20, with_replies=False):
+    """拉取单个账号时间线并生成体检结果 (只读, 不抛).
+
+    复用 xwatch 同款过滤语义 (转推 reposted_by 不在白名单 -> 不计入留存),
+    因此 kept/样本 = "实际会采集到的原创内容"; 供账号池新增准入使用。
+
+    返回 dict: {handle, ok, error, raw, reposts, kept, latest, span_days,
+               rate_per_day, samples:[{date, author, content}]}
+    """
+    handle = str(handle or "").strip().lstrip("@")
+    result = {
+        "handle": handle, "ok": False, "error": None, "raw": 0, "reposts": 0,
+        "kept": 0, "latest": None, "span_days": None, "rate_per_day": None,
+        "samples": [],
+    }
+    if not handle:
+        result["error"] = "空 handle"
+        return result
+    url, params = build_user_timeline_request(
+        handle, count=count, with_replies=with_replies)
+    payload = client._get_json(url, params)
+    if payload is None:
+        result["error"] = "拉取失败 (HTTP 错误/超时/结构异常; 详见 [FxClient] 日志)"
+        return result
+    results = payload.get("results")
+    if not isinstance(results, list):
+        result["error"] = f"响应结构异常 (code={payload.get('code')})"
+        return result
+    raw_items = [item for item in results if isinstance(item, dict)]
+    kept = map_results(results, f"fxtwitter/{handle}")
+    result.update({
+        "ok": True,
+        "raw": len(raw_items),
+        "reposts": sum(1 for item in raw_items if item.get("reposted_by")),
+        "kept": len(kept),
+        "samples": [
+            {
+                "date": str(item.get("date") or ""),
+                "author": str(item.get("author") or ""),
+                "content": " ".join(
+                    str(item.get("content") or "").split())[:200],
+            }
+            for item in kept[:3]
+        ],
+    })
+    dates = []
+    for item in kept:
+        value = str(item.get("date") or "").strip().replace("Z", "+00:00")
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            continue
+        dates.append(parsed if parsed.tzinfo
+                     else parsed.replace(tzinfo=timezone.utc))
+    if dates:
+        latest, earliest = max(dates), min(dates)
+        result["latest"] = latest.isoformat()
+        span = (latest - earliest).total_seconds() / 86400.0
+        result["span_days"] = round(span, 1)
+        if span > 0 and kept:
+            result["rate_per_day"] = round(len(kept) / span, 1)
+    return result
+
+
+def format_check(results):
+    """把 check_account 结果格式化为多行报告文本."""
+    lines = ["[XWatch][check] 账号验证卡 (只读; 转推按 xwatch 语义过滤)"]
+    for item in results:
+        handle = item.get("handle") or "?"
+        if not item.get("ok"):
+            lines.append(f"== @{handle} | [失败] {item.get('error')}")
+            continue
+        lines.append(f"== @{handle} | 拉取 {item['raw']} 条"
+                     f" (转推 {item['reposts']}) | 留存 {item['kept']} 条")
+        extra = f"最新 {item.get('latest') or '-'}"
+        if item.get("span_days") is not None:
+            extra += f" | 跨度 {item['span_days']} 天"
+        if item.get("rate_per_day") is not None:
+            extra += f" | ≈{item['rate_per_day']} 条/天"
+        lines.append(f"   {extra}")
+        for sample in item.get("samples") or []:
+            lines.append(f"   [{str(sample.get('date') or '')[:16]}]"
+                         f" {sample.get('content')}")
+    ok_count = sum(1 for item in results if item.get("ok"))
+    lines.append(f"[XWatch][check] 合计: {len(results)} 账号 (可拉取 {ok_count})")
+    return "\n".join(lines)
+
+
 # ---- CLI ----
 
 def _parse_args(argv):
@@ -334,6 +434,10 @@ def _parse_args(argv):
                         help="配置文件 (默认 tools/xwatch_config.json)")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印将要写入的统计, 不写任何文件")
+    parser.add_argument("--check", default=None, metavar="HANDLES",
+                        help="账号验证卡: 逗号分隔 handle; 只读体检, 不写盘")
+    parser.add_argument("--json", action="store_true",
+                        help="check 模式输出 JSON")
     return parser.parse_args(argv)
 
 
@@ -348,6 +452,26 @@ def main(argv=None):
         print(f"[XWatch] 配置非法: {args.config}: {type(exc).__name__}: "
               f"{str(exc)[:160]} (退出码 2)")
         return 2
+
+    if args.check:
+        handles = [h.strip() for h in str(args.check).split(",") if h.strip()]
+        if not handles:
+            print("[XWatch][check] --check 需要逗号分隔的 handle")
+            return 2
+        client = FxClient({})
+        interval = config["request_interval_seconds"]
+        results = []
+        for index, handle in enumerate(handles):
+            if index > 0 and interval > 0:
+                time.sleep(interval)
+            results.append(check_account(
+                handle, client=client, count=config["max_per_account"],
+                with_replies=config["with_replies"]))
+        if args.json:
+            print(json.dumps(results, ensure_ascii=False))
+        else:
+            print(format_check(results))
+        return 0 if any(item.get("ok") for item in results) else 1
 
     if not config["accounts"]:
         print("[XWatch] 配置未包含账号; 无操作")
