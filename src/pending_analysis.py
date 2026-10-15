@@ -6,7 +6,7 @@
 """
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.atomic_io import atomic_write_text
 
@@ -106,7 +106,7 @@ class PendingAnalysis:
         返回 {"added", "expired", "overflow", "total", 各丢弃 ID 列表}。
         同 ID 已在队列中时保留原 added_at/reason, 不重复入队。
         """
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
         now_iso = now.isoformat() + "Z"
         by_id = {it["id"]: it for it in self.load()}
         added = 0

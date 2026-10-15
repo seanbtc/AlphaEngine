@@ -1,7 +1,7 @@
 """月度复盘引擎 — 评估预测准确率 + AI 自动校准参数."""
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.alpha_engine import REGIME_EXPECTED_DAYS
 from src.params_store import append_calibration_log, apply_param, save_overlay
@@ -21,7 +21,7 @@ class ReviewEngine:
 
     def record_price(self, price: float, regime: str, alpha: float):
         entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "btc_price": price,
             "regime": regime,
             "alpha": alpha,
@@ -53,7 +53,7 @@ class ReviewEngine:
         最近一个应执行的复盘时刻是否已到且尚未复盘 (last_review_at < 该时刻);
         错过后在下一个运行日补偿执行, 同一时刻只复盘一次 (幂等).
         """
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
         boundary = self._review_boundary(now)
         last = self.sm.get("runtime.last_review_at", "")
         if last:
@@ -83,7 +83,7 @@ class ReviewEngine:
         calibration = self._suggest_calibration(regime_stats, alpha_stats)
 
         review_result = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "period_days": 30,
             "price_count": len(prices),
             "price_change_pct": self._price_change(prices),
@@ -95,7 +95,7 @@ class ReviewEngine:
         self._save_review(review_result)
         self._print_review(review_result)
 
-        self.sm.set("runtime.last_review_at", datetime.utcnow().isoformat() + "Z")
+        self.sm.set("runtime.last_review_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
         self.sm.save()
 
         return review_result
@@ -103,7 +103,7 @@ class ReviewEngine:
     def _load_recent_prices(self, days: int = 30) -> list[dict]:
         if not os.path.exists(self.price_file):
             return []
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
         results = []
         with open(self.price_file, "r", encoding="utf-8") as f:
             for line in f:
@@ -137,7 +137,7 @@ class ReviewEngine:
             return result
         result["price"] = prices[-1]["btc_price"]
         # 近 7 天
-        cutoff7 = datetime.utcnow() - timedelta(days=days_7)
+        cutoff7 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_7)
         p7 = [p for p in prices
               if datetime.fromisoformat(p["ts"].replace("Z", "+00:00")).replace(tzinfo=None) >= cutoff7]
         if len(p7) >= 2:
@@ -379,7 +379,7 @@ class ReviewEngine:
 如果无需调整, adjustments 为空数组。"""
 
         print(f"[API-CALL][review-calibrate] POST {analyzer.endpoint} purpose=calibration "
-              f"{datetime.utcnow().isoformat()}Z")
+              f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
         response = analyzer.client.chat(
             messages=[
                 {"role": "system", "content": "你是参数量化校准专家, 只输出纯 JSON, 不要 markdown 代码块."},
@@ -523,7 +523,7 @@ class ReviewEngine:
                 append_calibration_log(self.data_dir, log_entries,
                                        source="monthly_review")
                 self.sm.set("runtime.last_calibration_at",
-                            datetime.utcnow().isoformat() + "Z")
+                            datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             except OSError as exc:
                 print(f"[Review] 校准落盘失败 (内存已生效, 重启将丢失): {exc}")
 

@@ -1,7 +1,7 @@
 """长期记忆管理 — metrics.json + memory.md + alpha_history.json."""
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.atomic_io import atomic_copy, atomic_write_text
 
@@ -53,7 +53,7 @@ class Memory:
 
     def append_entry(self, entry: str):
         existing = self.load_memory_md()
-        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M UTC")
         block = f"\n---\n## {ts}\n\n{entry}\n"
         self.save_memory_md(existing.rstrip() + block)
 
@@ -68,7 +68,7 @@ class Memory:
         if name not in metrics:
             metrics[name] = []
         metrics[name].append({
-            "date": datetime.utcnow().isoformat() + "Z",
+            "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "value": value,
             "source_tweet_id": source_tweet_id,
         })

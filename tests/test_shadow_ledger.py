@@ -15,7 +15,7 @@
 import json
 import re
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -618,7 +618,7 @@ def _components(tmp_path, *, tweets=None, analysis=None, regime="RECOVERY",
     sm.set("alpha.target", alpha)
     sm.set("alpha.regime_progress", progress)
     sm.set("runtime.last_tick_at",
-           (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
+           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat() + "Z")
     alpha_cfg = {
         "rhythm": dict(_RHYTHM),
         "smoothing": dict(_SMOOTHING),

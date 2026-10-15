@@ -1,7 +1,7 @@
 """TradeSync 交易指令接口 — 输出仓位指令."""
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class TradeSync:
@@ -34,7 +34,7 @@ class TradeSync:
         direction = self._direction(alpha)
         size = self._size_pct(alpha)
         order = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "alpha": alpha,
             "regime": regime,
             "direction": direction,
@@ -50,7 +50,7 @@ class TradeSync:
 
         if self.mode == "file":
             self._ensure_dir()
-            filename = f"{datetime.utcnow().strftime('%Y%m%d')}.jsonl"
+            filename = f"{datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y%m%d')}.jsonl"
             filepath = os.path.join(self.output_dir, filename)
             with open(filepath, "a", encoding="utf-8") as f:
                 f.write(json.dumps(order, ensure_ascii=False) + "\n")

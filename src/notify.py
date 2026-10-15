@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
@@ -95,7 +95,7 @@ class DingTalk:
     def _record_failure(self, error) -> None:
         self.failure_count += 1
         self.last_error = str(error)
-        self.last_failure_at = datetime.utcnow().isoformat() + "Z"
+        self.last_failure_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
     # ---- 模板 ----
 

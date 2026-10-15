@@ -11,7 +11,7 @@
 """
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -288,7 +288,7 @@ def test_regime_change_cycle_consumes_anchor(tmp_path):
 
     anchor = engine._parse_utc(sm.get("runtime.last_tick_at"))
     assert anchor is not None
-    assert abs((datetime.utcnow() - anchor).total_seconds()) < 5
+    assert abs((datetime.now(timezone.utc).replace(tzinfo=None) - anchor).total_seconds()) < 5
 
     engine.tick_alpha(now=anchor + timedelta(days=2))
 

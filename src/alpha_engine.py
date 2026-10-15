@@ -170,7 +170,7 @@ class AlphaEngine:
           锚点不可信 → 重置为 now (不记负时长, 后续从 now 正常推进)
         - 超过上限的停摆天数直接丢弃 (不补记)
         """
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
         last = self._parse_utc(self.sm.get("runtime.last_tick_at", ""))
         if last is None:
             self.sm.set("runtime.last_tick_at", now.isoformat() + "Z")
@@ -271,7 +271,7 @@ class AlphaEngine:
         if proposed_regime == current:
             self.clear_pending_proposal()
             return {}
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         pending = self.get_pending_proposal()
         if pending.get("cp") == proposed_regime:
             pending["count"] = self.pending_count(pending) + 1
@@ -332,7 +332,7 @@ class AlphaEngine:
            (regime in BULL_SIDE_REGIMES and alpha < 0):
             progress = self.sm.get("alpha.regime_progress", 0.5)
             target = self.calculate_target_alpha(regime, progress)
-            now = datetime.utcnow().isoformat() + "Z"
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
             self.sm.set("alpha.current", target)
             self.sm.set("alpha.target", target)
             self.sm.set("alpha.transition_progress", 1.0)
@@ -342,7 +342,7 @@ class AlphaEngine:
 
     def execute_regime_change(self, new_regime: str, progress: float = 0.0) -> str:
         current = self.get_regime()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         self.clear_pending_proposal()
         self.sm.set("regime.current", new_regime)
         self.sm.set("regime.entered_from", current)
@@ -425,7 +425,7 @@ class AlphaEngine:
         days_elapsed = self.consume_elapsed_days(now)
         progress = self.sm.get("alpha.regime_progress", 0.5)
         target = self.calculate_target_alpha(self.get_regime(), progress)
-        now_iso = (now or datetime.utcnow()).isoformat() + "Z"
+        now_iso = (now or datetime.now(timezone.utc).replace(tzinfo=None)).isoformat() + "Z"
 
         if self.sm.get("alpha.deferred_build", False):
             self.sm.set("alpha.deferred_build", False)
@@ -494,7 +494,7 @@ class AlphaEngine:
         diff = target - current
         step = max(-dynamic_step, min(dynamic_step, diff))
         new_alpha = round(current + step, 4)
-        now_iso = (now or datetime.utcnow()).isoformat() + "Z"
+        now_iso = (now or datetime.now(timezone.utc).replace(tzinfo=None)).isoformat() + "Z"
 
         self.sm.set("alpha.current", new_alpha)
         self.sm.set("alpha.target", target)

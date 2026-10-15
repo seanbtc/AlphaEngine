@@ -2,7 +2,7 @@
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _ALPHA_ROOT = Path(__file__).resolve().parents[1]
@@ -33,10 +33,10 @@ def test_add_dedup_and_fields(tmp_path):
 
 def test_expired_dropped_and_reported(tmp_path):
     p = PendingAnalysis(str(tmp_path), max_age_days=7)
-    old = datetime.utcnow() - timedelta(days=8)
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
     p.add(["old"], now=old)
 
-    stats = p.add(["new"], now=datetime.utcnow())
+    stats = p.add(["new"], now=datetime.now(timezone.utc).replace(tzinfo=None))
 
     assert stats["expired"] == 1
     assert stats["expired_ids"] == ["old"]
@@ -117,7 +117,7 @@ def test_add_empty_ids_without_existing_does_not_create_file(tmp_path):
 
 def test_invalid_max_age_keeps_unknown_timestamp(tmp_path):
     p = PendingAnalysis(str(tmp_path), max_age_days=1)
-    p.add(["a"], now=datetime.utcnow() - timedelta(days=30))
+    p.add(["a"], now=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30))
     # 时间戳非法时不视为超龄 (避免误删)
     path = tmp_path / "pending_analysis.jsonl"
     path.write_text(json.dumps({"id": "a", "added_at": "bad", "reason": "x"}) + "\n",

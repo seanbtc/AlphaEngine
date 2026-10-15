@@ -9,7 +9,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -952,7 +952,7 @@ class Analyzer:
             json_mode = True
 
         print(f"[API-CALL][analyzer] POST {self.endpoint} purpose={purpose} "
-              f"{datetime.utcnow().isoformat()}Z")
+              f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
         response = self.client.chat(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

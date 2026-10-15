@@ -12,7 +12,7 @@ import re
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -124,7 +124,7 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
     payload_text = _apply_promo_term_replacements(post_text, promo_cfg)
     try:
         record = build_event("AlphaEngine", "alpha_post", {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "post_no": post_no,
             "content": payload_text,
             "cycle": cycle,
@@ -346,7 +346,7 @@ def build_market_state(components: dict, price: float = None,
     if started_at:
         try:
             start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            state["regime_days"] = max(0, int((datetime.utcnow() - start_dt.replace(tzinfo=None)).total_seconds() // 86400))
+            state["regime_days"] = max(0, int((datetime.now(timezone.utc).replace(tzinfo=None) - start_dt.replace(tzinfo=None)).total_seconds() // 86400))
         except ValueError:
             state["regime_days"] = None
     if price is not None:
@@ -392,7 +392,7 @@ def _record_ma_state(sm, market_state: dict) -> dict:
     摘要来自本轮 build_market_state 的 ma_context; 无上下文时 available=false。
     """
     summary = summarize_ma_context((market_state or {}).get("ma_context"))
-    summary["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    summary["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     sm.set("ma", summary)
     return summary
 
@@ -528,7 +528,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             print(f"[Backfill]   非法 cycle_position={cp!r}, 拒绝本批")
             continue
 
-        sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+        sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
         _record_ai_call_meta(sm, analyzer)
 
         scores = analysis.get("evidence_scores", {})
@@ -591,7 +591,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
-    sm.set("alpha.last_change_at", datetime.utcnow().isoformat() + "Z")
+    sm.set("alpha.last_change_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     sm.set("regime.cooldown_remaining", 0)
     sm.set("regime.stability_counter", 0)
     # 回溯为一次性引导: 统一清除待确认提议 (含 final_regime == current 路径)
@@ -615,7 +615,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
 
     # 写一条综合 memory 条目
     memory.append_alpha({
-        "date": datetime.utcnow().isoformat() + "Z",
+        "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "alpha": target,
         "regime": final_regime,
         "target_alpha": target,
@@ -759,7 +759,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
             print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
                   f"progress={a.get('regime_progress','?')}, "
                   f"conf={a.get('cycle_confidence','?')}")
-            sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             _record_ai_call_meta(sm, analyzer)
             sm.update_runtime()
     if not last_analysis:
@@ -802,7 +802,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     sm.set("alpha.current", target)
     sm.set("alpha.target", target)
     sm.set("alpha.transition_progress", 1.0)
-    sm.set("alpha.last_change_at", datetime.utcnow().isoformat() + "Z")
+    sm.set("alpha.last_change_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     sm.set("regime.cooldown_remaining", 0)
     print(f"[首次分析] Alpha 定位为 {target:+.4f} "
           f"(regime={engine.get_regime()}, progress={progress:.2f})")
@@ -818,7 +818,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
 
     # 7. memory 条目
     memory.append_alpha({
-        "date": datetime.utcnow().isoformat() + "Z",
+        "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "alpha": target,
         "regime": cp,
         "target_alpha": target,
@@ -852,7 +852,7 @@ def _set_outage(components: dict, reason: str, detail: str = "") -> dict:
             updated["detail"] = str(detail)[:200]
             sm.set("runtime.outage", updated)
         return updated
-    record = {"since": datetime.utcnow().isoformat() + "Z",
+    record = {"since": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
               "reason": reason, "detail": str(detail)[:200]}
     sm.set("runtime.outage", record)
     print(f"[Outage] 数据源故障: {reason} | {record['detail']} (since {record['since']})")
@@ -877,7 +877,7 @@ def _clear_outage(components: dict, detail: str = "") -> bool:
     if not (isinstance(current, dict) and current):
         return False
     sm.set("runtime.outage", {})
-    sm.set("runtime.last_tick_at", datetime.utcnow().isoformat() + "Z")
+    sm.set("runtime.last_tick_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     reason = current.get("reason", "?")
     since = current.get("since", "?")
     suffix = f", {detail}" if detail else ""
@@ -1027,7 +1027,7 @@ def run_cycle(components: dict) -> bool:
     if lock_hours > 0 and last_ds:
         try:
             last_dt = datetime.fromisoformat(last_ds.replace("Z", "+00:00")).replace(tzinfo=None)
-            elapsed_h = (datetime.utcnow() - last_dt).total_seconds() / 3600
+            elapsed_h = (datetime.now(timezone.utc).replace(tzinfo=None) - last_dt).total_seconds() / 3600
             if elapsed_h < lock_hours:
                 locked = True
                 daily = cfg.get("schedule", {}).get("daily_time", "")
@@ -1119,7 +1119,7 @@ def run_cycle(components: dict) -> bool:
             analysis = None
 
         if analysis:
-            sm.set("runtime.last_deepseek_at", datetime.utcnow().isoformat() + "Z")
+            sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             _record_ai_call_meta(sm, analyzer)
             pending_store = c.get("pending")
             if pending_store is not None:
@@ -1293,7 +1293,7 @@ def run_cycle(components: dict) -> bool:
                 print(f"  Alpha (time-based): {old_alpha:+.4f} → {new_alpha:+.4f} "
                       f"(target={target:+.2f}, progress={progress:.2f})")
                 memory.append_alpha({
-                    "date": datetime.utcnow().isoformat() + "Z",
+                    "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                     "alpha": new_alpha,
                     "regime": engine.get_regime(),
                     "target_alpha": target,
@@ -1338,7 +1338,7 @@ def run_cycle(components: dict) -> bool:
         print(f"  [SIDE-FIX] Alpha {clamp_old:+.4f} → {clamp_new:+.4f} "
               f"(regime={engine.get_regime()} 方向冲突, 先平仓, 目标 {clamp_target:+.2f})")
         memory.append_alpha({
-            "date": datetime.utcnow().isoformat() + "Z",
+            "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "alpha": clamp_new,
             "regime": engine.get_regime(),
             "target_alpha": clamp_target,
@@ -1366,7 +1366,7 @@ def run_cycle(components: dict) -> bool:
         print(f"  Alpha: 变更日平仓至 {old_alpha:+.4f} (deferred_build), "
               f"次日定位到 {target_alpha:+.4f}")
         memory.append_alpha({
-            "date": datetime.utcnow().isoformat() + "Z",
+            "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "alpha": old_alpha,
             "regime": engine.get_regime(),
             "target_alpha": target_alpha,
@@ -1396,7 +1396,7 @@ def run_cycle(components: dict) -> bool:
             print(f"  Alpha: {old_alpha:+.4f} → {new_alpha:+.4f} "
                   f"(target={engine.calculate_target_alpha(engine.get_regime(), progress):+.2f})")
             memory.append_alpha({
-                "date": datetime.utcnow().isoformat() + "Z",
+                "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 "alpha": new_alpha,
                 "regime": engine.get_regime(),
                 "target_alpha": engine.calculate_target_alpha(engine.get_regime(), progress),
@@ -1450,7 +1450,7 @@ def run_cycle(components: dict) -> bool:
                 memory.add_metric(name, si.get("signal", 0))
 
     # 10. 每周蒸馏 (按 knowledge.distill 计划; 分析周期错过时下一轮补偿)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if knowledge.distill_due(sm, now):
         last_distill = sm.get("runtime.last_distill_at", "")
         if not last_distill or last_distill[:10] != now.strftime("%Y-%m-%d"):
@@ -1735,8 +1735,8 @@ def main():
     # 定时模式: 已有状态时, 启动后先对齐到下一个定时点再进入循环,
     # 避免启动即空转触发 [Lock] 跳过
     if daily_time and c["state"].get("runtime.analysis_count", 0) > 0:
-        wait = _seconds_until_next_run(cfg, datetime.utcnow())
-        next_dt = datetime.utcnow() + timedelta(seconds=wait)
+        wait = _seconds_until_next_run(cfg, datetime.now(timezone.utc).replace(tzinfo=None))
+        next_dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=wait)
         print(f"[Main] 启动后等待至 {next_dt.isoformat(timespec='minutes')}Z "
               f"({_schedule_desc(cfg)}, 约 {wait/3600:.2f} 小时后)")
         time.sleep(wait)
@@ -1754,8 +1754,8 @@ def main():
             import traceback
             traceback.print_exc()
 
-        wait = _seconds_until_next_run(cfg, datetime.utcnow())
-        next_dt = datetime.utcnow() + timedelta(seconds=wait)
+        wait = _seconds_until_next_run(cfg, datetime.now(timezone.utc).replace(tzinfo=None))
+        next_dt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=wait)
         next_str = next_dt.isoformat(timespec="minutes") + "Z"
         daily = cfg.get("schedule", {}).get("daily_time", "")
         if daily:

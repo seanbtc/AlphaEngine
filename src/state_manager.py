@@ -1,7 +1,7 @@
 """持久状态管理器 — state.json 读写 + 重启恢复."""
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.atomic_io import atomic_copy, atomic_write_text
@@ -25,14 +25,14 @@ class StateManager:
     def _default_state(self) -> dict:
         return {
             "version": 1,
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "regime": {
                 "current": "BEAR",
-                "started_at": datetime.utcnow().isoformat() + "Z",
+                "started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 "entered_from": "INIT",
                 "cooldown_remaining": 0,
                 "stability_counter": 0,
-                "last_changed_at": datetime.utcnow().isoformat() + "Z",
+                "last_changed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             },
             "alpha": {
                 "current": 0.0,
@@ -40,7 +40,7 @@ class StateManager:
                 "regime_progress": 0.5,
                 "deferred_build": False,
                 "transition_progress": 0.0,
-                "last_change_at": datetime.utcnow().isoformat() + "Z",
+                "last_change_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 "locked": False,
                 "lock_reason": "",
             },
@@ -58,7 +58,7 @@ class StateManager:
                 "last_review_at": "",
                 "last_tick_at": "",
                 "last_prompt_hash": "",
-                "uptime_started_at": datetime.utcnow().isoformat() + "Z",
+                "uptime_started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                 "outage": {},
             },
         }
@@ -197,7 +197,7 @@ class StateManager:
         """把损坏的 state.json 备份为 state.json.corrupt.<UTC时间戳> (保留全部)."""
         if not os.path.exists(self.state_file):
             return None
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%dT%H%M%SZ")
         base = f"{self.state_file}.corrupt.{ts}"
         backup = base
         index = 1
@@ -245,7 +245,7 @@ class StateManager:
     def update_runtime(self):
         state = self.load()
         state["runtime"]["analysis_count"] += 1
-        state["runtime"]["last_analysis_at"] = datetime.utcnow().isoformat() + "Z"
+        state["runtime"]["last_analysis_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         self._state = state
         # 本方法直接改内存而未走 set(): 必须置脏, 否则 save() 会被脏门控
         # 静默跳过 (复盘轮 set+save 清脏后, 内存已 +1 但磁盘停在旧快照)。

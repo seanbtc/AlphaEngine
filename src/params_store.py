@@ -9,7 +9,7 @@
 import json
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.alpha_engine import REGIME_EXPECTED_DAYS
 from src.atomic_io import atomic_write_json
@@ -143,7 +143,7 @@ def append_calibration_log(data_dir: str, entries: list,
         return None
     os.makedirs(data_dir, exist_ok=True)
     path = os.path.join(data_dir, LOG_FILE)
-    ts = datetime.utcnow().isoformat() + "Z"
+    ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     with open(path, "a", encoding="utf-8") as f:
         for entry in entries:
             record = {"ts": ts, "source": source}

@@ -2,7 +2,7 @@
 import hashlib
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _ALPHA_ROOT = Path(__file__).resolve().parents[1]
@@ -133,7 +133,7 @@ def test_log_prediction_falls_back_to_module_hash_and_omits_meta(tmp_path):
 
 def test_legacy_prediction_without_hash_still_audited(tmp_path):
     knowledge = Knowledge({}, str(tmp_path), _StubAnalyzer())
-    old_ts = (datetime.utcnow() - timedelta(days=40)).isoformat() + "Z"
+    old_ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=40)).isoformat() + "Z"
     legacy = {
         "ts": old_ts,
         "prediction_id": f"{old_ts}|BULL",

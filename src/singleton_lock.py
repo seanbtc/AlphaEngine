@@ -11,7 +11,7 @@ OpenProcess + GetExitCodeProcess(STILL_ACTIVE) 探测。
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def pid_alive(pid) -> bool:
@@ -83,7 +83,7 @@ class SingletonLock:
             return False, holder
         info = {
             "pid": os.getpid(),
-            "started_at": datetime.utcnow().isoformat() + "Z",
+            "started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "mode": str(mode or ""),
         }
         try:

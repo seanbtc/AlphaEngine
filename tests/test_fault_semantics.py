@@ -1,7 +1,7 @@
 """WP5 故障语义 — 数据源故障不盲推进 + 失败推文重放 (离线单元测试)。"""
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -150,7 +150,7 @@ def _components(tmp_path, fetcher, analyzer, regime="BEAR", alpha=-1.00,
     sm.set("alpha.regime_progress", progress)
     # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
     sm.set("runtime.last_tick_at",
-           (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
+           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat() + "Z")
     engine = AlphaEngine({"smoothing": {},
                           "stability": {"required_confirmations": 1}}, sm)
     return {
@@ -249,7 +249,7 @@ def test_recovery_does_not_backfill_three_day_outage(tmp_path, capsys):
     sm = comp["state"]
     # 故障开始前锚点为 3 天前 (若恢复补记, 增量会是 3/420)
     sm.set("runtime.last_tick_at",
-           (datetime.utcnow() - timedelta(days=3)).isoformat() + "Z")
+           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)).isoformat() + "Z")
     run_cycle(comp)   # fetch_error: 故障轮不推进
     assert sm.get("alpha.regime_progress") == pytest.approx(0.5)
     capsys.readouterr()
@@ -412,7 +412,7 @@ def test_locked_cycle_does_not_replay_or_clear_outage(tmp_path, capsys):
     comp["cfg"]["schedule"]["min_analysis_interval_hours"] = 24
     sm = comp["state"]
     sm.set("runtime.last_deepseek_at",
-           (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z")
+           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z")
     comp["pending"].add(["1001"])
 
     run_cycle(comp)

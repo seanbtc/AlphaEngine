@@ -432,7 +432,7 @@ def build_report(dates, closes, series, phases, cycles, regimes, config, source)
 
     last = n - 1
     lines += ["# AlphaEngine 节奏校准报告 (WP8 8C, 只读)", "",
-              f"- 生成: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
+              f"- 生成: {datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M')} UTC",
               f"- 数据: `{source}` — {n} 根, {dates[0]} → {dates[-1]}",
               f"- 可判定起点: {dates[start] if 0 <= start < n else '-'} "
               f"(预热结束; 200/250SMA 就绪)",

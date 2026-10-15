@@ -163,7 +163,7 @@ class ShadowLedger:
         if not self.enabled:
             return False
         try:
-            now = now or datetime.utcnow()
+            now = now or datetime.now(timezone.utc).replace(tzinfo=None)
             phase = _phase_code(market_state)
             state = self._load_or_default(now)
             engine_regime = self._engine_regime()

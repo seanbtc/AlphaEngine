@@ -679,7 +679,7 @@ def _cycle_components(tmp_path, prices, rhythm, regime, alpha, progress,
     sm.set("alpha.target", alpha)
     sm.set("alpha.regime_progress", progress)
     sm.set("runtime.last_tick_at",
-           (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z")
+           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat() + "Z")
     alpha_cfg = {"rhythm": rhythm}
     alpha_cfg.update(extra_alpha or {})
     cfg = {"schedule": {"min_analysis_interval_hours": 0},

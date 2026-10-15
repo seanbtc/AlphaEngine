@@ -1,7 +1,7 @@
 """自我进化系统 — 知识蒸馏 + 漂移检测 + 预测审计 + 自动校准."""
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.atomic_io import atomic_copy, atomic_write_text
 
@@ -85,7 +85,7 @@ class Knowledge:
 
     def log_drift_meta(self, meta: dict, cycle_position: str):
         entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "quality": meta.get("analysis_quality", 0),
             "new_terms": meta.get("unrecognized_topics", []),
             "deprecated_candidates": meta.get("deprecated_terms", []),
@@ -146,7 +146,7 @@ class Knowledge:
             model = getattr(self.analyzer, "last_call_model", None)
         if temperature is None:
             temperature = getattr(self.analyzer, "last_call_temperature", None)
-        ts = datetime.utcnow().isoformat() + "Z"
+        ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         entry = {
             "ts": ts,
             "prediction_id": f"{ts}|{cycle_position}",
@@ -268,7 +268,7 @@ class Knowledge:
         preds = self._read_jsonl(self.prediction_log_file)
         outcomes = self._load_prediction_outcomes()
         max_age_days = self.distill_cfg.get("max_prediction_age_days", 30)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         if current_price is None:
             current_price = self._last_known_price()
         price_history = self._price_history()
@@ -357,7 +357,7 @@ class Knowledge:
         分析周期(周二/周四)与计划时刻(默认周日 0 点 UTC)不重合, 因此按
         "最近一个计划时刻" 比较: 上一轮分析错过后在下一轮分析时补偿执行。
         """
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
         cfg = self.distill_cfg or {}
         day_name = str(cfg.get('schedule_day') or 'sunday').strip().lower()
         target_weekday = self._WEEKDAY_INDEX.get(day_name, 6)
@@ -424,7 +424,7 @@ class Knowledge:
 """
 
         print(f"[API-CALL][distill] POST {self.analyzer.endpoint} purpose=knowledge "
-              f"{datetime.utcnow().isoformat()}Z")
+              f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
         response = self.analyzer.client.chat(
             messages=[
                 {"role": "system", "content": "你是知识蒸馏引擎, 输出 Markdown 格式的知识库内容."},
@@ -469,7 +469,7 @@ class Knowledge:
 """
 
         print(f"[API-CALL][compress] POST {self.analyzer.endpoint} purpose=knowledge "
-              f"{datetime.utcnow().isoformat()}Z")
+              f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
         response = self.analyzer.client.chat(
             messages=[
                 {"role": "system", "content": "你是文本压缩引擎, 输出简洁 Markdown."},
@@ -488,7 +488,7 @@ class Knowledge:
         compressed = response.get("content") or ""
 
         if compressed:
-            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M UTC")
             header = f"# Glassnode Alpha Engine Memory\n\n> 上次压缩: {ts}\n\n"
             backup = memory.backup_memory_md()
             if backup:
