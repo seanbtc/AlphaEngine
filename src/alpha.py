@@ -1055,8 +1055,12 @@ def run_cycle(components: dict) -> bool:
             if audit.get("new_audited") or audit.get("skipped"):
                 message = f"新增审计 {audit.get('new_audited', 0)} 条"
                 if audit.get("skipped"):
-                    message += f" | 跳过 {audit['skipped']} 条(无入场价)"
+                    message += f" | 跳过 {audit['skipped']} 条(缺价格)"
                 message += f" | 命中率 {audit.get('hit_rate', 0):.0%}"
+                if audit.get("forecast_total"):
+                    message += f" | 区间覆盖 {audit.get('interval_coverage', 0):.0%}"
+                    if audit.get("forecast_brier") is not None:
+                        message += f" | Brier {audit['forecast_brier']:.3f}"
                 print(f"[Audit] {message}")
         except Exception as e:
             print(f"[Audit] 预测审计异常 (不影响本轮分析): {e}")
@@ -1219,8 +1223,13 @@ def run_cycle(components: dict) -> bool:
             else:
                 print(f"  regime_progress: {progress:.2f}")
 
-            # 6. 跟踪预测
-            knowledge.log_prediction(cp, conf, btc_price)
+            # 6. 跟踪预测 (K-03: 带来源标注/区间/重跑离散；旧 knowledge 实现可用 **kwargs 吞掉)
+            knowledge.log_prediction(
+                cp, conf, btc_price,
+                forecast=analysis.get("forecast"),
+                source_type_counts=analysis.get("source_type_counts"),
+                cross_check=analysis.get("cross_check"),
+            )
 
             has_analysis = True
         elif _all_tweets_filtered(analyzer):

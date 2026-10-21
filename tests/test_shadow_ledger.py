@@ -546,7 +546,7 @@ class _Knowledge:
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None):
+    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
         pass
 
     def audit_predictions(self, btc_price):

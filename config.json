@@ -96,7 +96,7 @@
       "rebalance_threshold_pp": 1.0
     },
     "cross_check": {
-      "_note": "单次判断交叉验证: 同一 prompt 采样 samples 次 (1=关闭); 样本 cycle_position 不一致 → cycle_confidence 降级 low (走既有低置信门, 不新增输出字段); structure_check (方向感知): 仅当提议 cp 为多头侧正暴露 (REGIME_ALPHA_MAP[cp] > 0) 且 > 当前 alpha + 0.005 (加多) 且 close<SMA200 (MA 数据可用时) 才降级; 熊侧空头减仓 (BEAR→BEAR_DEEP/BEAR_DEEP→BEAR_BOTTOM) 与牛侧减仓/清仓 (BULL→DEEP_BULL/DEEP_BULL→BULL_COOLING) 不拦截; market_state 缺 alpha 时回退为仅 cp==BULL 触发",
+      "_note": "单次判断交叉验证: 同一 prompt 采样 samples 次 (1=关闭); 样本 cycle_position 不一致 → cycle_confidence 降级 low (走既有低置信门, 不新增 cross_check; K-03 forecast/source_type_counts 由归一化添加); structure_check (方向感知): 仅当提议 cp 为多头侧正暴露 (REGIME_ALPHA_MAP[cp] > 0) 且 > 当前 alpha + 0.005 (加多) 且 close<SMA200 (MA 数据可用时) 才降级; 熊侧空头减仓 (BEAR→BEAR_DEEP/BEAR_DEEP→BEAR_BOTTOM) 与牛侧减仓/清仓 (BULL→DEEP_BULL/DEEP_BULL→BULL_COOLING) 不拦截; market_state 缺 alpha 时回退为仅 cp==BULL 触发",
       "samples": 2,
       "structure_check": {
         "enabled": true

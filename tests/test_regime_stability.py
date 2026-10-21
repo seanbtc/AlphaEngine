@@ -86,7 +86,7 @@ class _FakeKnowledge:
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None):
+    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
         pass
 
     def distill_due(self, state_manager, now=None):

@@ -192,7 +192,7 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 
 交叉验证细节：`cross_check.samples>1` 时同一 prompt 调用 AI 多次（首次必须有效，
 否则按原失败流程重试），样本 `cycle_position` 全部一致才按首样本返回；不一致时
-仅把 `cycle_confidence` 降为 `low`（不新增/不改动其它输出字段），由既有低置信门
+仅把 `cycle_confidence` 降为 `low`（不新增 cross_check；K-03 的 forecast/source_type_counts 由归一化添加），由既有低置信门
 阻断 regime 变更与 alpha 步进。`samples=1` 完全回退旧行为。
 
 结构一致性为**方向感知**：仅当提议 cp 为多头侧正暴露（`REGIME_ALPHA_MAP[cp] > 0`）
@@ -451,6 +451,21 @@ BULL(+1.0) → DEEP_BULL(+0.3) → BULL_COOLING(0) → BEAR(-1.0) → BEAR_DEEP(
 - `temperature`：请求温度（客户端配置值）；拿不到时省略字段。
 
 `state.runtime.last_prompt_hash` 随每轮分析成功同步，便于对账"某轮判断由哪版 prompt 产生"。
+
+### 预测校准（K-03）
+
+- **来源标注**：`signal_board[].source_type` = `retrieved` / `remembered` / `inferred`；`retrieved` 必须带 `source`；`source_type_counts` 随预测落盘。
+- **区间预测**：`forecast` = `horizon_days(30/90)` + `direction` + `price_low/high` + `confidence` + `hit_probability` + `basis`；非法/缺失置 `null`，不阻断分析。
+- **重跑离散**：`_cross_check` 采样 2 次（可配 `alpha.cross_check.samples`），落盘 `cross_check` 块（positions / position_agreement / progress_std / forecast_direction_agreement / dispersed）。只有 `cycle_position` 不一致才降 `cycle_confidence=low`；progress/方向离散仅留痕，不改变 live 置信。
+- **审计**：`audit_predictions` 对 forecast 取 target ±7 天最近价（平局偏好 after；`before` 表示 horizon 被缩短），落盘 `interval_hit` / `direction_hit` / `brier` / `width_pct` / `horizon_price_offset_days` / `horizon_price_source`；旧预测仍按方向审计。
+- **校准报告**：
+  ```bash
+  python3 tools/calibration_report.py            # 人读
+  python3 tools/calibration_report.py --json     # 机器读
+  ```
+  输出 point 命中率、区间覆盖、Brier、ECE、按 confidence/prompt_hash/model 分桶、重跑离散率、pending/awaiting/skipped、by_horizon 与 by_price_source。
+- **口径注意**：`forecast.confidence` 暂未参与校准（分桶仍用 cycle confidence，字段保留供审计）；方向命中阈值与 point 一致（up/down ±2%、flat ±3%），90 天 flat 的命中率需谨慎解读。
+- **复盘/蒸馏**：月度复盘结果与每周知识蒸馏会记录 `prediction_calibration` 供人读/留档；**自动参数校准 prompt 不读取该字段**，避免它影响 `adjustments` 的自动应用。
 
 ### 知识蒸馏（每周日 0 UTC）
 

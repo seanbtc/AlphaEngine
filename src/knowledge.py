@@ -1,9 +1,316 @@
 """自我进化系统 — 知识蒸馏 + 漂移检测 + 预测审计 + 自动校准."""
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
 from src.atomic_io import atomic_copy, atomic_write_text
+
+
+def _prediction_key(pred: dict) -> str:
+    return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('cycle_position','')}")
+
+
+def _rate(numerator, denominator):
+    return round(numerator / denominator, 3) if denominator else None
+
+
+def _ece(pairs):
+    """ECE（5 箱）; pairs = [(probability, hit_bool)]。"""
+    if not pairs:
+        return None
+    bins = [[] for _ in range(5)]
+    for probability, hit in pairs:
+        index = min(4, max(0, int(probability * 5)))
+        bins[index].append((probability, hit))
+    total = len(pairs)
+    value = 0.0
+    for bucket in bins:
+        if not bucket:
+            continue
+        avg_probability = sum(item[0] for item in bucket) / len(bucket)
+        avg_hit = sum(1 for item in bucket if item[1]) / len(bucket)
+        value += abs(avg_probability - avg_hit) * len(bucket) / total
+    return round(value, 6)
+
+
+def build_calibration_summary(predictions: list, outcomes: list) -> dict:
+    """K-03 预测校准汇总：point 命中 / 区间覆盖 / Brier / ECE / 分桶 / 重跑离散。
+
+    输入为 prediction_log.jsonl 与 prediction_outcomes.jsonl 的行列表；
+    旧记录缺字段一律跳过对应指标，不抛异常。outcomes 按 prediction_id 去重（保留最后一条），
+    防止侧车并发/手工补写导致重复计数。
+    """
+    predictions = [item for item in (predictions or []) if isinstance(item, dict)]
+    raw_outcomes = [item for item in (outcomes or []) if isinstance(item, dict)]
+    deduped = {}
+    for index, outcome in enumerate(raw_outcomes):
+        key = str(outcome.get("prediction_id") or f"__unknown__{index}")
+        deduped[key] = outcome
+    outcomes = list(deduped.values())
+    pred_by_id = {_prediction_key(item): item for item in predictions}
+
+    point_counts = {"correct": 0, "early": 0, "late": 0, "flat": 0}
+    point_by_kind = {
+        "legacy": {"correct": 0, "early": 0, "late": 0, "flat": 0},
+        "forecast": {"correct": 0, "early": 0, "late": 0, "flat": 0},
+    }
+    forecast_rows = []
+    confidence = {}
+    by_prompt = {}
+    by_model = {}
+    by_horizon = {}
+    by_price_source = {}
+
+    def _bucket(container, key):
+        return container.setdefault(
+            str(key or "unknown"),
+            {"point_n": 0, "point_hits": 0, "forecast_n": 0,
+             "forecast_hits": 0, "probabilities": []},
+        )
+
+    def _horizon_bucket(key):
+        return by_horizon.setdefault(
+            str(key if key is not None else "unknown"),
+            {"n": 0, "hits": 0, "widths": [], "briers": [], "probabilities": []},
+        )
+
+    for outcome in outcomes:
+        pid = str(outcome.get("prediction_id") or "")
+        pred = pred_by_id.get(pid, {})
+        conf = outcome.get("confidence") or pred.get("confidence") or "unknown"
+        prompt_hash = pred.get("prompt_hash") or outcome.get("prompt_hash") or "unknown"
+        model = pred.get("model") or "unknown"
+        verdict = outcome.get("verdict")
+        if verdict in point_counts:
+            point_counts[verdict] += 1
+            kind = ("forecast"
+                    if isinstance(outcome.get("forecast"), dict)
+                    and outcome.get("interval_hit") is not None
+                    else "legacy")
+            point_by_kind[kind][verdict] += 1
+            _bucket(confidence, conf)["point_n"] += 1
+            _bucket(by_prompt, prompt_hash)["point_n"] += 1
+            _bucket(by_model, model)["point_n"] += 1
+            if verdict == "correct":
+                _bucket(confidence, conf)["point_hits"] += 1
+                _bucket(by_prompt, prompt_hash)["point_hits"] += 1
+                _bucket(by_model, model)["point_hits"] += 1
+
+        if isinstance(outcome.get("forecast"), dict) and outcome.get("interval_hit") is not None:
+            interval_hit = bool(outcome.get("interval_hit"))
+            direction_hit = outcome.get("direction_hit")
+            width = outcome.get("width_pct")
+            probability = outcome.get("forecast", {}).get("hit_probability")
+            try:
+                probability = float(probability) if probability is not None else None
+            except (TypeError, ValueError, OverflowError):
+                probability = None
+            horizon = outcome.get("horizon_days")
+            if horizon is None:
+                horizon = outcome.get("forecast", {}).get("horizon_days")
+            price_offset = outcome.get("horizon_price_offset_days")
+            price_source = outcome.get("horizon_price_source") or "unknown"
+            row = {
+                "pid": pid,
+                "confidence": conf,
+                "prompt_hash": prompt_hash,
+                "model": model,
+                "horizon": horizon,
+                "price_offset": price_offset,
+                "price_source": price_source,
+                "hit": interval_hit,
+                "direction_hit": direction_hit,
+                "width": float(width) if isinstance(width, (int, float)) else None,
+                "probability": probability,
+                "brier": outcome.get("brier"),
+            }
+            forecast_rows.append(row)
+            _bucket(confidence, conf)["forecast_n"] += 1
+            _bucket(by_prompt, prompt_hash)["forecast_n"] += 1
+            _bucket(by_model, model)["forecast_n"] += 1
+            if interval_hit:
+                _bucket(confidence, conf)["forecast_hits"] += 1
+                _bucket(by_prompt, prompt_hash)["forecast_hits"] += 1
+                _bucket(by_model, model)["forecast_hits"] += 1
+            if probability is not None:
+                _bucket(confidence, conf)["probabilities"].append((probability, interval_hit))
+                _bucket(by_prompt, prompt_hash)["probabilities"].append((probability, interval_hit))
+                _bucket(by_model, model)["probabilities"].append((probability, interval_hit))
+
+            hb = _horizon_bucket(horizon)
+            hb["n"] += 1
+            if interval_hit:
+                hb["hits"] += 1
+            if row["width"] is not None:
+                hb["widths"].append(row["width"])
+            if isinstance(row["brier"], (int, float)):
+                hb["briers"].append(row["brier"])
+            if probability is not None:
+                hb["probabilities"].append((probability, interval_hit))
+
+            ps = by_price_source.setdefault(
+                str(price_source), {"n": 0, "hits": 0, "offsets": []})
+            ps["n"] += 1
+            if interval_hit:
+                ps["hits"] += 1
+            if isinstance(price_offset, (int, float)):
+                ps["offsets"].append(abs(float(price_offset)))
+
+    point_decided = point_counts["correct"] + point_counts["early"] + point_counts["late"]
+    forecast_n = len(forecast_rows)
+    forecast_hits = sum(1 for row in forecast_rows if row["hit"])
+    direction_rows = [row for row in forecast_rows if row["direction_hit"] is not None]
+    direction_hits = sum(1 for row in direction_rows if row["direction_hit"])
+    widths = [row["width"] for row in forecast_rows if row["width"] is not None]
+    briers = [row["brier"] for row in forecast_rows if isinstance(row["brier"], (int, float))]
+    probability_pairs = [(row["probability"], row["hit"])
+                         for row in forecast_rows if row["probability"] is not None]
+
+    cross_rows = [pred.get("cross_check") for pred in predictions
+                  if isinstance(pred.get("cross_check"), dict)]
+    dispersed = sum(1 for item in cross_rows if item.get("dispersed"))
+    position_mismatch = sum(
+        1 for item in cross_rows
+        if len(set(item.get("positions") or [])) > 1
+    )
+    soft_dispersed = sum(
+        1 for item in cross_rows
+        if item.get("dispersed") and len(set(item.get("positions") or [])) <= 1
+    )
+    position_agreements = [item.get("position_agreement") for item in cross_rows
+                           if isinstance(item.get("position_agreement"), (int, float))]
+    progress_stds = [item.get("progress_std") for item in cross_rows
+                     if isinstance(item.get("progress_std"), (int, float))]
+    direction_agreements = [item.get("forecast_direction_agreement") for item in cross_rows
+                            if isinstance(item.get("forecast_direction_agreement"), (int, float))]
+
+    def _bucket_output(container):
+        output = {}
+        for key, item in sorted(container.items()):
+            probabilities = item.pop("probabilities", [])
+            item["point_hit_rate"] = _rate(item["point_hits"], item["point_n"])
+            item["forecast_coverage"] = _rate(item["forecast_hits"], item["forecast_n"])
+            item["brier"] = (
+                round(sum((p - (1.0 if hit else 0.0)) ** 2 for p, hit in probabilities)
+                      / len(probabilities), 6)
+                if probabilities else None
+            )
+            output[key] = item
+        return output
+
+    def _point_kind_output(kind):
+        counts = point_by_kind[kind]
+        decided = counts["correct"] + counts["early"] + counts["late"]
+        return {**counts, "decided": decided,
+                "hit_rate": _rate(counts["correct"], decided)}
+
+    horizon_output = {}
+    for key, item in sorted(by_horizon.items(), key=lambda pair: pair[0]):
+        widths_h = item["widths"]
+        briers_h = item["briers"]
+        horizon_output[key] = {
+            "n": item["n"],
+            "hits": item["hits"],
+            "coverage": _rate(item["hits"], item["n"]),
+            "mean_width_pct": round(sum(widths_h) / len(widths_h), 2) if widths_h else None,
+            "mean_brier": round(sum(briers_h) / len(briers_h), 6) if briers_h else None,
+            "ece": _ece(item["probabilities"]),
+            "probability_n": len(item["probabilities"]),
+        }
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    outcome_ids = set(deduped)
+    pending = 0
+    awaiting_horizon = 0
+    for pred in predictions:
+        pid = _prediction_key(pred)
+        if pid in outcome_ids or pred.get("verified"):
+            continue
+        try:
+            pred_time = datetime.fromisoformat(str(pred.get("ts", "")).replace("Z", "+00:00"))
+            age_days = (now - pred_time.replace(tzinfo=None)).days
+        except (TypeError, ValueError):
+            pending += 1
+            continue
+        forecast = pred.get("forecast") if isinstance(pred.get("forecast"), dict) else None
+        horizon = None
+        if forecast:
+            try:
+                horizon = int(forecast.get("horizon_days"))
+            except (TypeError, ValueError, OverflowError):
+                horizon = None
+        if horizon and age_days < horizon:
+            awaiting_horizon += 1
+        else:
+            pending += 1
+
+    return {
+        "generated_at": now.isoformat() + "Z",
+        "n_predictions": len(predictions),
+        "n_outcomes": len(outcomes),
+        "pending": pending,
+        "awaiting_horizon": awaiting_horizon,
+        "skipped": sum(1 for item in outcomes if item.get("verdict") == "skipped"),
+        "point": {
+            **point_counts,
+            "decided": point_decided,
+            "hit_rate": _rate(point_counts["correct"], point_decided),
+        },
+        "point_by_kind": {
+            "legacy": _point_kind_output("legacy"),
+            "forecast": _point_kind_output("forecast"),
+        },
+        "forecast": {
+            "n": forecast_n,
+            "hits": forecast_hits,
+            "coverage": _rate(forecast_hits, forecast_n),
+            "direction_n": len(direction_rows),
+            "direction_hits": direction_hits,
+            "direction_hit_rate": _rate(direction_hits, len(direction_rows)),
+            "mean_width_pct": round(sum(widths) / len(widths), 2) if widths else None,
+            "mean_brier": round(sum(briers) / len(briers), 6) if briers else None,
+            "ece": _ece(probability_pairs),
+            "probability_n": len(probability_pairs),
+        },
+        "by_horizon": horizon_output,
+        "by_price_source": {
+            key: {
+                "n": item["n"],
+                "hits": item["hits"],
+                "coverage": _rate(item["hits"], item["n"]),
+                "mean_abs_offset_days": (
+                    round(sum(item["offsets"]) / len(item["offsets"]), 2)
+                    if item["offsets"] else None
+                ),
+            }
+            for key, item in sorted(by_price_source.items())
+        },
+        "by_confidence": _bucket_output(confidence),
+        "by_prompt_hash": _bucket_output(by_prompt),
+        "by_model": _bucket_output(by_model),
+        "cross_check": {
+            "n": len(cross_rows),
+            "dispersed": dispersed,
+            "dispersed_rate": _rate(dispersed, len(cross_rows)),
+            "position_mismatch": position_mismatch,
+            "position_mismatch_rate": _rate(position_mismatch, len(cross_rows)),
+            "soft_dispersed": soft_dispersed,
+            "soft_dispersed_rate": _rate(soft_dispersed, len(cross_rows)),
+            "mean_position_agreement": (
+                round(sum(position_agreements) / len(position_agreements), 4)
+                if position_agreements else None
+            ),
+            "mean_progress_std": (
+                round(sum(progress_stds) / len(progress_stds), 4)
+                if progress_stds else None
+            ),
+            "mean_forecast_direction_agreement": (
+                round(sum(direction_agreements) / len(direction_agreements), 4)
+                if direction_agreements else None
+            ),
+        },
+    }
 
 
 class Knowledge:
@@ -123,13 +430,22 @@ class Knowledge:
 
     def log_prediction(self, cycle_position: str, confidence: str, btc_price: float = None,
                        prompt_hash: str = None, model: str = None,
-                       temperature: float = None):
+                       temperature: float = None,
+                       forecast: dict = None, source_type_counts: dict = None,
+                       cross_check: dict = None):
         """记录一条预测。
 
         追溯字段: prompt_hash 可选 (缺省取 analyzer.prompt_hash, 再回退模块常量
         PROMPT_HASH; 最终兜底 "unknown"), 写入时必带该键;
         model/temperature 从 AIService 调用链取 (响应 model / 请求 temperature),
         拿不到时省略字段 (不写 null, 便于按字段存在性过滤)。
+
+        K-03 可审计字段 (均可选, 旧调用兼容):
+        - forecast: {horizon_days, direction, price_low, price_high, confidence,
+          hit_probability, basis}
+        - source_type_counts: {retrieved, remembered, inferred, unknown}
+        - cross_check: {samples, positions, position_agreement, progress_std,
+          forecast_direction_agreement, dispersed, ...}
         """
         if btc_price is None:
             # DataFeed 不可用时用历史最后已知价格兜底, 避免预测价格全为 null (审计空转)
@@ -164,6 +480,12 @@ class Knowledge:
                 entry["temperature"] = float(temperature)
             except (TypeError, ValueError):
                 pass
+        if isinstance(forecast, dict) and forecast:
+            entry["forecast"] = forecast
+        if isinstance(source_type_counts, dict) and source_type_counts:
+            entry["source_type_counts"] = source_type_counts
+        if isinstance(cross_check, dict) and cross_check:
+            entry["cross_check"] = cross_check
         self._append_jsonl(self.prediction_log_file, entry)
 
     def _prediction_id(self, pred: dict) -> str:
@@ -258,22 +580,56 @@ class Knowledge:
             return "correct" if abs(move_pct) <= 3.0 else "flat"
         return "flat"
 
+    def _price_near_target(self, target, history=None, tolerance_days: int = 7):
+        """取 target 附近最近价（默认 ±7 天，平局偏好 after）。
+
+        返回 (price, offset_days, source)；source='after'/'before'。
+        用 ±7 天而不是严格 target，避免分析日与 horizon 日错位导致永久 skipped；
+        before 表示 horizon 被缩短，outcome 会留痕。
+        """
+        history = history if history is not None else self._price_history()
+        best = None
+        for ts, price in history:
+            offset_days = (ts - target).total_seconds() / 86400.0
+            if abs(offset_days) > tolerance_days:
+                continue
+            key = (abs(offset_days), 0 if offset_days >= 0 else 1)
+            if best is None or key < best[0]:
+                best = (key, price, offset_days)
+        if best is None:
+            return None
+        _, price, offset_days = best
+        return price, round(offset_days, 2), "after" if offset_days >= 0 else "before"
+
     def audit_predictions(self, current_price: float = None) -> dict:
-        """审计到期预测并写回结果侧车; 返回统计 (含命中率)。
+        """审计到期预测并写回结果侧车; 返回统计 (含 point 命中率 / 区间覆盖 / Brier)。
 
         - current_price 缺省时用 price_history 最后价格兜底;
         - 已审计的预测 (prediction_outcomes.jsonl 中已有 prediction_id) 不重复审计;
-        - 结果写侧车而非改写主日志, 保持 append-only。
+        - 结果写侧车而非改写主日志, 保持 append-only;
+        - K-03: 带 forecast 的预测按 horizon_days 到期审计（区间命中/方向/Brier/宽度），
+          旧的无 forecast 预测仍按 max_prediction_age_days 做 point 审计。
         """
         preds = self._read_jsonl(self.prediction_log_file)
         outcomes = self._load_prediction_outcomes()
-        max_age_days = self.distill_cfg.get("max_prediction_age_days", 30)
+        try:
+            max_age_days = int(self.distill_cfg.get("max_prediction_age_days", 30))
+        except (TypeError, ValueError):
+            max_age_days = 30
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         if current_price is None:
             current_price = self._last_known_price()
         price_history = self._price_history()
-        results = {"correct": 0, "early": 0, "late": 0, "flat": 0, "total": 0,
-                   "hit_rate": 0.0, "new_audited": 0, "skipped": 0}
+        results = {
+            "correct": 0, "early": 0, "late": 0, "flat": 0, "total": 0,
+            "hit_rate": 0.0, "new_audited": 0, "skipped": 0,
+            "forecast_total": 0, "forecast_hits": 0,
+            "forecast_direction_hits": 0, "forecast_direction_n": 0,
+            "forecast_brier_sum": 0.0,
+            "forecast_brier_n": 0, "forecast_width_sum": 0.0,
+            "interval_coverage": 0.0, "forecast_direction_hit_rate": 0.0,
+            "forecast_brier": None, "forecast_mean_width_pct": 0.0,
+        }
         audited = 0
 
         new_outcomes = []
@@ -286,18 +642,69 @@ class Knowledge:
                 continue
             try:
                 pred_time = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                age = (now - pred_time.replace(tzinfo=None)).days
+                pred_time = pred_time.replace(tzinfo=None)
+                age = (now - pred_time).days
             except ValueError:
                 continue
-            if age < max_age_days:
+
+            forecast = pred.get("forecast") if isinstance(pred.get("forecast"), dict) else None
+            horizon = None
+            forecast_range = None
+            if forecast:
+                try:
+                    horizon = int(forecast.get("horizon_days"))
+                    low = float(forecast.get("price_low"))
+                    high = float(forecast.get("price_high"))
+                except (TypeError, ValueError, OverflowError):
+                    forecast, horizon = None, None
+                else:
+                    if (horizon not in (30, 90)
+                            or not (math.isfinite(low) and math.isfinite(high))
+                            or not (low > 0 and high > 0 and low <= high)):
+                        forecast, horizon = None, None
+                    else:
+                        forecast_range = (low, high)
+            wait_days = horizon if forecast else max_age_days
+            if age < wait_days:
                 continue
 
             entry_price = pred.get("btc_price") or self._price_at(ts, price_history)
             try:
                 entry_price = float(entry_price) if entry_price else None
-                audit_price = float(current_price) if current_price else None
             except (TypeError, ValueError):
-                entry_price, audit_price = None, None
+                entry_price = None
+
+            audit_price = None
+            horizon_price_offset = None
+            horizon_price_source = None
+            if forecast:
+                target = pred_time + timedelta(days=horizon)
+                nearest = self._price_near_target(target, price_history)
+                if nearest is None:
+                    if age < wait_days + 30:
+                        continue
+                    outcome = {
+                        "prediction_id": pid,
+                        "ts": ts,
+                        "cycle_position": pred.get("cycle_position"),
+                        "confidence": pred.get("confidence"),
+                        "forecast": forecast,
+                        "horizon_days": horizon,
+                        "verdict": "skipped",
+                        "reason": "missing horizon price",
+                        "audited_at": now.isoformat() + "Z",
+                    }
+                    new_outcomes.append(outcome)
+                    outcomes[pid] = outcome
+                    results["skipped"] += 1
+                    continue
+                audit_price, horizon_price_offset, horizon_price_source = nearest
+            else:
+                try:
+                    audit_price = float(current_price) if current_price else None
+                except (TypeError, ValueError):
+                    audit_price = None
+
             if not entry_price or not audit_price:
                 # 无入场价(且价格历史也没有) → 标记 skipped, 避免永久悬空
                 outcome = {
@@ -330,6 +737,55 @@ class Knowledge:
                 "age_days": age,
                 "audited_at": now.isoformat() + "Z",
             }
+
+            forecast_fields = {}
+            if forecast:
+                low, high = forecast_range
+                interval_hit = bool(low <= audit_price <= high)
+                width_pct = (high - low) / entry_price * 100.0
+                direction = str(forecast.get("direction") or "").strip().lower() or None
+                direction_hit = self._forecast_direction_hit(direction, move_pct)
+                hit_probability = forecast.get("hit_probability")
+                try:
+                    hit_probability = float(hit_probability)
+                except (TypeError, ValueError, OverflowError):
+                    hit_probability = None
+                if hit_probability is not None:
+                    if not math.isfinite(hit_probability):
+                        hit_probability = None
+                    else:
+                        hit_probability = min(1.0, max(0.0, hit_probability))
+                brier = None
+                if hit_probability is not None:
+                    brier = (hit_probability - (1.0 if interval_hit else 0.0)) ** 2
+                forecast_fields = {
+                    "forecast": forecast,
+                    "horizon_days": horizon,
+                    "horizon_price": round(audit_price, 2),
+                    "horizon_price_offset_days": horizon_price_offset,
+                    "horizon_price_source": horizon_price_source,
+                    "interval_hit": interval_hit,
+                    "forecast_direction": direction,
+                    "direction_hit": direction_hit,
+                    "forecast_verdict": "hit" if interval_hit else "miss",
+                    "width_pct": round(width_pct, 2),
+                }
+                if brier is not None:
+                    forecast_fields["brier"] = round(brier, 6)
+                outcome.update(forecast_fields)
+
+                results["forecast_total"] += 1
+                if interval_hit:
+                    results["forecast_hits"] += 1
+                if direction_hit is not None:
+                    results["forecast_direction_n"] += 1
+                    if direction_hit:
+                        results["forecast_direction_hits"] += 1
+                results["forecast_width_sum"] += width_pct
+                if brier is not None:
+                    results["forecast_brier_sum"] += brier
+                    results["forecast_brier_n"] += 1
+
             new_outcomes.append(outcome)
             outcomes[pid] = outcome
             results[verdict] = results.get(verdict, 0) + 1
@@ -342,7 +798,39 @@ class Knowledge:
 
         decided = results["correct"] + results["early"] + results["late"]
         results["hit_rate"] = round(results["correct"] / decided, 3) if decided else 0.0
+        forecast_total = results["forecast_total"]
+        if forecast_total:
+            results["interval_coverage"] = round(
+                results["forecast_hits"] / forecast_total, 3)
+            results["forecast_direction_hit_rate"] = round(
+                results["forecast_direction_hits"] / results["forecast_direction_n"], 3) \
+                if results["forecast_direction_n"] else 0.0
+            results["forecast_mean_width_pct"] = round(
+                results["forecast_width_sum"] / forecast_total, 2)
+        if results["forecast_brier_n"]:
+            results["forecast_brier"] = round(
+                results["forecast_brier_sum"] / results["forecast_brier_n"], 6)
+        results.pop("forecast_brier_sum", None)
+        results.pop("forecast_brier_n", None)
+        results.pop("forecast_width_sum", None)
         return results
+
+    @staticmethod
+    def _forecast_direction_hit(direction, move_pct: float):
+        if direction == "up":
+            return bool(move_pct >= 2.0)
+        if direction == "down":
+            return bool(move_pct <= -2.0)
+        if direction == "flat":
+            return bool(abs(move_pct) <= 3.0)
+        return None
+
+    def calibration_summary(self) -> dict:
+        """K-03 校准汇总（只读；供 review/distill/tools 使用）。"""
+        return build_calibration_summary(
+            self._read_jsonl(self.prediction_log_file),
+            self._read_jsonl(self.prediction_outcome_file),
+        )
 
     # ---- 知识蒸馏 (每周) ----
 
@@ -387,6 +875,10 @@ class Knowledge:
 
         memory_content = memory.load_memory_md()
         audit = self.audit_predictions(current_price)
+        try:
+            calibration = self.calibration_summary()
+        except Exception as exc:  # 审计只读，失败不阻断蒸馏
+            calibration = {"error": f"{type(exc).__name__}: {exc}"}
         drift_log = self._read_jsonl_tail(self.drift_log_file, 20)
 
         alpha_hist = memory.load_alpha_history()
@@ -399,6 +891,9 @@ class Knowledge:
             "",
             "## 预测审计",
             json.dumps(audit, ensure_ascii=False),
+            "",
+            "## 预测校准",
+            json.dumps(calibration, ensure_ascii=False),
             "",
             "## 漂移检测",
             json.dumps(drift_log[-5:], ensure_ascii=False),
@@ -416,7 +911,8 @@ class Knowledge:
 3. 列出 "常见误判模式" (如过早翻多, regime 变更滞后等)
 4. 给出 "当前周期特殊结构" (与历史周期的差异, 如 ETF 改变供需结构等)
 5. 建议 "Regime 变更阈值是否调整" (当前为 1.2)
-6. 更新 ## 知识库 (自动进化) 章节
+6. 根据「预测校准」归纳模型的过/欠置信区间与重跑离散问题
+7. 更新 ## 知识库 (自动进化) 章节
 
 格式: Markdown, 清晰简洁.
 

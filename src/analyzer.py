@@ -4,6 +4,7 @@ AI 分析器 (经统一 AIService 调用) — 输出 cycle_position + 证据评�
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -27,6 +28,9 @@ from src.cycle_context import format_cycle_context
 # evidence_scores 仅 5 个证据维度; 额外顶层字段容忍 (signal_board 等可选字段).
 _VALID_CYCLE_POSITIONS = tuple(REGIME_ALPHA_MAP)
 _EVIDENCE_CATEGORY_WHITELIST = tuple(EVIDENCE_CATEGORIES)
+_AUDIT_SOURCE_TYPES = ("retrieved", "remembered", "inferred")
+_FORECAST_DIRECTIONS = ("up", "down", "flat")
+_FORECAST_HORIZONS = (30, 90)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -193,6 +197,22 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 - unrecognized_topics: 推文中出现但不在指标库中的新术语
 - deprecated_terms: 早期推文常用但最近已不出现的术语
 
+## 可审计性 (K-03，必须遵守)
+
+- `signal_board` 每条必须带 `source_type`：
+  - `retrieved`：本轮推文 / 外链 / 知识库 / 均线 / 周期上下文中真实出现；必须带 `source`（tweet id 或 URL）
+  - `remembered`：模型自身知识，本轮材料没有直接支撑
+  - `inferred`：由材料推理得到
+- 每轮输出 `forecast`（周期级，不是短线）：
+  - `horizon_days`：30 或 90
+  - `direction`：`up` / `down` / `flat`
+  - `price_low` / `price_high`：该 horizon 的价格区间
+  - `confidence`：0~1，对方向的置信
+  - `hit_probability`：0~1，你估计价格落在区间内的概率
+  - `basis`：1~5 条依据，每条带来源类型
+- 区间要反映真实不确定性，禁止为了覆盖率给超宽区间；审计会同时看宽度、Brier 与 ECE。
+- 无法判断时 `forecast` 置 `null`，不要编造。
+
 ## 输出格式 (严格 JSON)
 {
   "date": "YYYY-MM-DD",
@@ -214,9 +234,19 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
       "name": "LTH行为",
       "signal": 0.4,
       "detail": "LTH恢复积累, Revived Supply高位回落",
-      "source": "tweet_id_xxx"
+      "source": "tweet_id_xxx",
+      "source_type": "retrieved"
     }
   ],
+  "forecast": {
+    "horizon_days": 30,
+    "direction": "up",
+    "price_low": 78000,
+    "price_high": 92000,
+    "confidence": 0.62,
+    "hit_probability": 0.70,
+    "basis": ["retrieved: tweet_id_xxx", "inferred: 均线结构"]
+  },
   "tweet_draft": "适合X发布的推文草稿 (≤277字符, 中文)",
   "position_narrative": "仓位策略叙述 (不公开, 仅内部参考) 如: 当前处于熊市深处, 底部信号浮现但未完整. 建议缓慢减少空仓, 等待熊底确认后翻多.",
   "risks": ["风险1"],
@@ -762,6 +792,7 @@ class Analyzer:
             result, retryable = self._call_api(user_msg, images=images)
             if result is not None:
                 if self._validate(result):
+                    result = self._normalize_audit_fields(result)
                     result = self._cross_check(result, user_msg, images=images)
                     return self._apply_structure_check(result, market_state)
                 print("[Analyzer] VALIDATION failed, treating as failure")
@@ -827,18 +858,105 @@ class Analyzer:
             return False
         return True
 
+    @staticmethod
+    def _sanitize_forecast(value):
+        """校验/归一 forecast；非法返回 None（可审计字段不阻断主分析）。"""
+        if not isinstance(value, dict):
+            return None
+        try:
+            horizon = int(value.get("horizon_days"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if horizon not in _FORECAST_HORIZONS:
+            return None
+        direction = str(value.get("direction") or "").strip().lower() or None
+        if direction not in _FORECAST_DIRECTIONS:
+            direction = None
+        try:
+            low = float(value.get("price_low"))
+            high = float(value.get("price_high"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not (math.isfinite(low) and math.isfinite(high)
+                and low > 0 and high > 0 and low <= high):
+            return None
+
+        def _probability(raw):
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(number):
+                return None
+            return round(min(1.0, max(0.0, number)), 4)
+
+        basis = value.get("basis")
+        if not isinstance(basis, list):
+            basis = []
+        basis = [str(item).strip()[:160] for item in basis[:5] if str(item).strip()]
+        return {
+            "horizon_days": horizon,
+            "direction": direction,
+            "price_low": round(low, 2),
+            "price_high": round(high, 2),
+            "confidence": _probability(value.get("confidence")),
+            "hit_probability": _probability(value.get("hit_probability")),
+            "basis": basis,
+        }
+
+    @staticmethod
+    def _normalize_audit_fields(result: dict) -> dict:
+        """归一 K-03 可审计字段：source_type + forecast；缺失/非法容忍。"""
+        if not isinstance(result, dict):
+            return result
+        out = dict(result)
+
+        counts = {key: 0 for key in _AUDIT_SOURCE_TYPES}
+        unknown = 0
+        retrieved_no_source = 0
+        board = out.get("signal_board")
+        if isinstance(board, list):
+            board = board[:5]
+            clean = []
+            for item in board:
+                if not isinstance(item, dict):
+                    continue
+                item = dict(item)
+                source_type = str(item.get("source_type") or "").strip().lower()
+                if source_type not in _AUDIT_SOURCE_TYPES:
+                    source_type = "unknown"
+                    unknown += 1
+                elif source_type == "retrieved" and not str(item.get("source") or "").strip():
+                    source_type = "unknown"
+                    unknown += 1
+                    retrieved_no_source += 1
+                else:
+                    counts[source_type] += 1
+                item["source_type"] = source_type
+                clean.append(item)
+            out["signal_board"] = clean[:5]
+        out["source_type_counts"] = dict(
+            counts, unknown=unknown, retrieved_no_source=retrieved_no_source)
+        out["forecast"] = Analyzer._sanitize_forecast(out.get("forecast"))
+        return out
+
     def _cross_check(self, first: dict, user_msg: str,
                      images: list[str] = None) -> dict:
-        """单次判断交叉验证: 同一 prompt 采样 samples 次, 比较 cycle_position.
+        """单次判断交叉验证: 同一 prompt 采样 samples 次, 记录离散度.
 
         首样本由调用方保证有效; 额外样本无效则忽略 (不重试, 控制成本);
-        全部一致 → 返回首样本; 不一致 → 复制并降级 cycle_confidence=low
-        (不新增/不改动其它字段, 走既有低置信门)。
+        位置一致 → 首样本 + cross_check 审计块；位置不一致 → 降级
+        cycle_confidence=low（走既有低置信门）；progress/方向离散只留痕，
+        不改变 live 置信。samples<=1 不新增 cross_check。
         """
         samples = self.cross_check_samples
         if samples <= 1:
             return first
+
         positions = [first.get("cycle_position")]
+        progresses = [self._as_float(first.get("regime_progress"))]
+        directions = [self._forecast_direction(first.get("forecast"))]
+
         for index in range(2, samples + 1):
             extra, retryable = self._call_api(user_msg, images=images)
             if extra is None:
@@ -849,19 +967,90 @@ class Analyzer:
                 print(f"[Analyzer] 交叉验证样本 {index}/{samples} 无效 "
                       f"(输出校验不通过), 忽略")
                 continue
+            extra = self._normalize_audit_fields(extra)
             positions.append(extra.get("cycle_position"))
+            progresses.append(self._as_float(extra.get("regime_progress")))
+            directions.append(self._forecast_direction(extra.get("forecast")))
+
         if len(positions) < 2:
             print("[Analyzer] 交叉验证: 有效样本不足 2 个, 按首样本返回")
             return first
-        if len(set(positions)) == 1:
-            print(f"[Analyzer] 交叉验证一致 ({len(positions)} 样本): "
-                  f"cp={positions[0]}")
-            return first
+
+        position_agreement = self._agreement(positions)
+        direction_values = [value for value in directions if value]
+        direction_agreement = self._agreement(direction_values) if direction_values else None
+        progress_std = self._std(progresses)
+        position_mismatch = len(set(positions)) > 1
+        dispersed = bool(
+            position_mismatch
+            or (direction_agreement is not None and direction_agreement < 1.0)
+            or progress_std > 0.1
+        )
+        cross_check = {
+            "samples": len(positions),
+            "positions": positions,
+            "position_agreement": position_agreement,
+            "progresses": progresses,
+            "progress_std": round(progress_std, 4),
+            "forecast_directions": directions,
+            "forecast_direction_agreement": (
+                None if direction_agreement is None else round(direction_agreement, 4)
+            ),
+            "dispersed": dispersed,
+        }
+
+        if not position_mismatch:
+            if dispersed:
+                print(f"[Analyzer] 交叉验证 progress/方向离散 ({len(positions)} 样本): "
+                      f"progress_std={progress_std:.3f} | "
+                      f"direction_agreement={direction_agreement} → 仅留痕，保留 confidence")
+            else:
+                print(f"[Analyzer] 交叉验证一致 ({len(positions)} 样本): "
+                      f"cp={positions[0]}")
+            result = dict(first)
+            result["cross_check"] = cross_check
+            return result
+
         print(f"[Analyzer] 交叉验证不一致: 样本 cp={positions} "
+              f"| agreement={position_agreement:.2f} | progress_std={progress_std:.3f} "
               f"→ 降级 cycle_confidence=low")
         degraded = dict(first)
         degraded["cycle_confidence"] = "low"
+        degraded["cross_check"] = cross_check
         return degraded
+
+    @staticmethod
+    def _as_float(value) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return number if number == number else 0.0
+
+    @staticmethod
+    def _agreement(values: list) -> float:
+        if not values:
+            return 0.0
+        counts = {}
+        for value in values:
+            key = str(value)
+            counts[key] = counts.get(key, 0) + 1
+        return round(max(counts.values()) / len(values), 4)
+
+    @staticmethod
+    def _std(values: list) -> float:
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        return variance ** 0.5
+
+    @staticmethod
+    def _forecast_direction(forecast):
+        if not isinstance(forecast, dict):
+            return None
+        value = str(forecast.get("direction") or "").strip().lower()
+        return value if value in _FORECAST_DIRECTIONS else None
 
     _STRUCTURE_ALPHA_TOLERANCE = 0.005
 

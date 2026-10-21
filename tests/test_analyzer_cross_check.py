@@ -105,8 +105,10 @@ def test_samples_two_inconsistent_degrades(capsys):
     assert "交叉验证不一致" in out
     assert "RECOVERY" in out and "BULL" in out
     assert analyzer.calls == 2
-    # 不新增/不改动其它输出字段
-    assert set(result) == set(_result())
+    # K-03: 归一后保留原字段，并新增审计字段（不再等于原始 set）
+    assert set(_result()) <= set(result)
+    assert result["cross_check"]["dispersed"] is True
+    assert result["cross_check"]["samples"] == 2
 
 
 def test_samples_three_inconsistent_degrades(capsys):
@@ -223,7 +225,9 @@ def test_structure_bull_increasing_exposure_degrades(capsys):
     assert result["cycle_confidence"] == "low"
     assert "结构一致性冲突" in out
     assert "SMA200" in out
-    assert set(result) == set(_result())
+    assert set(_result()) <= set(result)
+    # samples=1 完全保持旧交叉验证行为：不生成 cross_check
+    assert "cross_check" not in result
 
 
 def test_structure_bull_already_full_not_degraded(capsys):

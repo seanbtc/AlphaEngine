@@ -81,6 +81,7 @@ class ReviewEngine:
         regime_stats = self._analyze_regime_accuracy(prices)
         alpha_stats = self._analyze_alpha_performance(prices)
         calibration = self._suggest_calibration(regime_stats, alpha_stats)
+        prediction_calibration = self._prediction_calibration()
 
         review_result = {
             "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
@@ -90,6 +91,7 @@ class ReviewEngine:
             "regime_accuracy": regime_stats,
             "alpha_performance": alpha_stats,
             "calibration": calibration,
+            "prediction_calibration": prediction_calibration,
         }
 
         self._save_review(review_result)
@@ -294,6 +296,16 @@ class ReviewEngine:
     def _suggest_calibration(self, regime_stats: dict, alpha_stats: dict) -> dict:
         """使用 AI 评估所有参数并给出校准建议."""
         return self._ai_calibration(regime_stats, alpha_stats)
+
+    def _prediction_calibration(self) -> dict:
+        """K-03 预测校准汇总；旧 knowledge/stub 无该方法时返回空。"""
+        getter = getattr(self.knowledge, "calibration_summary", None)
+        if not callable(getter):
+            return {}
+        try:
+            return getter()
+        except Exception as exc:  # 只读审计失败不阻断复盘
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     def _ai_calibration(self, regime_stats: dict, alpha_stats: dict) -> dict:
         """调用 DeepSeek 分析复盘数据, 输出参数调整建议."""

@@ -1,4 +1,5 @@
 """月度复盘引擎 — should_review 补偿式触发 + apply_calibration 修复 (离线)。"""
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -186,3 +187,70 @@ def test_apply_calibration_other_branches_regression(tmp_path, capsys):
     assert len(applied) == 5
     out = capsys.readouterr().out
     assert "未知参数: unknown.param" in out
+
+
+def test_prediction_calibration_uses_knowledge_summary():
+    review = object.__new__(ReviewEngine)
+
+    class _Knowledge:
+        def calibration_summary(self):
+            return {"n_predictions": 3, "forecast": {"n": 1}}
+
+    review.knowledge = _Knowledge()
+    assert review._prediction_calibration()["n_predictions"] == 3
+
+
+def test_prediction_calibration_tolerates_missing_or_error():
+    review = object.__new__(ReviewEngine)
+    review.knowledge = object()
+    assert review._prediction_calibration() == {}
+
+    class _Broken:
+        def calibration_summary(self):
+            raise RuntimeError("boom")
+
+    review.knowledge = _Broken()
+    result = review._prediction_calibration()
+    assert "error" in result and "boom" in result["error"]
+
+
+def test_ai_calibration_prompt_excludes_prediction_calibration(tmp_path):
+    """B1：校准观测值不得进入自动参数校准 prompt（否则可能驱动自动 adjustments）。"""
+    import types
+
+    captured = {}
+
+    class _Client:
+        def chat(self, **kwargs):
+            captured["messages"] = kwargs.get("messages") or []
+            return {"ok": True, "json": {"adjustments": [], "warnings": [],
+                                         "analysis": "ok"}}
+
+    analyzer = types.SimpleNamespace(
+        enabled=True, endpoint="http://127.0.0.1:1", timeout=1, client=_Client())
+
+    class _Knowledge:
+        pass
+
+    knowledge = _Knowledge()
+    knowledge.analyzer = analyzer
+
+    def _calibration_summary():
+        return {"sentinel": "SHOULD_NOT_APPEAR", "forecast": {"coverage": 0.0}}
+
+    knowledge.calibration_summary = _calibration_summary
+
+    engine = types.SimpleNamespace(
+        expected_days={}, smoothing={}, evidence_cfg={}, conf_gate={}, alpha_map={})
+    review = object.__new__(ReviewEngine)
+    review.knowledge = knowledge
+    review.engine = engine
+    review.review_file = str(tmp_path / "missing_review.jsonl")
+    review.data_dir = str(tmp_path)
+
+    result = review._ai_calibration({}, {})
+
+    prompt_text = json.dumps(captured.get("messages") or [], ensure_ascii=False)
+    assert "SHOULD_NOT_APPEAR" not in prompt_text
+    assert "prediction_calibration" not in prompt_text
+    assert result["adjustments"] == []
