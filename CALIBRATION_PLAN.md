@@ -2,7 +2,8 @@
 
 - 建立：2026-10-21
 - 范围：AlphaEngine 预测审计校准（source_type / forecast / cross_check / calibration）
-- 分析节奏：**周二 / 周四 12:25 北京时间**（04:25 UTC）；首次部署后下一轮为 **2026-10-22 12:25 北京**
+- 分析节奏：**周二 / 周四 / 周六 12:25 北京时间**（04:25 UTC；以服务器 runtime config 为准，当前 `weekdays=[1,3,5]`；仓库基础配置仍为 `[1,3]`）
+- 首次部署后下一轮为 **2026-10-22 12:25 北京**（周四）
 - 数据：服务器 `/home/bot/AlphaEngine/data/`（prediction_log / prediction_outcomes / params / calibration_log）
 - 红线：只观察，不自动改参数；不因校准数据产生 `adjustments`（B1 已修复并有回归测试）
 
