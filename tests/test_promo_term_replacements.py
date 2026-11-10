@@ -195,9 +195,11 @@ class _RecordingDingTalk:
         self._inner = DingTalk({"enabled": False})
 
     def analysis(self, summary, cycle, conf, alpha, signals,
-                 post_no=None, engine_regime=None):
+                 post_no=None, engine_regime=None,
+                 regime_evidence=None, forecast=None):
         text = self._inner.analysis_text(
-            summary, cycle, conf, alpha, signals, post_no, engine_regime)
+            summary, cycle, conf, alpha, signals, post_no, engine_regime,
+            regime_evidence, forecast)
         self.analysis_texts.append(text)
         return text
 

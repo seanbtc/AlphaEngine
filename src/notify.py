@@ -23,6 +23,53 @@ _ENV_WEBHOOK_NAMES = ("ALPHAENGINE_DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK",
 _ENV_SECRET_NAMES = ("ALPHAENGINE_DINGTALK_SECRET", "DINGTALK_SECRET")
 _PLACEHOLDER_RE = re.compile(r"^\$\{[A-Za-z0-9_]+\}$")
 
+# signal_board 类目 → 对外中文标识 (未知类目保留原值, 不丢信息)
+_CATEGORY_LABELS = {
+    "profitability": "盈利",
+    "institutional": "机构",
+    "onchain": "链上",
+    "derivatives": "衍生品",
+    "macro": "宏观",
+}
+_DIRECTION_LABELS = {"up": "看涨", "down": "看跌", "flat": "震荡"}
+
+
+def _category_label(category) -> str:
+    raw = str(category or "").strip()
+    return _CATEGORY_LABELS.get(raw.lower(), raw)
+
+
+def _format_forecast(forecast) -> str:
+    """渲染周期级预测行; 字段缺失/非法时返回空串 (不编造)。"""
+    if not isinstance(forecast, dict):
+        return ""
+    try:
+        low = float(forecast.get("price_low"))
+        high = float(forecast.get("price_high"))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not (low > 0 and high > 0 and low <= high):
+        return ""
+    parts = []
+    try:
+        horizon = int(forecast.get("horizon_days"))
+    except (TypeError, ValueError, OverflowError):
+        horizon = None
+    direction = _DIRECTION_LABELS.get(
+        str(forecast.get("direction") or "").strip().lower(), "")
+    if horizon and direction:
+        parts.append(f"{horizon}天{direction}")
+    elif direction:
+        parts.append(direction)
+    parts.append(f"区间 ${low:,.0f}-${high:,.0f}")
+    try:
+        confidence = float(forecast.get("confidence"))
+    except (TypeError, ValueError, OverflowError):
+        confidence = None
+    if confidence is not None and 0.0 <= confidence <= 1.0:
+        parts.append(f"置信 {confidence * 100:.0f}%")
+    return "预测: " + " | ".join(parts)
+
 
 def mask_webhook(webhook) -> str:
     """返回 webhook 中 access_token 的掩码串 (仅保留末 6 位; 规则同 Sentinel).
@@ -127,24 +174,23 @@ class DingTalk:
         )
 
     def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list,
-                 post_no: int = None, engine_regime: str = None) -> str:
+                 post_no: int = None, engine_regime: str = None,
+                 regime_evidence: str = None, forecast: dict = None) -> str:
         """发送分析通知。返回构建的帖子文本 (供 Promo 桥接复用)."""
-        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no, engine_regime)
+        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no,
+                                  engine_regime, regime_evidence, forecast)
         self.send(text)
         return text
 
     def analysis_text(self, summary: str, cycle: str, conf: str, alpha: float,
-                      signals: list, post_no: int = None, engine_regime: str = None) -> str:
+                      signals: list, post_no: int = None, engine_regime: str = None,
+                      regime_evidence: str = None, forecast: dict = None) -> str:
         """构建分析帖子文本 — 无图标/无 markdown 加粗, 适合直接发布.
 
-        cycle 为 AI 判定的周期位置; engine_regime 为引擎当前确认的周期.
-        两者不一致时并列显示 (AI判定 vs 引擎状态), 避免误导.
+        对外文本不再展示周期/置信标签 (cycle/conf/engine_regime 仅为兼容旧调用
+        保留, 不参与渲染); 末尾追加「评估总结」(AI regime_evidence) 与「预测」。
         """
-        if engine_regime and engine_regime != cycle:
-            header = (f"周期判定: {cycle} (置信: {conf}) | 引擎: {engine_regime} | "
-                      f"Alpha: {alpha:+.4f}")
-        else:
-            header = f"周期: {cycle} (置信: {conf}) | Alpha: {alpha:+.4f}"
+        header = f"Alpha: {alpha:+.4f}"
         if post_no is not None:
             header = f"No.{post_no} | {header}"
         lines = [header + "\n"]
@@ -154,10 +200,16 @@ class DingTalk:
             lines.append("\n关键信号:")
             for i, s in enumerate(signals[:5], 1):
                 name = s.get('name', '?')
-                cat = s.get('category', '')
+                cat = _category_label(s.get('category', ''))
                 detail = s.get('detail', '')
                 prefix = f"{i}. [{cat}] {name}" if cat else f"{i}. {name}"
                 lines.append(f"{prefix}: {detail}")
+        evidence = str(regime_evidence or "").strip()
+        if evidence:
+            lines.append(f"\n评估总结: {evidence}")
+        forecast_line = _format_forecast(forecast)
+        if forecast_line:
+            lines.append(forecast_line)
         return "\n".join(lines)
 
     def alert(self, title: str, body: str = ""):

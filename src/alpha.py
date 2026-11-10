@@ -734,6 +734,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             "signal_board": analysis.get("signal_board", []),
             "risks": analysis.get("risks", []),
             "meta": meta,
+            "forecast": analysis.get("forecast"),
         })
 
         sm.update_runtime()
@@ -797,6 +798,8 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         rc.get("signal_board", []),
         post_no=post_no,
         engine_regime=final_regime,
+        regime_evidence=rc.get("regime_evidence", ""),
+        forecast=rc.get("forecast"),
     )
     sm.set("runtime.post_count", post_no)
     _write_promo_post(cfg, post_text, post_no, final_regime, target)
@@ -1000,7 +1003,9 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     post_text = dingtalk.analysis(
         last_analysis.get("summary", ""), cp, conf, target,
         last_analysis.get("signal_board", []), post_no=post_no,
-        engine_regime=engine.get_regime())
+        engine_regime=engine.get_regime(),
+        regime_evidence=last_analysis.get("regime_evidence", ""),
+        forecast=last_analysis.get("forecast"))
     sm.set("runtime.post_count", post_no)
     _write_promo_post(cfg, post_text, post_no, cp, target)
 
@@ -1688,6 +1693,8 @@ def run_cycle(components: dict) -> bool:
             analysis.get("signal_board", []),
             post_no=post_no,
             engine_regime=engine.get_regime(),
+            regime_evidence=analysis.get("regime_evidence", ""),
+            forecast=analysis.get("forecast"),
         )
         sm.set("runtime.post_count", post_no)
         _write_promo_post(cfg, post_text, post_no,
