@@ -71,6 +71,24 @@ def validate_knowledge_text(content: str) -> tuple[bool, str]:
     return True, ""
 
 
+# memory 压缩结果最小结构: 空/过短/无 Markdown 结构 → 拒绝覆盖旧 memory。
+_MEMORY_MIN_CHARS = 50
+
+
+def validate_memory_summary(content: str) -> tuple[bool, str]:
+    """校验 memory 压缩输出: 拦截 reasoning 回退文本/截断残片覆盖 memory.md。"""
+    text = (content or "").strip()
+    if not text:
+        return False, "empty"
+    if len(text) < _MEMORY_MIN_CHARS:
+        return False, f"too short ({len(text)} chars)"
+    structured = any(line.lstrip().startswith(("#", "-", "*"))
+                     for line in text.splitlines())
+    if not structured:
+        return False, "no markdown structure"
+    return True, ""
+
+
 def build_calibration_summary(predictions: list, outcomes: list) -> dict:
     """K-03 预测校准汇总：point 命中 / 区间覆盖 / Brier / ECE / 分桶 / 重跑离散。
 
@@ -969,7 +987,7 @@ class Knowledge:
 2. 归纳出 "最可靠的 Bear/Bottom 判定信号" (历史准确率排序)
 3. 列出 "常见误判模式" (如过早翻多, regime 变更滞后等)
 4. 给出 "当前周期特殊结构" (与历史周期的差异, 如 ETF 改变供需结构等)
-5. 建议 "Regime 变更阈值是否调整" (当前为 1.2)
+5. 建议 "Regime 变更阈值是否调整" (以引擎运行时参数 data/params.json 覆盖为准)
 6. 根据「预测校准」归纳模型的过/欠置信区间与重跑离散问题
 7. 更新 ## 知识库 (自动进化) 章节
 
@@ -1038,13 +1056,19 @@ class Knowledge:
         compress_prompt = f"""压缩以下分析历史为关键转折点摘要。
 保留: regime 变更时刻、alpha 方向性变化、关键信号出现/消失、错误判断修正。
 丢弃: 重复的日常更新、无变化的分析。
-输出: 简洁 Markdown, 按时间倒序, 每条 1-2 行。
+输出: 简洁 Markdown (必须包含 ## 标题与 - 列表), 按时间倒序, 每条 1-2 行。
 
 {existing[-5000:] if len(existing) > 5000 else existing}
 """
 
         print(f"[API-CALL][compress] POST {self.analyzer.endpoint} purpose=knowledge "
               f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
+        try:
+            max_tokens = int(self.distill_cfg.get("memory_compress_max_tokens")
+                             or self.distill_cfg.get("max_tokens") or 4096)
+        except (TypeError, ValueError):
+            max_tokens = 4096
+        max_tokens = max(512, min(16384, max_tokens))
         response = self.analyzer.client.chat(
             messages=[
                 {"role": "system", "content": "你是文本压缩引擎, 输出简洁 Markdown."},
@@ -1053,7 +1077,7 @@ class Knowledge:
             purpose="knowledge",
             project="AlphaEngine",
             temperature=0.1,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             json_mode=False,
             timeout_seconds=self.analyzer.timeout,
         )
@@ -1061,6 +1085,19 @@ class Knowledge:
             print(f"[Knowledge] Compress AI服务调用失败: {response.get('error')}")
             return False
         compressed = response.get("content") or ""
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        completion_tokens = usage.get("completion_tokens")
+        # 与 distill 同源风险: reasoning 吃满预算 → 回退 reasoning_content 污染 memory
+        if isinstance(completion_tokens, (int, float)) and completion_tokens >= max_tokens:
+            print(f"[Knowledge] Compress 输出疑似被截断 "
+                  f"(completion_tokens={completion_tokens} >= max_tokens={max_tokens}), "
+                  f"保留旧 memory")
+            return False
+        ok, reason = validate_memory_summary(compressed)
+        if not ok:
+            print(f"[Knowledge] Compress 输出无效, 保留旧 memory ({reason}; "
+                  f"{len(compressed)} chars)")
+            return False
 
         if compressed:
             ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M UTC")

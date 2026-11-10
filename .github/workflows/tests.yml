@@ -34,6 +34,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
           pip install -r requirements.txt
+          # 仅测试需要 (tests/test_ma_context.py 用 pandas 对照 EMA/SMA 数值)
+          pip install pandas
 
       - name: Run tests
         run: python -m pytest tests -q

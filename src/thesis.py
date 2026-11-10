@@ -279,7 +279,8 @@ def evaluate_thesis(thesis: dict, market_state: dict, now: datetime = None) -> d
     out = dict(thesis)
     if out.get("status") in TERMINAL_STATUSES:
         return out
-    conditions = out.get("conditions") or []
+    conditions = out.get("conditions")
+    conditions = conditions if isinstance(conditions, list) else []
     metrics = extract_metrics(market_state)
     evaluations = []
     met = unmet = unknown = 0
@@ -342,6 +343,9 @@ def evaluate_thesis(thesis: dict, market_state: dict, now: datetime = None) -> d
             out["expired_at"] = _iso(now)
         elif unmet > 0:
             out["status"] = "weakened"
+        elif unknown > 0 and out.get("status") == "weakened":
+            # 数据缺失不能把"已转弱"洗白成 active (Phase 1 观测信号必须诚实)
+            out["status"] = "weakened"
         else:
             out["status"] = "active"
     return out
@@ -353,18 +357,30 @@ def format_thesis_for_prompt(thesis: dict, max_chars: int = 700) -> str:
         return ""
     lines = [f"## 当前命题 ({thesis.get('thesis_id')})",
              f"- 状态: {thesis.get('status', '?')} | 宣称: {thesis.get('claim', '')}"]
-    evaluations = thesis.get("evaluations") or []
+    evaluations = thesis.get("evaluations")
+    evaluations = evaluations if isinstance(evaluations, list) else []
+    conditions = thesis.get("conditions")
+    conditions = conditions if isinstance(conditions, list) else []
     if evaluations:
         for item in evaluations[:5]:
+            if not isinstance(item, dict):
+                continue
             actual = item.get("actual")
-            actual_text = f"{actual:.4g}" if isinstance(actual, (int, float)) else "缺失"
+            if isinstance(actual, (int, float)):
+                actual_text = f"{actual:.4g}"
+            elif actual is None:
+                actual_text = "缺失"
+            else:
+                actual_text = str(actual)
             lines.append(
                 f"- {item.get('id')} {item.get('metric')} {item.get('op')} "
                 f"{item.get('value')} (实际 {actual_text}) → {item.get('status')}"
                 + (f" | {item.get('reason')}" if item.get("status") != "met" else "")
             )
-    elif thesis.get("conditions"):
-        for cond in thesis["conditions"][:5]:
+    elif conditions:
+        for cond in conditions[:5]:
+            if not isinstance(cond, dict):
+                continue
             lines.append(f"- {cond.get('id')} {cond.get('metric')} {cond.get('op')} "
                          f"{cond.get('value')} (deadline {cond.get('deadline')})")
     text = "\n".join(lines) + "\n"

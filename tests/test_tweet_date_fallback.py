@@ -14,7 +14,7 @@ from src.analyzer import Analyzer
 from src.fetcher import Fetcher
 
 
-def test_normalize_dates_fills_missing_and_keeps_existing():
+def test_normalize_dates_fills_fetched_at_and_keeps_date_empty():
     tweets = [
         {"id": "1", "date": "", "content": "a"},
         {"id": "2", "date": None, "content": "b"},
@@ -22,8 +22,9 @@ def test_normalize_dates_fills_missing_and_keeps_existing():
     ]
     Fetcher._normalize_dates(tweets, fetched_at="2026-11-10T04:00:00Z")
 
-    assert tweets[0]["date"] == "2026-11-10T04:00:00Z"
-    assert tweets[1]["date"] == "2026-11-10T04:00:00Z"
+    # 不把抓取时间冒充发布时间; 仅补 fetched_at
+    assert tweets[0]["date"] == ""
+    assert tweets[1]["date"] is None
     assert tweets[2]["date"] == "2026-09-26T12:00:00Z"
     assert all(t["fetched_at"] == "2026-11-10T04:00:00Z" for t in tweets)
 
@@ -48,14 +49,14 @@ class _FetcherStub(Fetcher):
         return tweets
 
 
-def test_fetch_persists_non_empty_date(tmp_path):
+def test_fetch_persists_fetched_at_and_empty_date(tmp_path):
     fetcher = _FetcherStub(tmp_path)
     new_tweets = fetcher.fetch()
 
-    assert new_tweets[0]["date"], "date 不应为空"
     row = json.loads((tmp_path / "tweets.jsonl").read_text(encoding="utf-8").strip())
-    assert row["date"] == row["fetched_at"]
-    assert row["date"]
+    assert row["fetched_at"]
+    assert not row.get("date")  # 空 date 不伪造
+    assert new_tweets[0]["fetched_at"] == row["fetched_at"]
 
 
 def _analyzer():
@@ -74,5 +75,6 @@ def test_format_tweets_falls_back_to_fetched_at():
         {"id": "2", "content": "no date at all"},
     ])
 
-    assert "[2026-11-10T04:00]" in text
+    # 抓取时间明确标注, 不冒充发布时间
+    assert "[2026-11-10T04:00 抓取]" in text
     assert "[?]" in text

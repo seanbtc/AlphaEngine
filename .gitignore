@@ -22,3 +22,5 @@ data/*.bak
 
 # 运行日志（2026-10-18 R3 退跟踪；nohup 输出）
 engine.log
+data/run_manifest.jsonl
+data/theses.jsonl

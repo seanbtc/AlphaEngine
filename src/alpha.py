@@ -252,6 +252,8 @@ def init_components(cfg: dict):
     )
     ai_cfg = dict(cfg.get("ai_service") or cfg.get("deepseek") or {})
     ai_cfg["cross_check"] = (cfg.get("alpha") or {}).get("cross_check") or {}
+    # Phase 1 门控: thesis=false 时 prompt/输出契约回到旧版 (config 注释"关闭即回退")
+    ai_cfg["thesis_enabled"] = _feature_enabled(cfg, "thesis")
     analyzer = Analyzer(ai_cfg)
     engine = AlphaEngine(cfg.get("alpha", {}), state_mgr)
     evidence = EvidenceAccumulator(
@@ -525,13 +527,13 @@ def _adopt_analysis_thesis(components: dict, raw_thesis, market_state: dict):
         return None
 
 
-def _build_scorecard_text(components: dict, btc_price, thesis) -> str:
+def _build_scorecard_text(components: dict, btc_price) -> str:
     if not _feature_enabled(components.get("cfg") or {}, "scorecard"):
         return ""
     try:
         return build_scorecard(
             components.get("knowledge"), components.get("memory"),
-            components.get("engine"), btc_price, thesis=thesis)
+            components.get("engine"), btc_price)
     except Exception as exc:
         print(f"[Scorecard] 构建失败 (不影响主流程): {exc}")
         return ""
@@ -542,15 +544,23 @@ def _update_risk_v2(components: dict, market_state: dict):
     cfg = components.get("cfg") or {}
     if not _feature_enabled(cfg, "risk_v2"):
         return None
-    risk_cfg = (cfg.get("alpha") or {}).get("risk_v2") or {}
     sm = components["state"]
     price_history = None
+    try:
+        risk_cfg = (cfg.get("alpha") or {}).get("risk_v2") or {}
+        if not isinstance(risk_cfg, dict):
+            risk_cfg = {}
+    except Exception:
+        risk_cfg = {}
+    # 历史价格只用于回撤兜底; 读取失败不得连带丢弃 risk_v2 配置 (否则 offline
+    # 回放会把 enforce/caps 误记成默认值, 污染 Phase 2 证据链)。
     try:
         knowledge = components.get("knowledge")
         if knowledge is not None:
             price_history = knowledge._price_history()
-    except Exception:
+    except Exception as exc:
         price_history = None
+        print(f"[RiskV2] 价格历史读取失败 (回撤兜底不可用): {exc}")
     try:
         previous = sm.get("risk_v2.state") or {}
         risk_state = evaluate_risk(market_state, previous, risk_cfg,
@@ -1203,6 +1213,7 @@ def run_cycle(components: dict) -> bool:
     knowledge_chars = 0
     thesis_current = None
     risk_current = None
+    evaluated_this_cycle = False
     idle_reason = "no_new_tweets"
 
     print_status(c)
@@ -1307,7 +1318,8 @@ def run_cycle(components: dict) -> bool:
         risk_current = _update_risk_v2(c, market_state)
         # Phase 1: 先评估当前命题, 再把成绩单+命题注入本轮 prompt (只读, 不改仓位)
         thesis_current = _refresh_current_thesis(c, market_state)
-        scorecard_text = _build_scorecard_text(c, btc_price, thesis_current)
+        evaluated_this_cycle = True
+        scorecard_text = _build_scorecard_text(c, btc_price)
         knowledge_chars = len(kb)
         if scorecard_text:
             market_state["scorecard"] = scorecard_text
@@ -1489,12 +1501,17 @@ def run_cycle(components: dict) -> bool:
         except Exception as exc:
             print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
-        # Phase 1: 空闲轮也评估命题 (无新推文也能发现失效), 只记录不调仓位
-        thesis_current = _refresh_current_thesis(c, idle_market_state)
+        # Phase 1: 空闲轮也评估命题 (无新推文也能发现失效), 只记录不调仓位。
+        # all_filtered 轮在分析块已评估过 → 跳过, 避免同一轮双评估
+        # (否则 release_counter 双倍推进, dry-run 证据失真)。
+        if not evaluated_this_cycle:
+            thesis_current = _refresh_current_thesis(c, idle_market_state)
+            evaluated_this_cycle = True
         if idle_market_state is not None and thesis_current:
             idle_market_state["thesis"] = thesis_current
         # Phase 2: 空闲轮同样执行硬风控 dry-run (AI 故障日也不能缺风险检查)
-        risk_current = _update_risk_v2(c, idle_market_state)
+        if risk_current is None:
+            risk_current = _update_risk_v2(c, idle_market_state)
 
         if fetch_error:
             # 数据源故障: 视为数据缺失, 本轮不推进周期钟 (alpha/progress/cooldown/
@@ -1573,6 +1590,7 @@ def run_cycle(components: dict) -> bool:
             regime_before=regime_cycle_start,
             btc_price=btc_price, thesis=thesis_current,
             risk_v2=_risk_manifest(risk_current),
+            order_reason="idle_tick",
             fetched_ok=fetched_ok,
             error=fetch_detail or None)
         return False
@@ -1727,7 +1745,7 @@ def run_cycle(components: dict) -> bool:
 
     _write_manifest(
         c, cycle_id=cycle_id,
-        mode=("analysis" if has_analysis else "analysis_filtered"),
+        mode="analysis",
         alpha_before=alpha_cycle_start,
         progress_before=progress_cycle_start,
         regime_before=regime_cycle_start,
@@ -1736,6 +1754,7 @@ def run_cycle(components: dict) -> bool:
         label=(analysis or {}).get("cycle_position"),
         confidence=(analysis or {}).get("cycle_confidence"),
         regime_change=regime_changed_this_cycle,
+        order_reason=order_reason,
         tweets=len(new_tweets),
         tweet_ids=[str(t.get("id", "")) for t in new_tweets[-20:]] or None,
         knowledge_chars=knowledge_chars or None,

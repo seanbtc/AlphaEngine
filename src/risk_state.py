@@ -7,7 +7,7 @@
 - Phase 2 只观察 (mode=dry_run): 计算并写入 state.risk_v2 + manifest,
   不改变 alpha; enforce 待 dry-run 回放验证后另行开启。
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_EXPOSURE_CAP = {
     "offensive": 0.80,
@@ -52,7 +52,13 @@ def extract_inputs(market_state: dict, price_history=None) -> dict:
     top_risk = top_risk if isinstance(top_risk, dict) else {}
     drawdown = _as_float(top_risk.get("drawdown_from_90d_high_pct"))
     if drawdown is None and close is not None and price_history:
-        window = [price for _, price in price_history[-90:]]
+        # 与 scorecard 同口径: 优先按时间窗 (90 天) 截断; 历史稀疏/无时间戳时
+        # 才退回最近 90 条 (3 次/周时 90 条≈7 个月, 直接取 max 会误判深回撤)。
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=90)
+        window = [price for ts, price in price_history
+                  if isinstance(ts, datetime) and ts >= cutoff]
+        if not window:
+            window = [price for _, price in price_history[-90:]]
         if window:
             peak = max(window)
             if peak:
@@ -121,15 +127,22 @@ def evaluate_risk(market_state: dict, previous: dict = None, cfg: dict = None,
     ratchet = False
     cap = mapped_cap
     release_ok = False
-    if not _has_evidence(inputs):
-        # 数据缺失 fail-open: 不因"没数据"改变仓位上限 (保护不被静默撤销)
+    if not _has_evidence(inputs) or (posture in ("offensive", "neutral") and not data_ok):
+        # 数据缺失 fail-open: 不因"没数据"改变仓位上限 (保护不被静默撤销)。
+        # 仅回撤/top_risk 触发 defensive/flat 时仍允许降仓 (硬风险证据充分)。
         if prev_cap is not None:
             cap = prev_cap
             ratchet = True
+            release_counter = 0  # 释放确认必须连续: 无证据轮重置计数
             reasons.append(f"数据不足, fail-open 保持旧 cap {prev_cap:.2f}")
         else:
             cap = None
             reasons.append("数据不足, 无旧 cap 可用 (不施加限制)")
+    elif mapped_cap is None and prev_cap is not None:
+        # 配置缺该姿态的映射 (异常配置): 保持旧 cap, 不静默撤销限制
+        cap = prev_cap
+        ratchet = True
+        reasons.append(f"无姿态映射, 保持旧 cap {prev_cap:.2f}")
     elif mapped_cap is not None and prev_cap is not None:
         if mapped_cap >= prev_cap:
             # 结构改善: 默认保持旧 cap (棘轮), 满足释放条件才允许上调

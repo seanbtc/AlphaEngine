@@ -133,6 +133,34 @@ def test_evaluate_thesis_unknown_does_not_invalidate():
     assert evaluated["status"] == "active"
 
 
+def test_evaluate_thesis_unknown_does_not_upgrade_weakened():
+    """数据缺失不能把已转弱的命题洗白成 active (Phase 1 观测口径)。"""
+    thesis = normalize_thesis(_raw())
+    thesis["status"] = "weakened"
+    evaluated = evaluate_thesis(thesis, {})
+
+    assert evaluated["unknown_count"] == 2
+    assert evaluated["unmet_count"] == 0
+    assert evaluated["status"] == "weakened"
+
+
+def test_format_thesis_tolerates_malformed_fields():
+    # 旧/损坏 state 中 evaluations/conditions 非 list 时不得抛异常
+    text = format_thesis_for_prompt({
+        "thesis_id": "T-bad", "status": "active", "claim": "x",
+        "evaluations": "oops", "conditions": "oops",
+    })
+    assert "T-bad" in text
+
+    # 非数值 actual (斜率) 应原样渲染, 不显示为"缺失"
+    text = format_thesis_for_prompt({
+        "thesis_id": "T-slope", "status": "active", "claim": "x",
+        "evaluations": [{"id": "c1", "metric": "sma200_slope", "op": "==",
+                         "value": "up", "actual": "up", "status": "met"}],
+    })
+    assert "(实际 up)" in text
+
+
 def test_evaluate_thesis_expires_after_max_deadline():
     raw = _raw()
     past = (_now() - timedelta(days=1)).date().isoformat()
@@ -190,14 +218,15 @@ def test_build_scorecard_includes_result_streak_and_thesis(tmp_path):
         "alpha": 0.9, "btc_price": 90000, "regime": "RECOVERY"}])
     thesis = evaluate_thesis(normalize_thesis(_raw()), _market(price=74000))
 
-    text = build_scorecard(knowledge, memory, _FakeEngine(0.7), 80000, thesis=thesis)
+    text = build_scorecard(knowledge, memory, _FakeEngine(0.7), 80000)
 
     assert "你的近期成绩" in text
     assert "命中率 33.3%" in text
     assert "连续方向错 2 条" in text
     assert "当前回撤 -20.0%" in text
     assert "α=+0.900" in text and "α=+0.700" in text
-    assert "当前命题" in text
+    # 命题由 format_thesis_for_prompt 单独注入, 成绩单不重复渲染
+    assert "当前命题" not in text
     assert len(text) <= 900  # max_chars + 截断标记余量
 
 
@@ -234,3 +263,19 @@ def test_analyzer_normalizes_thesis_field():
 
     assert result["thesis"]["thesis_id"].startswith("T-")
     assert Analyzer._normalize_audit_fields({"thesis": {"claim": "x"}})["thesis"] is None
+
+
+def test_analyzer_thesis_disabled_reverts_prompt_and_field():
+    from src.analyzer import PROMPT_HASH
+
+    analyzer = Analyzer({"thesis_enabled": False})
+    assert "可证伪命题" not in analyzer.system_prompt
+    assert "## 输出格式 (严格 JSON)" in analyzer.system_prompt
+    assert analyzer.prompt_hash != PROMPT_HASH
+
+    result = Analyzer._normalize_audit_fields({"thesis": _raw()}, thesis_enabled=False)
+    assert "thesis" not in result
+
+    enabled = Analyzer({})
+    assert "可证伪命题" in enabled.system_prompt
+    assert enabled.prompt_hash == PROMPT_HASH

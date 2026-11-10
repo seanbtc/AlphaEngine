@@ -362,3 +362,71 @@ def test_rejection_reasons_keep_progress(tmp_path, capsys, cooldown, conf,
     assert "保留旧值" in out
     assert components["engine"].get_regime() == "RECOVERY"
     assert sm.get("alpha.regime_progress") == pytest.approx(0.40)
+
+
+# ---- Phase 1/2 接线: 每轮只评估一次 (B2 回归) ----
+
+def test_all_filtered_cycle_evaluates_thesis_and_risk_once(tmp_path, monkeypatch):
+    """all_filtered 轮: 分析块已评估 → 空闲块不得重复评估 (release 计数不双倍推进)。"""
+    from src import alpha as alpha_module
+
+    calls = {"thesis": 0, "risk": 0}
+
+    def fake_thesis(components, market_state):
+        calls["thesis"] += 1
+        return {"thesis_id": "T-x", "status": "active", "conditions": []}
+
+    def fake_risk(components, market_state):
+        calls["risk"] += 1
+        return {"mode": "dry_run", "posture": "neutral", "cap": 0.5}
+
+    monkeypatch.setattr(alpha_module, "_refresh_current_thesis", fake_thesis)
+    monkeypatch.setattr(alpha_module, "_update_risk_v2", fake_risk)
+
+    class _AllFilteredAnalyzer(_FakeAnalyzer):
+        last_sent_tweet_ids = []
+        last_filtered_tweet_ids = ["9"]
+
+        def analyze(self, tweets, memory_context, knowledge_base="",
+                    retries=1, market_state=None):
+            return None
+
+    components = _build_components(tmp_path, analysis={})
+    components["analyzer"] = _AllFilteredAnalyzer({})
+    components["cfg"]["features"] = {"thesis": True, "scorecard": True,
+                                     "manifest": True, "risk_v2": True}
+
+    run_cycle(components)
+
+    assert calls == {"thesis": 1, "risk": 1}
+
+
+def test_idle_cycle_evaluates_thesis_and_risk_once(tmp_path, monkeypatch):
+    """无新推文轮: 空闲块评估各 1 次。"""
+    from src import alpha as alpha_module
+
+    calls = {"thesis": 0, "risk": 0}
+
+    def fake_thesis(components, market_state):
+        calls["thesis"] += 1
+        return None
+
+    def fake_risk(components, market_state):
+        calls["risk"] += 1
+        return {"mode": "dry_run", "posture": "neutral", "cap": 0.5}
+
+    monkeypatch.setattr(alpha_module, "_refresh_current_thesis", fake_thesis)
+    monkeypatch.setattr(alpha_module, "_update_risk_v2", fake_risk)
+
+    class _EmptyFetcher:
+        def fetch(self):
+            return []
+
+    components = _build_components(tmp_path, analysis={})
+    components["fetcher"] = _EmptyFetcher()
+    components["cfg"]["features"] = {"thesis": True, "scorecard": True,
+                                     "manifest": True, "risk_v2": True}
+
+    run_cycle(components)
+
+    assert calls == {"thesis": 1, "risk": 1}

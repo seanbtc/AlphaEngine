@@ -133,18 +133,24 @@ def _knowledge(tmp_path, analyzer, threshold=50):
                      str(tmp_path), analyzer)
 
 
+_VALID_COMPRESSED = (
+    "## 近期变化\n- BTC 站上 200SMA, ETF 净流入转正\n"
+    "- 长期持有者供给继续下降, 顶部风险未确认\n"
+    "## 结论\n- 维持 RECOVERY 判断, 关注 250SMA 斜率")
+
+
 def test_compress_memory_backs_up_original(tmp_path):
     memory = Memory(str(tmp_path))
     original = "A" * 200
     memory.save_memory_md(original)
-    analyzer = _StubAnalyzer({"ok": True, "content": "compressed summary"})
+    analyzer = _StubAnalyzer({"ok": True, "content": _VALID_COMPRESSED})
 
     assert _knowledge(tmp_path, analyzer).compress_memory(memory) is True
 
     assert (tmp_path / "memory.md.bak").read_text(encoding="utf-8") == original
     content = memory.load_memory_md()
     assert content.startswith("# Glassnode Alpha Engine Memory")
-    assert "compressed summary" in content
+    assert "维持 RECOVERY 判断" in content
     assert not (tmp_path / "memory.md.tmp").exists()
     assert not (tmp_path / "memory.md.bak.tmp").exists()
 
@@ -174,11 +180,42 @@ def test_compress_memory_backup_overwrites_previous(tmp_path):
     memory = Memory(str(tmp_path))
     (tmp_path / "memory.md.bak").write_text("stale backup", encoding="utf-8")
     memory.save_memory_md("C" * 200)
-    analyzer = _StubAnalyzer({"ok": True, "content": "compressed"})
+    analyzer = _StubAnalyzer({"ok": True, "content": _VALID_COMPRESSED})
 
     assert _knowledge(tmp_path, analyzer).compress_memory(memory) is True
 
     assert (tmp_path / "memory.md.bak").read_text(encoding="utf-8") == "C" * 200
+
+
+def test_compress_memory_rejects_plain_reasoning_text(tmp_path):
+    """reasoning 回退文本 (无 Markdown 结构) 不得覆盖旧 memory。"""
+    memory = Memory(str(tmp_path))
+    original = "D" * 200
+    memory.save_memory_md(original)
+    analyzer = _StubAnalyzer({
+        "ok": True,
+        "content": "我们需要生成知识库内容。需要基于历史数据归纳最可靠信号。",
+    })
+
+    assert _knowledge(tmp_path, analyzer).compress_memory(memory) is False
+
+    assert memory.load_memory_md() == original
+    assert not (tmp_path / "memory.md.bak").exists()
+
+
+def test_compress_memory_rejects_truncated_output(tmp_path):
+    """completion_tokens 吃满 max_tokens → 输出疑似截断, 保留旧 memory。"""
+    memory = Memory(str(tmp_path))
+    original = "E" * 200
+    memory.save_memory_md(original)
+    analyzer = _StubAnalyzer({
+        "ok": True, "content": _VALID_COMPRESSED,
+        "usage": {"completion_tokens": 4096},
+    })
+
+    assert _knowledge(tmp_path, analyzer).compress_memory(memory) is False
+
+    assert memory.load_memory_md() == original
 
 
 # ---- knowledge_base.md 蒸馏备份 ----

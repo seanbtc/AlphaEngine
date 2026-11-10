@@ -95,8 +95,7 @@ def _alpha_trajectory(memory, engine, btc_price):
 
 
 def build_scorecard(knowledge, memory=None, engine=None, btc_price=None,
-                    thesis: dict = None, limit: int = 8,
-                    max_chars: int = 800) -> str:
+                    limit: int = 8, max_chars: int = 800) -> str:
     """构建成绩单文本; 无可用数据返回空串。"""
     if knowledge is None:
         return ""
@@ -155,20 +154,6 @@ def build_scorecard(knowledge, memory=None, engine=None, btc_price=None,
             if btc_change is not None:
                 text += f" | 同期 BTC {btc_change:+.1f}%"
             lines.append(text)
-
-    if isinstance(thesis, dict) and thesis.get("thesis_id"):
-        lines.append("## 当前命题")
-        total = len(thesis.get("conditions") or [])
-        lines.append(
-            f"{thesis.get('thesis_id')}: {thesis.get('status', '?')}, "
-            f"{thesis.get('conditions_met', 0)}/{total} 满足"
-        )
-        for item in (thesis.get("evaluations") or [])[:3]:
-            if item.get("status") == "met":
-                continue
-            lines.append(f"- {item.get('id')} {item.get('metric')} "
-                         f"{item.get('op')} {item.get('value')}: "
-                         f"{item.get('reason') or item.get('status')}")
 
     if not lines:
         return ""

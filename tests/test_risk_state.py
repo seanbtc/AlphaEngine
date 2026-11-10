@@ -3,6 +3,7 @@
 Phase 2 约束: 只计算并记录, 不改变 alpha。任何数据缺失不得误降风险 (fail-open)。
 """
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,6 +46,21 @@ def test_extract_inputs_falls_back_to_price_history_for_drawdown():
     inputs = extract_inputs(_market(close=80000, drawdown=None), history)
 
     assert inputs["drawdown_pct"] == -20.0
+
+
+def test_drawdown_fallback_uses_90_days_not_last_90_records():
+    """3 次/周时最近 90 条≈210 天; 峰值在 90 天外不得算入回撤。"""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    history = []
+    for index in range(200):
+        ts = now - timedelta(days=(199 - index) * 2)  # 每 2 天一条 = 400 天
+        price = 100000.0 if index <= 150 else 50000.0  # 峰值在 ~98 天前
+        history.append((ts, price))
+
+    inputs = extract_inputs(_market(close=50000, drawdown=None), history)
+
+    # 90 天窗口内全为 50k → 回撤 0; 若误用最近 90 条会得到 -50%
+    assert inputs["drawdown_pct"] == 0.0
 
 
 def test_classify_posture_offensive_when_above_rising_sma200():
@@ -149,12 +165,13 @@ def test_release_counter_resets_when_condition_fails_midway():
 
 
 def test_missing_data_fail_open_does_not_downgrade():
-    previous = {"posture": "offensive", "cap": 0.8, "release_counter": 0}
+    previous = {"posture": "offensive", "cap": 0.8, "release_counter": 2}
     state = evaluate_risk({}, previous=previous)
 
     assert state["posture"] == "neutral"
     assert state["cap"] == 0.8  # fail-open: 无证据不改变 cap
     assert state["data_ok"] is False
+    assert state["release_counter"] == 0  # 释放确认必须连续
     assert any("fail-open" in reason for reason in state["reasons"])
 
 
@@ -179,3 +196,57 @@ def test_format_risk_contains_key_fields():
     assert "cap=0.25" in text
     assert "dd=-13.0%" in text
     assert "mode=dry_run" in text
+
+
+def test_missing_cap_mapping_keeps_previous_cap():
+    previous = {"posture": "offensive", "cap": 0.8, "release_counter": 1}
+    state = evaluate_risk(
+        _market(), previous=previous,
+        cfg={"exposure_cap": {"offensive": None, "neutral": None,
+                              "defensive": None, "flat": None}})
+
+    assert state["cap"] == 0.8
+    assert state["ratchet"] is True
+    assert any("无姿态映射" in reason for reason in state["reasons"])
+
+
+# ---- S1 回归: 价格历史读取失败不得丢弃 risk_v2 配置 ----
+
+class _RiskStateStub:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, path, default=None):
+        return self.values.get(path, default)
+
+    def set(self, path, value):
+        self.values[path] = value
+
+
+class _BrokenKnowledge:
+    def _price_history(self):
+        raise OSError("price history unavailable")
+
+
+def test_price_history_failure_keeps_risk_config():
+    from src.alpha import _update_risk_v2
+
+    components = {
+        "cfg": {
+            "features": {"risk_v2": True},
+            "alpha": {"risk_v2": {
+                "mode": "enforce",
+                "exposure_cap": {"offensive": 0.99},
+            }},
+        },
+        "state": _RiskStateStub(),
+        "knowledge": _BrokenKnowledge(),
+    }
+
+    state = _update_risk_v2(components, _market())
+
+    # 历史读取失败仅影响回撤兜底, 配置仍按 enforce/0.99 生效 (dry-run 证据链)
+    assert state["mode"] == "enforce"
+    assert state["posture"] == "offensive"
+    assert state["cap"] == 0.99
+    assert components["state"].get("risk_v2.state") == state
