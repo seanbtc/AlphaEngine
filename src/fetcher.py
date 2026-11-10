@@ -331,6 +331,22 @@ class Fetcher:
                 merged.append(t)
         return merged
 
+    @staticmethod
+    def _normalize_dates(tweets: list[dict], fetched_at: str = None) -> list[dict]:
+        """补齐推文时间: date 为空时用 fetched_at 兜底 (原地修改并返回)。
+
+        X 的宽松解析路径经常拿不到 <time datetime> (2026-09 起 72/72 全空),
+        空时间戳会让 AI 无法建立"何时发生"的锚点; fetched_at 至少给出抓取时间。
+        """
+        fetched_at = fetched_at or datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+        for tweet in tweets or []:
+            if not isinstance(tweet, dict):
+                continue
+            tweet["fetched_at"] = str(tweet.get("fetched_at") or fetched_at)
+            if not str(tweet.get("date") or "").strip():
+                tweet["date"] = tweet["fetched_at"]
+        return tweets
+
     def fetch(self) -> list[dict]:
         print("[Fetcher] === 开始抓取推文 ===")
         existing_ids = self._load_existing_ids()
@@ -346,6 +362,9 @@ class Fetcher:
 
         # fx 加装源 (默认关): 关键词始终 + 时间线 mode=fallback 仅现有为空时补入
         all_tweets = self._merge_fx(all_tweets)
+
+        # 日期归一化: 空 date 用本轮抓取时间兜底 (落盘前完成, 历史行不受影响)
+        all_tweets = self._normalize_dates(all_tweets)
 
         all_tweets.sort(key=lambda t: t["id"])
         if len(all_tweets) > self.max_tweets:
@@ -375,6 +394,7 @@ class Fetcher:
 
         # fx 加装源与 fetch() 同语义 (只读预览, 不落盘)
         all_tweets = self._merge_fx(all_tweets)
+        all_tweets = self._normalize_dates(all_tweets)
 
         all_tweets.sort(key=lambda t: t["id"])
         print(f"[Fetcher] === 测试读取: 共 {len(all_tweets)} 条推文 ===")

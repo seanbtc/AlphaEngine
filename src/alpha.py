@@ -36,6 +36,12 @@ from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
 from src.review_engine import ReviewEngine
+from src.scorecard import build_scorecard
+from src.thesis import (adopt_thesis, append_event as append_thesis_event,
+                        evaluate_thesis, load_current as load_current_thesis,
+                        save_current as save_current_thesis)
+from src.risk_state import evaluate_risk, format_risk
+from src import manifest as run_manifest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in sys.path:
@@ -438,6 +444,178 @@ def _record_shadow_cycle(components: dict, btc_price, market_state, *,
     except Exception as exc:  # 隔离: 影子账本任何异常不影响主流程
         print(f"[Shadow] 本轮记录失败 (不影响主流程): "
               f"{type(exc).__name__}: {exc}")
+
+
+def _feature_enabled(cfg: dict, name: str) -> bool:
+    """feature flag: 缺失/异常一律关闭 (Phase 回滚用)。"""
+    features = (cfg or {}).get("features")
+    if not isinstance(features, dict):
+        return False
+    return bool(features.get(name, False))
+
+
+def _thesis_manifest(thesis):
+    if not isinstance(thesis, dict) or not thesis.get("thesis_id"):
+        return None
+    return {
+        "thesis_id": thesis.get("thesis_id"),
+        "status": thesis.get("status"),
+        "label": thesis.get("label"),
+        "conditions_met": thesis.get("conditions_met"),
+        "unmet_count": thesis.get("unmet_count"),
+        "unknown_count": thesis.get("unknown_count"),
+        "invalidated_reason": thesis.get("invalidated_reason"),
+    }
+
+
+def _refresh_current_thesis(components: dict, market_state: dict):
+    """评估 state 中的当前命题; 状态变化落 theses.jsonl (Phase 1 不影响仓位)."""
+    if not _feature_enabled(components.get("cfg") or {}, "thesis"):
+        return None
+    sm = components["state"]
+    try:
+        current = load_current_thesis(sm)
+    except Exception as exc:
+        print(f"[Thesis] 读取当前命题失败 (不影响主流程): {exc}")
+        return None
+    if not current:
+        return None
+    try:
+        evaluated = evaluate_thesis(current, market_state or {})
+    except Exception as exc:
+        print(f"[Thesis] 评估失败 (不影响主流程): {exc}")
+        return current
+    old_status = current.get("status")
+    try:
+        if evaluated.get("status") != old_status:
+            append_thesis_event(components["data_dir"],
+                                evaluated.get("status") or "updated", evaluated)
+            print(f"[Thesis] {evaluated.get('thesis_id')}: {old_status} → "
+                  f"{evaluated.get('status')} "
+                  f"({evaluated.get('conditions_met')}/{len(evaluated.get('conditions') or [])} 满足)")
+        if evaluated != current:
+            save_current_thesis(sm, evaluated)
+    except Exception as exc:
+        print(f"[Thesis] 状态保存失败 (不影响主流程): {exc}")
+    return evaluated
+
+
+def _adopt_analysis_thesis(components: dict, raw_thesis, market_state: dict):
+    """把 AI 本轮 thesis 并入当前命题, 评估并落盘; 非法输出保留旧命题。"""
+    if not _feature_enabled(components.get("cfg") or {}, "thesis"):
+        return None
+    sm = components["state"]
+    try:
+        current = load_current_thesis(sm)
+        thesis, event, previous = adopt_thesis(raw_thesis, current)
+        if event == "rejected":
+            print("[Thesis] AI 输出无效, 保留当前命题")
+            return current
+        if previous is not None:
+            append_thesis_event(components["data_dir"], "superseded", previous)
+        thesis = evaluate_thesis(thesis, market_state or {})
+        append_thesis_event(components["data_dir"], event, thesis)
+        save_current_thesis(sm, thesis)
+        print(f"[Thesis] {event}: {thesis.get('thesis_id')} "
+              f"status={thesis.get('status')} "
+              f"({thesis.get('conditions_met')}/{len(thesis.get('conditions') or [])} 满足)")
+        return thesis
+    except Exception as exc:
+        print(f"[Thesis] 本轮命题处理失败 (不影响主流程): {exc}")
+        return None
+
+
+def _build_scorecard_text(components: dict, btc_price, thesis) -> str:
+    if not _feature_enabled(components.get("cfg") or {}, "scorecard"):
+        return ""
+    try:
+        return build_scorecard(
+            components.get("knowledge"), components.get("memory"),
+            components.get("engine"), btc_price, thesis=thesis)
+    except Exception as exc:
+        print(f"[Scorecard] 构建失败 (不影响主流程): {exc}")
+        return ""
+
+
+def _update_risk_v2(components: dict, market_state: dict):
+    """Phase 2: 每轮计算风险姿态/仓位上限 (默认为 dry_run, 不施加)。"""
+    cfg = components.get("cfg") or {}
+    if not _feature_enabled(cfg, "risk_v2"):
+        return None
+    risk_cfg = (cfg.get("alpha") or {}).get("risk_v2") or {}
+    sm = components["state"]
+    price_history = None
+    try:
+        knowledge = components.get("knowledge")
+        if knowledge is not None:
+            price_history = knowledge._price_history()
+    except Exception:
+        price_history = None
+    try:
+        previous = sm.get("risk_v2.state") or {}
+        risk_state = evaluate_risk(market_state, previous, risk_cfg,
+                                   price_history=price_history)
+        sm.set("risk_v2.state", risk_state)
+        print(f"[RiskV2] {format_risk(risk_state)}")
+        if str(risk_cfg.get("mode") or "dry_run").lower() == "enforce":
+            print("[RiskV2] enforce 尚未启用 (Phase 2 仅 dry_run), 不施加仓位上限")
+        return risk_state
+    except Exception as exc:
+        print(f"[RiskV2] 计算失败 (不影响主流程): {exc}")
+        return None
+
+
+def _risk_manifest(risk_state):
+    if not isinstance(risk_state, dict):
+        return None
+    return {
+        "posture": risk_state.get("posture"),
+        "cap": risk_state.get("cap"),
+        "cap_mapped": risk_state.get("cap_mapped"),
+        "drawdown_pct": (risk_state.get("inputs") or {}).get("drawdown_pct"),
+        "top_risk_active": (risk_state.get("inputs") or {}).get("top_risk_active"),
+        "ratchet": risk_state.get("ratchet"),
+        "release_counter": risk_state.get("release_counter"),
+        "mode": risk_state.get("mode"),
+        "reasons": risk_state.get("reasons"),
+    }
+
+
+def _append_manifest_safe(components: dict, entry: dict) -> None:
+    try:
+        run_manifest.append_manifest(components["data_dir"], entry)
+    except Exception as exc:
+        print(f"[Manifest] 写入失败 (不影响主流程): {exc}")
+
+
+def _write_manifest(components: dict, *, cycle_id: str, mode: str,
+                    alpha_before: float, progress_before, regime_before: str,
+                    btc_price, thesis=None, **extra) -> None:
+    """本轮 manifest 落盘 (feature flag 关闭时零开销; 失败不阻断主流程)。"""
+    if not _feature_enabled(components.get("cfg") or {}, "manifest"):
+        return
+    engine = components["engine"]
+    sm = components["state"]
+    try:
+        progress_after = sm.get("alpha.regime_progress", 0.5)
+        entry = run_manifest.build_manifest(
+            mode=mode,
+            cycle_id=cycle_id,
+            btc_price=btc_price,
+            alpha_before=alpha_before,
+            alpha_after=engine.get_alpha(),
+            progress_before=progress_before,
+            progress_after=progress_after,
+            regime_before=regime_before,
+            regime_after=engine.get_regime(),
+            target_after=engine.calculate_target_alpha(engine.get_regime(),
+                                                       progress_after),
+            thesis=_thesis_manifest(thesis),
+            **extra)
+    except Exception as exc:
+        print(f"[Manifest] 构建失败 (不影响主流程): {exc}")
+        return
+    _append_manifest_safe(components, entry)
 
 
 def run_backfill(components: dict, force: bool = False) -> bool:
@@ -1018,6 +1196,15 @@ def run_cycle(components: dict) -> bool:
     dingtalk = c["dingtalk"]
     review = c["review"]
 
+    cycle_id = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+    progress_cycle_start = sm.get("alpha.regime_progress", 0.5)
+    regime_cycle_start = engine.get_regime()
+    scorecard_text = ""
+    knowledge_chars = 0
+    thesis_current = None
+    risk_current = None
+    idle_reason = "no_new_tweets"
+
     print_status(c)
 
     # 0. 分析锁: 距上次成功 DeepSeek 分析不足 min_analysis_interval_hours 小时 → 本轮跳过抓取/分析
@@ -1116,6 +1303,16 @@ def run_cycle(components: dict) -> bool:
         ctx = memory.get_context_for_ai()
         market_state = build_market_state(c, btc_price)
         _record_ma_state(sm, market_state)
+        # Phase 2: 独立于 AI 的风险姿态 (dry_run: 只记录, 不施加)
+        risk_current = _update_risk_v2(c, market_state)
+        # Phase 1: 先评估当前命题, 再把成绩单+命题注入本轮 prompt (只读, 不改仓位)
+        thesis_current = _refresh_current_thesis(c, market_state)
+        scorecard_text = _build_scorecard_text(c, btc_price, thesis_current)
+        knowledge_chars = len(kb)
+        if scorecard_text:
+            market_state["scorecard"] = scorecard_text
+        if thesis_current:
+            market_state["thesis"] = thesis_current
         try:
             analysis = analyzer.analyze(new_tweets, ctx, kb, market_state=market_state)
         except Exception as exc:
@@ -1123,6 +1320,11 @@ def run_cycle(components: dict) -> bool:
             analysis = None
 
         if analysis:
+            # Phase 1: AI 命题并入当前命题 (非法则保留旧命题), 评估后落 theses.jsonl
+            thesis_current = (_adopt_analysis_thesis(c, analysis.get("thesis"), market_state)
+                              or thesis_current)
+            if thesis_current:
+                market_state["thesis"] = thesis_current
             sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             _record_ai_call_meta(sm, analyzer)
             pending_store = c.get("pending")
@@ -1237,6 +1439,7 @@ def run_cycle(components: dict) -> bool:
             # 同时把被过滤条目从重放队列移出 (与成功轮 sent∪filtered 语义对齐,
             # 否则纯 altcoin 条目会每轮重放且永远失败)
             print("  [Analyzer] 本批全部被 BTC 过滤跳过 (视为无有效新闻)")
+            idle_reason = "all_filtered"
             pending_store = c.get("pending")
             if pending_store is not None:
                 try:
@@ -1260,6 +1463,20 @@ def run_cycle(components: dict) -> bool:
             # WP8 8C: outage 轮不推进镜像引擎 (仅刷新锚点, 故障时长不补记)
             _record_shadow_cycle(c, btc_price, market_state,
                                  advance=False, mode="outage")
+            _write_manifest(
+                c, cycle_id=cycle_id, mode="analysis_failed",
+                alpha_before=alpha_cycle_start,
+                progress_before=progress_cycle_start,
+                regime_before=regime_cycle_start,
+                btc_price=btc_price, thesis=thesis_current,
+                risk_v2=_risk_manifest(risk_current),
+                error=detail, tweets=len(new_tweets),
+                tweet_ids=[str(t.get("id", "")) for t in new_tweets[-20:]] or None,
+                knowledge_chars=knowledge_chars or None,
+                scorecard_chars=len(scorecard_text) or None,
+                prompt_hash=getattr(analyzer, "prompt_hash", None),
+                model=getattr(analyzer, "last_call_model", None),
+                tokens=getattr(analyzer, "last_call_usage", None))
             return False
 
     if idle_cycle:
@@ -1271,6 +1488,13 @@ def run_cycle(components: dict) -> bool:
             idle_market_state = build_market_state(c, btc_price, persist_ma=False)
         except Exception as exc:
             print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
+
+        # Phase 1: 空闲轮也评估命题 (无新推文也能发现失效), 只记录不调仓位
+        thesis_current = _refresh_current_thesis(c, idle_market_state)
+        if idle_market_state is not None and thesis_current:
+            idle_market_state["thesis"] = thesis_current
+        # Phase 2: 空闲轮同样执行硬风控 dry-run (AI 故障日也不能缺风险检查)
+        risk_current = _update_risk_v2(c, idle_market_state)
 
         if fetch_error:
             # 数据源故障: 视为数据缺失, 本轮不推进周期钟 (alpha/progress/cooldown/
@@ -1335,6 +1559,22 @@ def run_cycle(components: dict) -> bool:
         _record_shadow_cycle(c, btc_price, idle_market_state,
                              advance=not fetch_error,
                              mode=("outage" if fetch_error else "idle"))
+        idle_mode = "idle"
+        if locked:
+            idle_mode = "idle_locked"
+        elif fetch_error:
+            idle_mode = "idle_fetch_error"
+        elif idle_reason == "all_filtered":
+            idle_mode = "idle_filtered"
+        _write_manifest(
+            c, cycle_id=cycle_id, mode=idle_mode,
+            alpha_before=alpha_cycle_start,
+            progress_before=progress_cycle_start,
+            regime_before=regime_cycle_start,
+            btc_price=btc_price, thesis=thesis_current,
+            risk_v2=_risk_manifest(risk_current),
+            fetched_ok=fetched_ok,
+            error=fetch_detail or None)
         return False
 
     # 6.5 右侧纪律兜底: 仓位符号与周期方向侧冲突 → 先平仓, 本轮不再步进
@@ -1484,6 +1724,25 @@ def run_cycle(components: dict) -> bool:
     # WP8 8C: 分析轮影子账 (轮末记录, 纯观察)
     _record_shadow_cycle(c, btc_price, market_state,
                          advance=True, mode="analysis")
+
+    _write_manifest(
+        c, cycle_id=cycle_id,
+        mode=("analysis" if has_analysis else "analysis_filtered"),
+        alpha_before=alpha_cycle_start,
+        progress_before=progress_cycle_start,
+        regime_before=regime_cycle_start,
+        btc_price=btc_price, thesis=thesis_current,
+        risk_v2=_risk_manifest(risk_current),
+        label=(analysis or {}).get("cycle_position"),
+        confidence=(analysis or {}).get("cycle_confidence"),
+        regime_change=regime_changed_this_cycle,
+        tweets=len(new_tweets),
+        tweet_ids=[str(t.get("id", "")) for t in new_tweets[-20:]] or None,
+        knowledge_chars=knowledge_chars or None,
+        scorecard_chars=len(scorecard_text) or None,
+        prompt_hash=getattr(analyzer, "prompt_hash", None),
+        model=getattr(analyzer, "last_call_model", None),
+        tokens=getattr(analyzer, "last_call_usage", None))
 
     return has_analysis
 

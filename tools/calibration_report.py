@@ -58,7 +58,7 @@ def _print_report(report: dict):
     point = report.get("point") or {}
     print("\n[point]")
     print(f"  n={point.get('decided')} correct={point.get('correct')} "
-          f"early={point.get('early')} late={point.get('late')} "
+          f"wrong_direction={point.get('wrong_direction')} "
           f"flat={point.get('flat')} hit_rate={_fmt(point.get('hit_rate'))}")
     for kind, item in (report.get("point_by_kind") or {}).items():
         print(f"  {kind}: n={item.get('decided')} hit_rate={_fmt(item.get('hit_rate'))}")

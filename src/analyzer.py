@@ -23,6 +23,7 @@ from src.link_reader import read_link_content
 from src.alpha_engine import (EVIDENCE_CATEGORIES, FORWARD_NEXT_REGIME,
                               REGIME_ALPHA_MAP)
 from src.cycle_context import format_cycle_context
+from src.thesis import format_thesis_for_prompt, normalize_thesis
 
 # AI 输出白名单 (与引擎枚举同口径): cycle_position 不含 INIT (AI 不输出该状态),
 # evidence_scores 仅 5 个证据维度; 额外顶层字段容忍 (signal_board 等可选字段).
@@ -213,6 +214,19 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
 - 区间要反映真实不确定性，禁止为了覆盖率给超宽区间；审计会同时看宽度、Brier 与 ECE。
 - 无法判断时 `forecast` 置 `null`，不要编造。
 
+## 可证伪命题 (thesis, 必需)
+
+每轮输出 1 个可被每日行情检验的命题（不是标签复述）:
+- 2–5 条条件, 至少 1 条价格/均线类; 条件必须能在到期前被客观验证;
+- metric 仅允许: `close`, `sma50`, `sma100`, `sma200`, `sma250`,
+  `sma200_slope`/`sma250_slope`(值 up/down/flat/na), `dist_sma200_pct`,
+  `drawdown_90d_pct`(负值, 距90日高点回撤), `price_change_7d`, `price_change_30d`;
+- 数值类 op: `>=` `<=` `>` `<`; 斜率类 op: `==` `!=`;
+- `deadline`: YYYY-MM-DD, 不超过今天+90天;
+- 命题应表达"当前判断成立需要看到什么"; 若当前命题仍成立, **原样复用相同条件**
+  (引擎会延续同一个 thesis); 条件变化才算新命题;
+- 引擎会每日评估; ≥一半条件未满足 → 命题失效, 成绩单会显示"你错了", 你必须据此修正判断。
+
 ## 输出格式 (严格 JSON)
 {
   "date": "YYYY-MM-DD",
@@ -246,6 +260,16 @@ regime_progress 表示当前 cycle_position 内部的完成进度 (0.0~1.0):
     "confidence": 0.62,
     "hit_probability": 0.70,
     "basis": ["retrieved: tweet_id_xxx", "inferred: 均线结构"]
+  },
+  "thesis": {
+    "label": "RECOVERY",
+    "claim": "复苏延续, 站上 200SMA 且 ETF 不转为持续流出",
+    "conditions": [
+      {"id": "c1", "metric": "close", "op": ">=", "value": 78000, "deadline": "2026-12-10"},
+      {"id": "c2", "metric": "sma200_slope", "op": "!=", "value": "down", "deadline": "2026-12-10"},
+      {"id": "c3", "metric": "drawdown_90d_pct", "op": ">=", "value": -15, "deadline": "2026-12-10"}
+    ],
+    "confidence": 0.6
   },
   "tweet_draft": "适合X发布的推文草稿 (≤277字符, 中文)",
   "position_narrative": "仓位策略叙述 (不公开, 仅内部参考) 如: 当前处于熊市深处, 底部信号浮现但未完整. 建议缓慢减少空仓, 等待熊底确认后翻多.",
@@ -396,6 +420,7 @@ class Analyzer:
         self.prompt_hash = PROMPT_HASH
         self.last_call_model: str | None = None
         self.last_call_temperature: float | None = None
+        self.last_call_usage: dict | None = None
         # 图片 base64 缓存 (LRU 双上限, 重试时避免重复下载)
         self.image_cache_max_entries = _config_int(cfg, "image_cache_max_entries", 32, 1)
         self.image_cache_max_bytes = _config_int(
@@ -434,7 +459,9 @@ class Analyzer:
         lines = []
         ref_total = 0
         for i, t in enumerate(window, 1):
-            date_str = t.get("date", "?")[:16]
+            # date 缺失/为 None 时用 fetched_at 兜底 (fetcher 已补齐, 这里守历史残行)
+            raw_date = t.get("date") or t.get("fetched_at") or ""
+            date_str = str(raw_date)[:16] or "?"
             url = Analyzer._tweet_url(t)
             if not self.send_tweet_content:
                 # 只传 URL, 不传正文
@@ -655,6 +682,13 @@ class Analyzer:
         if parts:
             text = ("## 当前引擎状态 (锚点, 请基于此连续性判断)\n"
                     + "\n".join(parts) + "\n")
+        # 成绩单/当前命题: 让 AI 先看见自己错了, 再给新判断 (Phase 1 只读)
+        scorecard = market_state.get("scorecard")
+        if scorecard:
+            text += "\n" + str(scorecard).strip() + "\n"
+        thesis_text = format_thesis_for_prompt(market_state.get("thesis"))
+        if thesis_text:
+            text += "\n" + thesis_text
         return (text + self._format_ma_context(market_state.get("ma_context"))
                 + format_cycle_context(market_state.get("cycle_context")))
 
@@ -938,6 +972,8 @@ class Analyzer:
         out["source_type_counts"] = dict(
             counts, unknown=unknown, retrieved_no_source=retrieved_no_source)
         out["forecast"] = Analyzer._sanitize_forecast(out.get("forecast"))
+        # 可证伪命题: 非法条件不阻断主分析 (thesis=None, 下一轮重新提议)
+        out["thesis"] = normalize_thesis(out.get("thesis"))
         return out
 
     def _cross_check(self, first: dict, user_msg: str,
@@ -1168,6 +1204,7 @@ class Analyzer:
         self._last_image_error = False
         content = response.get("content") or ""
         usage = response.get("usage") or {}
+        self.last_call_usage = usage if isinstance(usage, dict) else None
         # 记录本轮实际调用元数据 (供 prediction_log 追溯; 拿不到时保持 None)
         model_name = str(response.get("model") or "").strip()
         self.last_call_model = model_name or None

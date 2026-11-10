@@ -93,7 +93,9 @@ def test_calibration_summary_point_forecast_buckets():
     report = build_calibration_summary(predictions, outcomes)
 
     assert report["point"]["correct"] == 1
-    assert report["point"]["early"] == 1
+    # 旧 early 与 wrong_direction 同义 (读侧归一), 新写入统一 wrong_direction
+    assert report["point"]["wrong_direction"] == 1
+    assert "early" not in report["point"]
     assert report["point"]["decided"] == 2
     assert report["point"]["hit_rate"] == 0.5
 

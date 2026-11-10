@@ -190,13 +190,20 @@ def test_distill_backs_up_knowledge_base(tmp_path):
                                 "alpha": 0.1, "regime": "BULL"}])
     kb_file = tmp_path / "knowledge_base.md"
     kb_file.write_text("OLD KNOWLEDGE", encoding="utf-8")
-    analyzer = _StubAnalyzer({"ok": True, "content": "NEW KNOWLEDGE"})
+    new_kb = ("# 知识库\n\n## Bull 信号\n- ETF 净流入 + 站上 200SMA: 3/4 命中\n"
+              "- 稳定币供应 30 日增长转正: 2/3 命中\n"
+              "- Market Compass 维持 Risk-On 5 日以上: 3/5 命中\n\n"
+              "## Bear 信号\n- 长期持有者转负 + 跌破 200SMA: 4/5 命中\n"
+              "- 稳定币供应萎缩 + 实际利率走高: 2/2 命中\n\n"
+              "## 常见误判\n- 把 RECOVERY 反弹当 BULL 确认\n"
+              "- 把 ETF 单周流入当成趋势确认\n")
+    analyzer = _StubAnalyzer({"ok": True, "content": new_kb})
     knowledge = Knowledge({}, str(tmp_path), analyzer)
 
     result = knowledge.distill(memory, _StubState())
 
-    assert result == "NEW KNOWLEDGE"
-    assert kb_file.read_text(encoding="utf-8") == "NEW KNOWLEDGE"
+    assert result == new_kb
+    assert kb_file.read_text(encoding="utf-8") == new_kb
     assert (tmp_path / "knowledge_base.md.bak").read_text(encoding="utf-8") == "OLD KNOWLEDGE"
     assert not (tmp_path / "knowledge_base.md.tmp").exists()
 

@@ -15,6 +15,18 @@ def _rate(numerator, denominator):
     return round(numerator / denominator, 3) if denominator else None
 
 
+# point 判定口径 (2026-11 起): 方向错统一记 wrong_direction。
+# 旧 outcomes 里的 early/late 语义相同 (只是"过早/过晚"的修饰), 读侧归一兼容。
+_LEGACY_POINT_VERDICTS = {"early": "wrong_direction", "late": "wrong_direction"}
+
+
+def normalize_point_verdict(verdict):
+    """把旧 early/late 映射为 wrong_direction; 其它值原样返回。"""
+    if not isinstance(verdict, str):
+        return None
+    return _LEGACY_POINT_VERDICTS.get(verdict, verdict)
+
+
 def _ece(pairs):
     """ECE（5 箱）; pairs = [(probability, hit_bool)]。"""
     if not pairs:
@@ -34,6 +46,31 @@ def _ece(pairs):
     return round(value, 6)
 
 
+# 知识库最小结构要求: 用于拦截"reasoning 回退文本 / 截断残片"注入 prompt。
+_KB_MIN_CHARS = 200
+_KB_MIN_HEADINGS = 2
+
+
+def validate_knowledge_text(content: str) -> tuple[bool, str]:
+    """粗校验知识库文本是否为正常 Markdown 蒸馏结果。
+
+    2026-10 故障: DeepSeek reasoning 吃满 max_tokens, AIService 回退
+    reasoning_content, 12/12 次污染文本 (0 个 Markdown 标题) 被注入每轮
+    prompt。此守卫在**读取**与**保存前**各拦一次:
+    - 空/过短 → 无效
+    - 少于 2 个 Markdown 标题 → 视为非结构化推理文本
+    """
+    text = (content or "").strip()
+    if not text:
+        return False, "empty"
+    if len(text) < _KB_MIN_CHARS:
+        return False, f"too short ({len(text)} chars)"
+    headings = sum(1 for line in text.splitlines() if line.lstrip().startswith("#"))
+    if headings < _KB_MIN_HEADINGS:
+        return False, f"no markdown structure (headings={headings})"
+    return True, ""
+
+
 def build_calibration_summary(predictions: list, outcomes: list) -> dict:
     """K-03 预测校准汇总：point 命中 / 区间覆盖 / Brier / ECE / 分桶 / 重跑离散。
 
@@ -50,10 +87,10 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
     outcomes = list(deduped.values())
     pred_by_id = {_prediction_key(item): item for item in predictions}
 
-    point_counts = {"correct": 0, "early": 0, "late": 0, "flat": 0}
+    point_counts = {"correct": 0, "wrong_direction": 0, "flat": 0}
     point_by_kind = {
-        "legacy": {"correct": 0, "early": 0, "late": 0, "flat": 0},
-        "forecast": {"correct": 0, "early": 0, "late": 0, "flat": 0},
+        "legacy": {"correct": 0, "wrong_direction": 0, "flat": 0},
+        "forecast": {"correct": 0, "wrong_direction": 0, "flat": 0},
     }
     forecast_rows = []
     confidence = {}
@@ -81,7 +118,7 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
         conf = outcome.get("confidence") or pred.get("confidence") or "unknown"
         prompt_hash = pred.get("prompt_hash") or outcome.get("prompt_hash") or "unknown"
         model = pred.get("model") or "unknown"
-        verdict = outcome.get("verdict")
+        verdict = normalize_point_verdict(outcome.get("verdict"))
         if verdict in point_counts:
             point_counts[verdict] += 1
             kind = ("forecast"
@@ -157,7 +194,7 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
             if isinstance(price_offset, (int, float)):
                 ps["offsets"].append(abs(float(price_offset)))
 
-    point_decided = point_counts["correct"] + point_counts["early"] + point_counts["late"]
+    point_decided = point_counts["correct"] + point_counts["wrong_direction"]
     forecast_n = len(forecast_rows)
     forecast_hits = sum(1 for row in forecast_rows if row["hit"])
     direction_rows = [row for row in forecast_rows if row["direction_hit"] is not None]
@@ -201,7 +238,7 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
 
     def _point_kind_output(kind):
         counts = point_by_kind[kind]
-        decided = counts["correct"] + counts["early"] + counts["late"]
+        decided = counts["correct"] + counts["wrong_direction"]
         return {**counts, "decided": decided,
                 "hit_rate": _rate(counts["correct"], decided)}
 
@@ -324,6 +361,7 @@ class Knowledge:
         self.prediction_outcome_file = os.path.join(data_dir, "prediction_outcomes.jsonl")
         self.distill_cfg = cfg.get("distill", {})
         self.drift_cfg = cfg.get("drift", {})
+        self._kb_guard_warned = ""
 
     def _ensure_dir(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -372,11 +410,28 @@ class Knowledge:
     # ---- 知识库 ----
 
     def load_knowledge_base(self) -> str:
+        """读取知识库; 结构不合法 (reasoning 回退/截断残片) 时返回空串。
+
+        只拦截注入, 不删除/改写文件 —— 旧文件保留供人工排查。
+        """
         self._ensure_dir()
-        if os.path.exists(self.kb_file):
+        if not os.path.exists(self.kb_file):
+            return ""
+        try:
             with open(self.kb_file, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
+                content = f.read()
+        except OSError as exc:
+            print(f"[Knowledge] 知识库读取失败: {exc}")
+            return ""
+        ok, reason = validate_knowledge_text(content)
+        if not ok:
+            if self._kb_guard_warned != reason:
+                print(f"[Knowledge] 知识库内容无效, 已拦截注入 ({reason}; "
+                      f"{len(content)} chars, file={self.kb_file})")
+                self._kb_guard_warned = reason
+            return ""
+        self._kb_guard_warned = ""
+        return content
 
     def save_knowledge_base(self, content: str):
         """原子覆盖 knowledge_base.md; 覆盖前把旧版备份为 knowledge_base.md.bak."""
@@ -563,18 +618,22 @@ class Knowledge:
 
     @staticmethod
     def _prediction_verdict(expected: str, move_pct: float) -> str:
-        """按预期方向与实际涨跌幅给出 correct/early/late/flat。"""
+        """按预期方向与实际涨跌幅给出 correct/wrong_direction/flat。
+
+        2026-11 起不再区分 early/late: 二者都是"方向判断错误",
+        分拆只会稀释样本、掩盖连续反向 (历史数据里 11/14 条都是 early)。
+        """
         if expected == "up":
             if move_pct >= 2.0:
                 return "correct"
             if move_pct <= -2.0:
-                return "early"
+                return "wrong_direction"
             return "flat"
         if expected == "down":
             if move_pct <= -2.0:
                 return "correct"
             if move_pct >= 2.0:
-                return "late"
+                return "wrong_direction"
             return "flat"
         if expected == "flat":
             return "correct" if abs(move_pct) <= 3.0 else "flat"
@@ -621,7 +680,7 @@ class Knowledge:
             current_price = self._last_known_price()
         price_history = self._price_history()
         results = {
-            "correct": 0, "early": 0, "late": 0, "flat": 0, "total": 0,
+            "correct": 0, "wrong_direction": 0, "flat": 0, "total": 0,
             "hit_rate": 0.0, "new_audited": 0, "skipped": 0,
             "forecast_total": 0, "forecast_hits": 0,
             "forecast_direction_hits": 0, "forecast_direction_n": 0,
@@ -796,7 +855,7 @@ class Knowledge:
             self._append_jsonl(self.prediction_outcome_file, outcome)
         results["new_audited"] = audited
 
-        decided = results["correct"] + results["early"] + results["late"]
+        decided = results["correct"] + results["wrong_direction"]
         results["hit_rate"] = round(results["correct"] / decided, 3) if decided else 0.0
         forecast_total = results["forecast_total"]
         if forecast_total:
@@ -921,6 +980,12 @@ class Knowledge:
 
         print(f"[API-CALL][distill] POST {self.analyzer.endpoint} purpose=knowledge "
               f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}Z")
+        try:
+            max_tokens = int(self.distill_cfg.get("max_tokens")
+                             or self.cfg.get("distill_max_tokens") or 4096)
+        except (TypeError, ValueError):
+            max_tokens = 4096
+        max_tokens = max(512, min(16384, max_tokens))
         response = self.analyzer.client.chat(
             messages=[
                 {"role": "system", "content": "你是知识蒸馏引擎, 输出 Markdown 格式的知识库内容."},
@@ -929,7 +994,7 @@ class Knowledge:
             purpose="knowledge",
             project="AlphaEngine",
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             json_mode=False,
             timeout_seconds=self.analyzer.timeout,
         )
@@ -937,6 +1002,20 @@ class Knowledge:
             print(f"[Knowledge] Distill AI服务调用失败: {response.get('error')}")
             return None
         content = response.get("content") or ""
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        completion_tokens = usage.get("completion_tokens")
+        # reasoning 模型会把预算吃在 reasoning 上, content 为空时 AIService 回退
+        # reasoning_content (污染文本)。completion 恰好等于 max_tokens 是截断证据。
+        if isinstance(completion_tokens, (int, float)) and completion_tokens >= max_tokens:
+            print(f"[Knowledge] Distill 输出疑似被截断 "
+                  f"(completion_tokens={completion_tokens} >= max_tokens={max_tokens}), "
+                  f"保留旧知识库")
+            return None
+        ok, reason = validate_knowledge_text(content)
+        if not ok:
+            print(f"[Knowledge] Distill 输出结构无效, 保留旧知识库 ({reason}; "
+                  f"{len(content)} chars)")
+            return None
 
         if content:
             self.save_knowledge_base(content)
