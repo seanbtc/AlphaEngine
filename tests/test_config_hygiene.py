@@ -68,9 +68,26 @@ def test_every_config_key_is_referenced():
     assert missing == []
 
 
-def test_review_section_has_no_dead_schedule_day():
-    """review.schedule_day 从未生效 (复盘固定月末 20:00 UTC), 不得再出现."""
-    assert "schedule_day" not in _config().get("review", {})
+def test_review_section_removed():
+    """月度复盘 (regime 参数校准) 已随状态机移除, 配置段不得回流."""
+    config = _config()
+    assert "review" not in config
+    assert "alpha" not in config
+    assert "tradesync" not in config
+
+
+def test_valuation_section_in_place():
+    valuation = _config()["valuation"]
+    assert valuation["cross_check"]["samples"] >= 1
+
+
+def test_removed_regime_semantics_absent():
+    """state 机/仓位/节奏/shadow/风控/发单 的配置键必须彻底消失."""
+    text = json.dumps(_config(), ensure_ascii=False)
+    for key in ("regime_alpha_map", "regime_expected_days", "regime_progress",
+                "risk_v2", "rhythm", "shadow", "structure_check",
+                "confidence_gate", "min_cycles_before_review"):
+        assert f'"{key}"' not in text, key
 
 
 def test_retry_delay_within_documented_clamp():

@@ -11,7 +11,6 @@ if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
 from src.alpha import print_status, run_cycle  # noqa: E402
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator  # noqa: E402
 from src.analyzer import Analyzer  # noqa: E402
 from src.fetcher import Fetcher  # noqa: E402
 from src.pending_analysis import PendingAnalysis  # noqa: E402
@@ -26,7 +25,7 @@ class _FakeMemory:
     def get_context_for_ai(self):
         return ""
 
-    def append_alpha(self, record):
+    def append_valuation(self, record):
         pass
 
     def append_entry(self, text):
@@ -40,22 +39,23 @@ class _FakeKnowledge:
     def load_knowledge_base(self):
         return ""
 
-    def log_drift_meta(self, meta, cycle_position):
+    def log_drift_meta(self, meta, valuation_label=""):
         pass
 
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
+    def log_prediction(self, valuation, confidence, btc_price=None, **kwargs):
         pass
 
     def distill_due(self, state_manager, now=None):
         return False
 
+    def record_price(self, price, valuation=None):
+        pass
 
-class _FakeTradeSync:
-    def send_order(self, alpha, regime, price=None):
-        return None
+    def price_trend(self):
+        return {}
 
 
 class _FakeDataFeed:
@@ -63,25 +63,11 @@ class _FakeDataFeed:
         return None
 
 
-class _FakeReview:
-    def record_price(self, *args, **kwargs):
-        pass
-
-    def price_trend(self):
-        return {}
-
-    def should_review(self):
-        return False
-
-
 class _AlertDingTalk:
     def __init__(self):
         self.alerts = []
 
-    def regime_change(self, *args, **kwargs):
-        pass
-
-    def alpha_change(self, *args, **kwargs):
+    def valuation_change(self, *args, **kwargs):
         pass
 
     def analysis(self, *args, **kwargs):
@@ -123,12 +109,11 @@ class _Analyzer:
         return self.result
 
 
-def _analysis(cp="BEAR"):
+def _analysis(valuation=0.42):
     return {
-        "cycle_position": cp,
-        "cycle_confidence": "high",
-        "regime_progress": 0.5,
-        "regime_evidence": "evidence",
+        "valuation": valuation,
+        "valuation_confidence": "high",
+        "valuation_evidence": "evidence",
         "summary": "summary",
         "evidence_scores": {"profitability": 0.4, "institutional": 0.4,
                             "onchain": 0.3, "derivatives": 0.2, "macro": 0.1},
@@ -137,22 +122,12 @@ def _analysis(cp="BEAR"):
     }
 
 
-def _components(tmp_path, fetcher, analyzer, regime="BEAR", alpha=-1.00,
-                progress=0.5, cooldown=3, pending=None):
+def _components(tmp_path, fetcher, analyzer, pending=None, valuation=None):
     data_dir = str(tmp_path)
     sm = StateManager(data_dir, "state.json")
     sm.load()
-    sm.set("regime.current", regime)
-    sm.set("regime.entered_from", "INIT")
-    sm.set("regime.cooldown_remaining", cooldown)
-    sm.set("alpha.current", alpha)
-    sm.set("alpha.target", alpha)
-    sm.set("alpha.regime_progress", progress)
-    # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
-    sm.set("runtime.last_tick_at",
-           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat() + "Z")
-    engine = AlphaEngine({"smoothing": {},
-                          "stability": {"required_confirmations": 1}}, sm)
+    if valuation is not None:
+        sm.set_valuation(valuation, confidence="medium", evidence="seed")
     return {
         "cfg": {"schedule": {"min_analysis_interval_hours": 0}},
         "data_dir": data_dir,
@@ -160,40 +135,32 @@ def _components(tmp_path, fetcher, analyzer, regime="BEAR", alpha=-1.00,
         "state": sm,
         "fetcher": fetcher,
         "analyzer": analyzer,
-        "engine": engine,
-        "evidence": EvidenceAccumulator(sm, 0.02),
         "knowledge": _FakeKnowledge(),
-        "tradesync": _FakeTradeSync(),
         "datafeed": _FakeDataFeed(),
         "dingtalk": _AlertDingTalk(),
-        "review": _FakeReview(),
         "pending": pending if pending is not None else PendingAnalysis(data_dir),
     }
 
 
 # ---- 1. 故障期不盲推进 ----
 
-def test_fetch_error_freezes_ticks_and_sets_outage(tmp_path, capsys):
+def test_fetch_error_freezes_valuation_and_sets_outage(tmp_path, capsys):
     comp = _components(tmp_path, _Fetcher(exc=RuntimeError("boom")),
-                       _Analyzer(None))
-    comp["state"].set("evidence.accumulators", {"BEAR": 1.0})
+                       _Analyzer(None), valuation=0.42)
 
     run_cycle(comp)
     out = capsys.readouterr().out
 
     sm = comp["state"]
-    assert sm.get("alpha.current") == -1.00
-    assert sm.get("alpha.regime_progress") == 0.5
-    assert sm.get("regime.cooldown_remaining") == 3
-    assert sm.get("regime.stability_counter") == 0
-    assert sm.get("evidence.accumulators") == {"BEAR": 1.0}   # 未 decay
+    assert sm.get_valuation() == pytest.approx(0.42)          # 估值冻结
+    assert sm.get("valuation.label") == "轻度低估"
     assert sm.get("runtime.analysis_count") == 0              # 故障轮不计分析
     outage = sm.get("runtime.outage")
     assert outage["reason"] == "fetch_error"
     assert "boom" in outage["detail"]
     assert outage["since"].endswith("Z")
     assert "Idle (fetch_error)" in out
-    assert "不推进" in out
+    assert "本轮估值保持不变" in out
 
     assert [a[0] for a in comp["dingtalk"].alerts] == ["数据源故障"]
     assert "fetch_error" in comp["dingtalk"].alerts[0][1]
@@ -201,11 +168,12 @@ def test_fetch_error_freezes_ticks_and_sets_outage(tmp_path, capsys):
     persisted = StateManager(str(tmp_path), "state.json")
     persisted.load()
     assert persisted.get("runtime.outage")["reason"] == "fetch_error"
+    assert persisted.get_valuation() == pytest.approx(0.42)
 
 
 def test_consecutive_fetch_errors_alert_once(tmp_path, capsys):
     comp = _components(tmp_path, _Fetcher(exc=RuntimeError("boom")),
-                       _Analyzer(None))
+                       _Analyzer(None), valuation=0.42)
 
     run_cycle(comp)
     since = comp["state"].get("runtime.outage")["since"]
@@ -214,12 +182,12 @@ def test_consecutive_fetch_errors_alert_once(tmp_path, capsys):
 
     assert [a[0] for a in comp["dingtalk"].alerts] == ["数据源故障"]
     assert comp["state"].get("runtime.outage")["since"] == since
-    assert comp["state"].get("alpha.current") == -1.00
+    assert comp["state"].get_valuation() == pytest.approx(0.42)
 
 
 def test_recovery_cycle_clears_outage_and_resumes_ticks(tmp_path, capsys):
     fetcher = _Fetcher(exc=RuntimeError("boom"))
-    comp = _components(tmp_path, fetcher, _Analyzer(None))
+    comp = _components(tmp_path, fetcher, _Analyzer(None), valuation=0.42)
     run_cycle(comp)
     capsys.readouterr()
 
@@ -231,44 +199,29 @@ def test_recovery_cycle_clears_outage_and_resumes_ticks(tmp_path, capsys):
     assert sm.get("runtime.outage") == {}
     assert [a[0] for a in comp["dingtalk"].alerts] == ["数据源故障", "数据源恢复"]
     assert "Idle (no new tweets)" in out
-    # 故障恢复不补记: 恢复轮锚点已重置为 now → progress 增量≈0
-    assert sm.get("alpha.regime_progress") == pytest.approx(0.5, abs=1e-6)
-    assert sm.get("regime.stability_counter") == 1
+    assert sm.get_valuation() == pytest.approx(0.42)          # 无新推文 → 估值不动
     assert sm.get("runtime.analysis_count") == 1
-    # 恢复后从下一轮起按自然日正常推进
-    anchor = datetime.fromisoformat(
-        sm.get("runtime.last_tick_at").replace("Z", "+00:00")).replace(tzinfo=None)
-    comp["engine"].tick_alpha(now=anchor + timedelta(days=1))
-    assert sm.get("alpha.regime_progress") > 0.5
 
 
-def test_recovery_does_not_backfill_three_day_outage(tmp_path, capsys):
-    """WP6 建议1: 3 天故障 → 恢复轮 progress 增量≈0 (而非 3/expected)。"""
-    fetcher = _Fetcher(exc=RuntimeError("boom"))
-    comp = _components(tmp_path, fetcher, _Analyzer(None))
+def test_idle_does_not_drift_valuation(tmp_path, capsys):
+    """无新推文不推进估值 (无时间漂移/无平滑); 多轮 idle 后仍与写入值一致。"""
+    comp = _components(tmp_path, _Fetcher(tweets=[]), _Analyzer(None),
+                       valuation=0.62)
     sm = comp["state"]
-    # 故障开始前锚点为 3 天前 (若恢复补记, 增量会是 3/420)
-    sm.set("runtime.last_tick_at",
-           (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)).isoformat() + "Z")
-    run_cycle(comp)   # fetch_error: 故障轮不推进
-    assert sm.get("alpha.regime_progress") == pytest.approx(0.5)
+
+    for _ in range(3):
+        run_cycle(comp)
     capsys.readouterr()
 
-    fetcher.exc = None
-    run_cycle(comp)   # 恢复轮: _clear_outage 重置锚点 → 不补记 3 天
-    out = capsys.readouterr().out
-
-    assert sm.get("runtime.outage") == {}
-    assert "Idle (no new tweets)" in out
-    assert sm.get("alpha.regime_progress") == pytest.approx(0.5, abs=1e-6)
-    # alpha 仅按单轮下限走一步 (0.02), 与故障天数无关 (非 3 天折算)
-    assert sm.get("alpha.current") == pytest.approx(-0.98)
-    three_days = 3 / 420
-    assert abs(sm.get("alpha.regime_progress") - 0.5) < three_days / 100
+    assert sm.get_valuation() == pytest.approx(0.62)
+    assert sm.get("valuation.label") == "轻度高估"
+    assert sm.get("runtime.analysis_count") == 3
+    assert sm.get("runtime.outage") in ({}, None)
 
 
 def test_normal_idle_unchanged_without_outage(tmp_path, capsys):
-    comp = _components(tmp_path, _Fetcher(tweets=[]), _Analyzer(None))
+    comp = _components(tmp_path, _Fetcher(tweets=[]), _Analyzer(None),
+                       valuation=0.42)
 
     run_cycle(comp)
     out = capsys.readouterr().out
@@ -276,11 +229,9 @@ def test_normal_idle_unchanged_without_outage(tmp_path, capsys):
     sm = comp["state"]
     assert not sm.get("runtime.outage")
     assert comp["dingtalk"].alerts == []
-    assert sm.get("alpha.current") == pytest.approx(-0.98)
-    assert sm.get("alpha.regime_progress") > 0.5
-    assert sm.get("regime.cooldown_remaining") == 2
-    assert sm.get("regime.stability_counter") == 1
+    assert sm.get_valuation() == pytest.approx(0.42)
     assert "Idle (no new tweets)" in out
+    assert "估值保持 0.42 · 轻度低估" in out
 
 
 # ---- 2. 失败推文重放 ----
@@ -313,7 +264,7 @@ def test_replay_next_cycle_success_clears_pending_and_outage(tmp_path, capsys):
     assert comp["pending"].count() == 1
 
     fetcher.tweets = []
-    analyzer.result = _analysis(cp="BEAR")
+    analyzer.result = _analysis()
     run_cycle(comp)
     out = capsys.readouterr().out
 
@@ -325,7 +276,7 @@ def test_replay_next_cycle_success_clears_pending_and_outage(tmp_path, capsys):
     # 重放轮与正常轮语义一致: 计数/发帖/预测照常
     assert comp["state"].get("runtime.analysis_count") == 2
     assert comp["state"].get("runtime.post_count") == 1
-    assert "cycle_position: BEAR" in out
+    assert "valuation: 0.42 (轻度低估)" in out
 
 
 def test_replay_failure_requeues_without_duplicate_or_alert(tmp_path, capsys):
@@ -365,7 +316,7 @@ def test_replay_missing_tweet_removed_from_queue(tmp_path, capsys):
 def test_pending_id_also_in_new_tweets_gets_removed(tmp_path):
     tweet = dict(_TWEET)
     fetcher = _Fetcher(tweets=[tweet], store={"1001": tweet})
-    comp = _components(tmp_path, fetcher, _Analyzer(_analysis(cp="BEAR")))
+    comp = _components(tmp_path, fetcher, _Analyzer(_analysis()))
     comp["pending"].add(["1001"])
 
     run_cycle(comp)
@@ -394,7 +345,7 @@ def test_fetch_error_with_replay_still_analyzes_but_keeps_outage(tmp_path, capsy
     capsys.readouterr()
 
     fetcher.exc = RuntimeError("boom")
-    comp["analyzer"].result = _analysis(cp="BEAR")
+    comp["analyzer"].result = _analysis()
     run_cycle(comp)
     out = capsys.readouterr().out
 
@@ -434,8 +385,7 @@ def _btc_tweet(tid, content=None):
 
 def _real_analyzer(result, prompts=None):
     analyzer = Analyzer({"enabled": True, "endpoint": "http://127.0.0.1:59999",
-                         "cross_check": {"samples": 1,
-                                         "structure_check": {"enabled": False}}})
+                         "cross_check": {"samples": 1}})
 
     def fake_call_api(user_msg, images=None):
         if prompts is not None:
@@ -450,7 +400,7 @@ def test_replay_window_sends_only_20_and_keeps_unsent(tmp_path, capsys):
     tweets = [_btc_tweet(f"{i:04d}") for i in range(1, 26)]
     fetcher = _Fetcher(tweets=[], store={t["id"]: t for t in tweets})
     prompts = []
-    analyzer = _real_analyzer(_analysis(cp="BEAR"), prompts)
+    analyzer = _real_analyzer(_analysis(), prompts)
     pending = PendingAnalysis(str(tmp_path))
     pending.add([t["id"] for t in tweets])
     comp = _components(tmp_path, fetcher, analyzer, pending=pending)
@@ -476,7 +426,7 @@ def test_success_removes_sent_and_filtered_only(tmp_path):
     tweets = [_btc_tweet("0001"), _btc_tweet("alt01", "Solana validators upgrade tonight"),
               _btc_tweet("0003")]
     fetcher = _Fetcher(tweets=[], store={t["id"]: t for t in tweets})
-    analyzer = _real_analyzer(_analysis(cp="BEAR"))
+    analyzer = _real_analyzer(_analysis())
     pending = PendingAnalysis(str(tmp_path))
     pending.add(["0001", "alt01", "0003"])
     comp = _components(tmp_path, fetcher, analyzer, pending=pending)
@@ -493,7 +443,7 @@ def test_fresh_tweets_pushed_out_of_window_are_requeued(tmp_path, capsys):
     new_tweets = [_btc_tweet(f"n{i:03d}") for i in range(1, 4)]
     fetcher = _Fetcher(tweets=new_tweets,
                        store={t["id"]: t for t in pending_tweets})
-    analyzer = _real_analyzer(_analysis(cp="BEAR"))
+    analyzer = _real_analyzer(_analysis())
     pending = PendingAnalysis(str(tmp_path))
     pending.add([t["id"] for t in pending_tweets])
     comp = _components(tmp_path, fetcher, analyzer, pending=pending)
@@ -512,7 +462,7 @@ def test_all_filtered_treated_as_skip_not_failure(tmp_path, capsys):
     tweets = [_btc_tweet("alt01", "Solana validators upgrade tonight"),
               _btc_tweet("alt02", "Ethereum layer2 fees drop")]
     fetcher = _Fetcher(tweets=tweets, store={t["id"]: t for t in tweets})
-    analyzer = _real_analyzer(_analysis(cp="BEAR"))
+    analyzer = _real_analyzer(_analysis())
     comp = _components(tmp_path, fetcher, analyzer)
 
     run_cycle(comp)
@@ -523,7 +473,7 @@ def test_all_filtered_treated_as_skip_not_failure(tmp_path, capsys):
     assert comp["pending"].count() == 0
     assert not comp["state"].get("runtime.outage")
     # 视为无有效新闻: 走 idle 正常推进, 不中断主流程
-    assert comp["state"].get("alpha.regime_progress") > 0.5
+    assert comp["state"].get_valuation() is None          # 无有效分析 → 估值未评估
     assert comp["state"].get("runtime.analysis_count") == 1
 
 
@@ -531,7 +481,7 @@ def test_all_filtered_removes_altcoin_entries_from_queue(tmp_path, capsys):
     tweets = [_btc_tweet("alt01", "Solana validators upgrade tonight"),
               _btc_tweet("alt02", "Ethereum layer2 fees drop")]
     fetcher = _Fetcher(tweets=[], store={t["id"]: t for t in tweets})
-    analyzer = _real_analyzer(_analysis(cp="BEAR"))
+    analyzer = _real_analyzer(_analysis())
     pending = PendingAnalysis(str(tmp_path))
     pending.add(["alt01", "alt02"])
     comp = _components(tmp_path, fetcher, analyzer, pending=pending)
@@ -560,7 +510,7 @@ def test_pending_corrupt_bytes_do_not_break_cycle(tmp_path, capsys):
 
     assert "无法解码" in out
     assert "推文重放队列损坏" in [t for t, _ in comp["dingtalk"].alerts]
-    assert comp["state"].get("alpha.regime_progress") > 0.5   # idle 正常推进
+    assert comp["state"].get_valuation() is None   # idle 不写估值
     assert comp["state"].get("runtime.analysis_count") == 1
 
 

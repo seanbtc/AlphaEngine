@@ -1,14 +1,15 @@
-"""成绩单 — 把"你错了"回流到下一轮 AI prompt (Phase 1)。
+"""成绩单 — 把"你错了"回流到下一轮 AI prompt (Phase 1).
 
-AI 每轮只看到 metrics/alpha 叙事, 看不到自己预测的实际结果, 因此不会修正。
-本模块从 prediction_log + prediction_outcomes + alpha_history 生成 ≤800 字符
-的成绩单, 由 alpha.py 注入 market_state, analyzer 渲染进 prompt。
+AI 每轮只看到 metrics/估值叙事, 看不到自己预测的实际结果, 因此不会修正。
+本模块从 prediction_log + prediction_outcomes + 估值历史 生成 ≤800 字符的
+成绩单, 由 alpha.py 注入 market_state, analyzer 渲染进 prompt。
 
-只读, 不写任何文件, 不影响仓位。
+只读, 不写任何文件, 不影响任何执行链路。
 """
 from datetime import datetime, timedelta, timezone
 
 from src.knowledge import _prediction_key, normalize_point_verdict
+from src.valuation import is_valid
 
 _VERDICT_LABEL = {
     "correct": "方向对",
@@ -55,46 +56,44 @@ def _drawdown_90d(knowledge, current_price):
     return (float(price) - peak) / peak * 100.0
 
 
-def _alpha_trajectory(memory, engine, btc_price):
-    """返回 (days, alpha_then, alpha_now, btc_change_pct) 或 None。"""
-    if memory is None or engine is None:
+def _valuation_trajectory(memory, valuation_now, btc_price):
+    """返回 (days, valuation_then, valuation_now, btc_change_pct) 或 None。"""
+    if memory is None or not is_valid(valuation_now):
         return None
-    alpha_history = memory.load_alpha_history()
-    if not alpha_history:
+    history = memory.load_valuation_history()
+    if not history:
         return None
     target = _now() - timedelta(days=30)
     candidate = None
     best_delta = None
-    for item in alpha_history:
+    for item in history:
         if not isinstance(item, dict):
             continue
         try:
             ts = datetime.fromisoformat(str(item.get("date", "")).replace("Z", "+00:00"))
             ts = ts.replace(tzinfo=None)
-            alpha = float(item.get("alpha"))
+            value = float(item.get("valuation"))
         except (TypeError, ValueError):
+            continue
+        if not is_valid(value):
             continue
         delta = abs((ts - target).total_seconds())
         if best_delta is None or delta < best_delta:
             best_delta = delta
-            candidate = (ts, alpha, item.get("btc_price"))
+            candidate = (ts, value, item.get("btc_price"))
     if candidate is None or best_delta is None or best_delta > 10 * 86400:
         return None
-    ts, alpha_then, price_then = candidate
-    try:
-        alpha_now = float(engine.get_alpha())
-    except (TypeError, ValueError):
-        return None
+    ts, value_then, price_then = candidate
     change = None
     if price_then and btc_price:
         try:
             change = (float(btc_price) - float(price_then)) / float(price_then) * 100.0
         except (TypeError, ValueError, ZeroDivisionError):
             change = None
-    return (max(1, (_now() - ts).days), alpha_then, alpha_now, change)
+    return (max(1, (_now() - ts).days), value_then, float(valuation_now), change)
 
 
-def build_scorecard(knowledge, memory=None, engine=None, btc_price=None,
+def build_scorecard(knowledge, memory=None, valuation_now=None, btc_price=None,
                     limit: int = 8, max_chars: int = 800) -> str:
     """构建成绩单文本; 无可用数据返回空串。"""
     if knowledge is None:
@@ -147,10 +146,10 @@ def build_scorecard(knowledge, memory=None, engine=None, btc_price=None,
             summary.append(f"当前回撤 {drawdown:+.1f}%")
         if summary:
             lines.append(" | ".join(summary))
-        trajectory = _alpha_trajectory(memory, engine, btc_price)
+        trajectory = _valuation_trajectory(memory, valuation_now, btc_price)
         if trajectory:
-            days, alpha_then, alpha_now, btc_change = trajectory
-            text = f"{days}天前 α={alpha_then:+.3f} → 现在 α={alpha_now:+.3f}"
+            days, value_then, value_now, btc_change = trajectory
+            text = f"{days}天前 估值={value_then:.2f} → 现在 {value_now:.2f}"
             if btc_change is not None:
                 text += f" | 同期 BTC {btc_change:+.1f}%"
             lines.append(text)

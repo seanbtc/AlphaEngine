@@ -17,12 +17,11 @@ _SCORES = {"profitability": 0.1, "institutional": 0.1, "onchain": 0.1,
            "derivatives": 0.1, "macro": 0.1}
 
 
-def _result(cp="RECOVERY", confidence="high", progress=0.5, **overrides):
+def _result(valuation=0.62, confidence="high", **overrides):
     result = {
-        "cycle_position": cp,
-        "cycle_confidence": confidence,
-        "regime_progress": progress,
-        "regime_evidence": "x",
+        "valuation": valuation,
+        "valuation_confidence": confidence,
+        "valuation_evidence": "x",
         "summary": "x",
         "evidence_scores": dict(_SCORES),
     }
@@ -35,7 +34,7 @@ class _StubAnalyzer(Analyzer):
         super().__init__({
             "enabled": True,
             "endpoint": "http://127.0.0.1:5010",
-            "cross_check": {"samples": samples, "structure_check": {"enabled": False}},
+            "cross_check": {"samples": samples},
         })
         self._responses = list(responses)
         self.calls = 0
@@ -109,46 +108,46 @@ def test_validate_ignores_optional_audit_fields():
 
 def test_cross_check_records_consistent_dispersion():
     analyzer = _StubAnalyzer([
-        (_result(progress=0.5, forecast={"horizon_days": 30, "direction": "up",
-                                         "price_low": 1, "price_high": 2}), False),
-        (_result(progress=0.5, forecast={"horizon_days": 30, "direction": "up",
-                                         "price_low": 1, "price_high": 2}), False),
+        (_result(0.62, forecast={"horizon_days": 30, "direction": "up",
+                                 "price_low": 1, "price_high": 2}), False),
+        (_result(0.66, forecast={"horizon_days": 30, "direction": "up",
+                                 "price_low": 1, "price_high": 2}), False),
     ])
     result = analyzer.analyze(list(_TWEETS), "")
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     block = result["cross_check"]
     assert block["samples"] == 2
-    assert block["position_agreement"] == 1.0
-    assert block["progress_std"] == 0.0
+    assert block["band_agreement"] == 1.0
+    assert block["valuation_spread"] == 0.04
     assert block["forecast_direction_agreement"] == 1.0
     assert block["dispersed"] is False
 
 
-def test_cross_check_progress_dispersion_records():
+def test_cross_check_in_band_spread_records():
     analyzer = _StubAnalyzer([
-        (_result(progress=0.2), False),
-        (_result(progress=0.8), False),
+        (_result(0.52), False),
+        (_result(0.78), False),
     ])
     result = analyzer.analyze(list(_TWEETS), "")
-    # K-03: progress 离散只留痕，不改变 live 置信（只有 cycle_position 不一致才降级）
-    assert result["cycle_confidence"] == "high"
+    # 档内离散只留痕，不改变 live 置信（只有跨档不一致才降级）
+    assert result["valuation_confidence"] == "high"
     block = result["cross_check"]
-    assert block["positions"] == ["RECOVERY", "RECOVERY"]
-    assert block["position_agreement"] == 1.0
-    assert block["progress_std"] == 0.3
+    assert block["bands"] == ["轻度高估", "轻度高估"]
+    assert block["band_agreement"] == 1.0
+    assert block["valuation_spread"] == 0.26
     assert block["dispersed"] is True
 
 
 def test_cross_check_direction_dispersion_records():
     analyzer = _StubAnalyzer([
-        (_result(forecast={"horizon_days": 30, "direction": "up",
-                           "price_low": 1, "price_high": 2}), False),
-        (_result(forecast={"horizon_days": 30, "direction": "down",
-                           "price_low": 3, "price_high": 4}), False),
+        (_result(0.62, forecast={"horizon_days": 30, "direction": "up",
+                                 "price_low": 1, "price_high": 2}), False),
+        (_result(0.64, forecast={"horizon_days": 30, "direction": "down",
+                                 "price_low": 3, "price_high": 4}), False),
     ])
     result = analyzer.analyze(list(_TWEETS), "")
-    # K-03: 方向离散只留痕，不改变 live 置信
-    assert result["cycle_confidence"] == "high"
+    # 方向离散只留痕，不改变 live 置信
+    assert result["valuation_confidence"] == "high"
     block = result["cross_check"]
     assert block["forecast_directions"] == ["up", "down"]
     assert block["forecast_direction_agreement"] == 0.5

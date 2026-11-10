@@ -1,6 +1,6 @@
 # Glassnode Alpha Engine
 
-BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推文 → DeepSeek AI 分析 → 周期判定 → α 平滑 → TradeSync 指令，钉钉推送全程监控。
+BTC 链上数据驱动的**市场估值评估器**。抓取 @glassnode 推文 → AI 分析 → 直接输出 0–1 市场估值（0=极度低估，1=极度高估）→ 推送钉钉/Promo；无仓位、无发单、无状态机。
 
 ## 架构
 
@@ -14,193 +14,53 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 │  Fetcher ──► tweets.jsonl (去重追加)                              │
 │     │                                                            │
 │     ▼ (有新推文)                                                  │
-│  Analyzer ──► DeepSeek API                                       │
-│     │          ├─ cycle_position (7 阶段)                         │
-│     │          ├─ evidence_scores (5 维度评分)                     │
+│  Analyzer ──► AIService / DeepSeek                               │
+│     │          ├─ valuation (0–1) + confidence + evidence         │
+│     │          ├─ evidence_scores (5 维度评分, 辅助解释)            │
 │     │          ├─ meta (漂移检测)                                  │
 │     │          └─ signal_board (可追溯信号)                       │
 │     ▼                                                            │
-│  AlphaEngine ──► Regime 状态机                                    │
-│     │          ├─ EvidenceAccumulator (累积/衰减)                 │
-│     │          ├─ 3 类别共识、±0.05 步进、10 周期冷却             │
-│     │          └─ DEEP_BULL(-1.0) … BEAR_BOTTOM(+1.0)            │
+│  StateManager ──► state.json (v2: valuation/runtime/ma/thesis)    │
+│     │                                                            │
+│     ├─► 估值历史 (valuation_history.json)                         │
+│     ├─► 跨档变更通知 (钉钉) / 编号帖子 (Promo)                     │
+│     └─► thesis / scorecard / manifest (反馈闭环, 只记录)           │
 │     ▼                                                            │
-│  Knowledge ──► drift_log / prediction_log                        │
-│     │          ├─ 风格漂移检测 (新术语、质量骤降)                   │
-│     │          ├─ 周度蒸馏 (knowledge_base.md)                    │
-│     │          └─ 预测审计                                        │
-│     ▼                                                            │
-│  StateManager ──► state.json (重启恢复)                           │
-│  Memory ────────► memory.md / metrics.json / alpha_history.json   │
-│  TradeSync ────► data/orders/ (交易指令, 默认关闭)                 │
-│  DataFeed ─────► BTC 价格 (可选, 默认关闭)                         │
-│  DingTalk ─────► 钉钉推送 (regime/alpha 变更 + 分析 + 告警)        │
+│  Knowledge ──► drift_log / prediction_log / 周度蒸馏               │
+│  Memory ─────► memory.md / metrics.json / valuation_history.json  │
+│  DataFeed ───► BTC 价格 + 日线均线/周期上下文 (可选)                │
+│  DingTalk ───► 钉钉推送 (估值变更 + 分析 + 告警)                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## 核心概念
 
-### Alpha 值（-1 ~ 1）
+### 市场估值（0 ~ 1）
 
-| 值 | 含义 | 对应 Regime |
+| 区间 | 档位 | 含义 |
 |---|---|---|
-| **+1.00** | 满仓做多 | BULL (牛市多次确认) |
-| **+0.70** | 建仓做多 | RECOVERY (牛市恢复确认) |
-| **+0.30** | 减仓多单（轻持） | DEEP_BULL (接近牛顶, 减仓) |
-| **0.00** | 中性/清仓 | BEAR_BOTTOM(清空做空) / BULL_COOLING(清空做多) |
-| **-0.30** | 减仓空单（轻持） | BEAR_DEEP (深熊, 减仓做空, 等底部) |
-| **-0.70** | — 不直接设目标 — | (平滑过渡中) |
-| **-1.00** | 满仓做空 | BEAR (熊市多次确认) |
+| **0.00–0.20** | 极度低估 | 多维极值共振向下：投降/亏损兑现/机构撤离到极致，价格远低于全网成本 |
+| **0.20–0.50** | 轻度低估 | 多数维度偏便宜：低估证据占优但未到极值，或极值信号刚出现 |
+| **0.50–0.80** | 轻度高估 | 多数维度偏昂贵：获利了结/杠杆偏热/资金流入放缓 |
+| **0.80–1.00** | 极度高估 | 多维极值共振向上：MVRV/NUPL 极端，LTH 大规模派发，机构流入见顶 |
 
-### 仓位管理：逐步确认，缓慢累积
+区间为左闭右开（0.20 → 轻度低估，0.50 → 轻度高估，0.80 → 极度高估）。
 
-仓位不是"确认即满仓"，而是"确认改变方向，多次确认逐步积累"。
+### 估值语义（只有评估，没有执行）
 
-```
-完整牛熊周期:
+- 估值分由 **AI 每轮直接输出**（`valuation` + `valuation_confidence` + `valuation_evidence`）；
+- 本地只做范围校验、档位映射、变更留痕；**不做平滑/冷却/连续确认/状态机推进**；
+- 无新推文或数据源故障时，估值保持不变（不做时间外推、不按自然日漂移）；
+- 移除全部执行链：无仓位建议、无 TradeSync 发单、无节奏门控、无影子账本、无风险预算；
+- 持久状态 `state.json` 为 **v2 schema**：`valuation` 块取代旧的 `regime`/`alpha`/`evidence`；
+  旧 v1 状态启动时自动迁移（保留 `runtime`/`ma`/`thesis`，估值置空等待下一轮 AI 评估）。
 
-熊底 → 牛初 → 牛中 → 牛顶 → 转熊 → 熊中 → 深熊 → 熊底
-  │       │      │      │      │      │      │      │
-  ▼       ▼      ▼      ▼      ▼      ▼      ▼      ▼
-清空    建仓   满仓   减仓   清空   满仓   减仓   清空
-做空    做多   做多   做多   做多   做空   做空   做空
-(=0)   (+0.7) (+1.0) (+0.3) (=0)  (-1.0) (-0.3) (=0)
-```
+### 交叉验证（valuation.cross_check）
 
-| 步骤 | Regime | Alpha 目标 | 操作 |
-|---|---|---|---|
-| 1. 熊底确认 | BEAR_BOTTOM | 0.00 | 清仓做空，中性等确认 |
-| 2. 牛市恢复 | RECOVERY | +0.70 | 多次确认牛市中 → 建仓多单 |
-| 3. 牛市确认 | BULL | +1.00 | 连续确认 → 满仓做多 |
-| 4. 接近牛顶 | DEEP_BULL | +0.30 | 过热信号 → 减仓多单 |
-| 5. 牛顶确认 | BULL_COOLING | 0.00 | 确认转熊 → 清仓多单 |
-| 6. 熊市确认 | BEAR | -1.00 | 多次确认熊市中 → 满仓做空 |
-| 7. 深熊减仓 | BEAR_DEEP | -0.30 | 接近底部 → 减仓做空，等确认 |
+同一 prompt 采样 `samples` 次（默认 2，1=关闭）：
 
-### 稳定机制
-
-| 规则 | 参数 | 效果 |
-|---|---|---|
-| 空闲时间推进 | 无新推文时 α 按自然日推进 (不响应噪音) | 周期钟与日历一致, 与调度频率解耦 |
-| 低置信锁定 | confidence=low 时 α 不动 | 不确定时不动 |
-| 每日一步 | 每天只分析一次 (86400s) | 杜绝日内高频跳变 |
-| 自然日步长 | `min_daily_step`/`max_change_per_step` (单轮边界 0.015/0.05) | 步长 = 自然日数/regime 预期天数 (2.33 天≈0.023, RECOVERY) |
-| 冷却期 | 10 轮 (决策机会数, 非自然日) | regime 变更后禁止再变 |
-| 共识门槛 | ≥3 类别、总分 ≥2.0 | 防止单一维度误导 |
-| 质量门槛 | `evidence.min_quality_for_regime_change` (默认 5) | 分析质量不足时拒绝 regime 变更 |
-| 连续确认 | `stability.required_confirmations` (默认 2) | 同一提议连续 N 轮分析成功才执行变更 |
-| 交叉验证 | `cross_check.samples` (默认 2, 1=关闭) | 同 prompt 多采样, `cycle_position` 不一致 → 降为 low |
-| 结构一致性 | `cross_check.structure_check.enabled` (默认开) | 提议增加多头暴露且 close<SMA200 → 降为 low (减仓/清仓方向不拦截) |
-| 抓取重试 | `schedule.retry_on_fetch_failure` / `retry_delay_seconds` | 抓取异常本轮内重试 1 次 (等待 clamp(delay, 0, 30) 秒), 仍失败走 outage |
-| 图片缓存上限 | `ai_service.image_cache_max_entries` (32) / `image_cache_max_bytes` (64MiB) | 视觉图片 base64 LRU 上限, 防长驻进程内存持续增长 |
-| 节奏门控 | `alpha.rhythm.*.enabled` (默认全关) | 结构定性门控 (熊侧收复/复苏完成/牛市顶部), 默认关闭可回滚 |
-| 影子账本 | `alpha.shadow.enabled` (默认观察) | 四轨迹纯观察 (永不下单), 不影响任何引擎行为; 报告见 tools/ |
-| 合法转换 | 预定义转换表 | 禁止非法跳变 |
-
-### 时间语义（自然日推进）
-
-- **progress/alpha 按自然日推进**：`state.runtime.last_tick_at` 记录上次推进时刻，每轮
-  `days_elapsed = clamp((now - last_tick_at) / 86400, 0, max_catchup_days)`（配置
-  `alpha.time_semantics.max_catchup_days`，默认 7 天）。空闲轮 `progress += days_elapsed / 预期天数`；
-  分析轮步长 = `days_elapsed / 预期天数`，再 clamp 到 `min_daily_step`/`max_change_per_step`
-  （仍为"单轮"边界）。按 `schedule.weekdays` 配置的任意调度（如 3 次/周）周期钟都与日历一致
-  ——旧逻辑每轮 `+1/预期天数`，慢 `7/3≈2.33×`；步长旧逻辑因 `1/90 < 下限` 恒为下限，"动态"失效。
-- **幂等与容错**：旧 state 无 `last_tick_at` 时首轮仅初始化锚点（不推进）；同秒/同日重复
-  运行 `elapsed≈0`，不重复推进；停摆超过 `max_catchup_days` 的部分直接丢弃（不补记）；
-  时间倒流不回退锚点。
-- **轮次语义保留**：`tick_cooldown`/`tick_stability` 仍按"轮次"（决策机会数）计数，与连续
-  确认制/冷却门配套，与自然日推进相互独立（以 3 次/周计，10 轮≈3.3 周而非 10 天；
-  具体以 `schedule.weekdays` 配置为准）。
-- **故障恢复不补记**：`fetch_error`/`analysis_failed` 故障期间周期钟冻结（WP5），恢复时
-  `_clear_outage` 把锚点重置为 now —— 故障时长不计入 progress/步长（恢复轮增量≈0），
-  恢复后从下一轮起按自然日推进。
-- **锚表对齐 4 年周期**：`REGIME_EXPECTED_DAYS` 各 regime 预期天数按 1461 天对齐（旧表
-  1270 天等比放大 ≈×1.15 后取整），合计 = 1461；`config.json.alpha.regime_expected_days`
-  可覆盖（值 clamp [20, 700]），需与 `src/alpha_engine.py` 锚表保持同步。
-- **参数治理（合计校验）**：启动路径（校准 overlay 之后）校验
-  `sum(expected_days) == 1461`，不一致仅打印一次
-  `[Alpha] 告警: regime_expected_days 合计=… != 1461 (4年周期), 不阻断`（不阻断启动；
-  构造期不重复告警）；`--status` 行展示 `RegimeDays=<合计>`，不匹配时标注
-  `RegimeDays=<合计>(!目标1461)`；启动日志也打印合计，便于部署核对。
-  校准路径（`params_store`）与 config 覆盖路径同边界 [20, 700]（月度复盘 prompt 同步）。
-- **校准落盘**：月度复盘 `apply_calibration` 在内存生效的同时写 `data/params.json`
-  （键=参数路径，值=新值；tmp+原子替换）并 append `data/calibration_log.jsonl`
-  （时间/参数/旧→新/来源）；启动时只读加载 overlay 恢复（非法文件告警并忽略），
-  重启不再丢失校准结果；`--test-ai` 等只读入口不写任何文件。
-
-### 节奏门控（rhythm，默认关闭）
-
-防过拟合的结构定性门控（`src/rhythm_gates.py`，纯函数、无 IO）：**不改节奏表数值**
-（`REGIME_EXPECTED_DAYS`/步长边界不动），只修定性结构错误；三门控**全部默认关闭**、
-可单独开关、可回滚（关掉即回到基线行为，参数默认零变化）。门控在 `tick_alpha` /
-`step_alpha` **前**作用于 `alpha.regime_progress`，数据来自 `ma_context`/`cycle_context`
-（TTL 缓存复用，不额外取数）；数据缺失/异常 → **fail-open**（不施加门控 = 基线行为）
-并打印 `[Rhythm]` 日志，任何异常不阻断本轮。
-
-| 门控 | regime | 触发 | 行为 |
-|---|---|---|---|
-| G1 `bear_reclaim_gate` | BEAR / BEAR_DEEP | 连续 `reclaim_confirm_days`(10) 日收盘 > 长均线（默认 SMA200）未确认 | progress 上限 `progress_cap`(0.5)；确认（结构修复）后放行 |
-| G2 `recovery_completion_gate` | RECOVERY | SMA250 斜率↑（结构完成） | progress = 1.0 |
-| G3 `bull_top_gate` | BULL | progress > `progress_threshold`(0.7) 且无释放条件 | 压回阈值；释放条件 = `top_risk.active` **或** SMA250 斜率↓ |
-
-配置见 `config.json` → `alpha.rhythm`；"连续站上长均线天数"为 `ma_context` 快照的
-`days_above_long_streak`（最小扩展，既有键不变）。门控作用在进入本轮推进的 progress 上，
-空闲轮随后仍按自然日推进一个步长（轮末落盘值可高于上限至多 `max_catchup_days/预期天数`）；
-分析轮（step）的压回为严格上限。默认关闭时 `apply_rhythm_gates` 恒等返回，行为与引入前
-逐点一致（冻结时钟回归测试覆盖 tick/step 两条路径）。
-
-### 影子账本（shadow，纯观察，永不下单）
-
-在"不接实盘"前提下长期观察不同节奏门控组合的盈利表现（`src/shadow_ledger.py`）：
-四轨迹 **baseline / +G1 / +G1+G2 / +G1+G2+G3** 独立模拟——regime 与引擎共享
-（引擎换挡时同步换挡，并取引擎门控后的 progress 作为同起点，此后因门控不同而
-分叉）。推进语义与引擎对齐（baseline 轨迹与引擎逐点一致；引擎"未步进"分支——
-低置信锁定/侧向兜底——不在镜像范围，影子按自身规则推进）：**分析轮** progress
-取引擎落盘值（= AI 输入，不叠加自然日），再应用本轨门控 → 定位/步进（对齐
-`step_alpha`）；**空闲轮**先门控（作用于进入本轮 progress）再按自然日推进
-（复用引擎 `expected_days`/`_dynamic_step` 同一公式，对齐 gate→`tick_alpha`）；
-**outage 轮**不推进也不刷新锚点，恢复轮一次性重置锚点且 days=0（对齐
-`_clear_outage`）。各轨门控复用 `rhythm_gates.apply_rhythm_gates`，目标复用
-`calculate_target_alpha`，步进同一 clamp 公式。
-目标仓位变化 ≥ `rebalance_threshold_pp`（默认 1.0pp）或方向变化才记事件
-（复刻 TradeSync 去重）；成交价 = 当轮引擎实际取到的价格；成本 = taker 0.05% +
-滑点 0.02%（按成交名义）；固定参考本金 10,000 U。**净值 = 固定名义敞口
-（alpha×本金）按当前价 mark-to-market，收益不滚入下一轮仓位（不复利）**。
-事件带当轮 `cycle_context` 结构阶段（①-④）供归因。
-
-- 产物（`data/shadow/`，已 gitignore）：`state.json`（四轨迹状态，原子写）、
-  `ledger.jsonl`（init/enter/adjust/exit 事件流，原子 append）、`equity.jsonl`
-  （每轮按当前价 mark-to-market 的净值快照，含 regime/phase）；
-- **隔离红线**：全部 try/except（失败只打印 `[Shadow]` 日志，绝不阻断主流程）、
-  不写引擎 `state.json`、不碰发单、不影响 AI 输出/通知/发帖；outage 轮不推进
-  镜像引擎（仅刷新锚点，故障时长不补记）；`enabled=false` 完全停用（零产物）；
-- 配置 `alpha.shadow`（`enabled=true` 表示"开始观察"；`notional`/`fee_pct`/
-  `slip_pct`/`rebalance_threshold_pp` 可调；门控参数取自 `alpha.rhythm`，
-  轨迹开关由轨迹名强制，与生产门控默认关闭无关）；
-- 报告：`py -3 tools/shadow_report.py`（四轨迹当前状态、净值曲线、按阶段盈亏
-  归因与成本、首个分叉点与原因、最近事件；`--out <file>` 写文件，`--data-dir`/
-  `--ledger`/`--equity` 指定数据源）；
-- 节奏校准：`py -3 tools/rhythm_report.py`（结构段长统计、关键里程碑、现表对照 +
-  cap×confirm×threshold 共 27 组合门控参数敏感性扫描，输出差异矩阵与参数轴
-  稳健性；数据源 `--csv` > 归档目录最新 CSV.gz > DataFeed `/klines`；纯只读）。
-
-连续确认细节：提议 `cp ≠ 当前 regime` 时写入 `state.regime.pending_proposal`
-（同一 cp 连续出现计数 +1，换向重置为 1，提议回到当前 regime 或执行成功后清除）；
-仅"有新推文且分析成功"的轮次计数，空闲轮不计数不重置；被冷却/低置信/质量/共识
-等门拒绝时计数保留（下次继续累计）；首轮分析与回溯路径豁免确认（一次性引导），
-但保留其它门。`required_confirmations=1` 等价于旧行为（可回退）。
-
-交叉验证细节：`cross_check.samples>1` 时同一 prompt 调用 AI 多次（首次必须有效，
-否则按原失败流程重试），样本 `cycle_position` 全部一致才按首样本返回；不一致时
-仅把 `cycle_confidence` 降为 `low`（不新增 cross_check；K-03 的 forecast/source_type_counts 由归一化添加），由既有低置信门
-阻断 regime 变更与 alpha 步进。`samples=1` 完全回退旧行为。
-
-结构一致性为**方向感知**：仅当提议 cp 为多头侧正暴露（`REGIME_ALPHA_MAP[cp] > 0`）
-且 `> 当前 alpha + 0.005`（加多）且 close < SMA200 时降级。熊侧空头减仓
-（`BEAR→BEAR_DEEP`、`BEAR_DEEP→BEAR_BOTTOM`，目标 alpha ≤ 0）与牛侧减仓/清仓
-（`BULL→DEEP_BULL`、`DEEP_BULL→BULL_COOLING`，目标不高于当前）均不会被拦截——
-前者在弱结构下是正常路径，后者是唯一降风险路径。`market_state` 缺 alpha 时回退为
-仅 `cp == "BULL"` 触发；MA 缺失/stale 不干预。
+- 样本**跨档**不一致 → 降级 `valuation_confidence=low`；
+- 档内数值离散（spread > 0.15）/ 预测方向不一致 → 仅写入 `cross_check` 审计块留痕，不改变 live 置信。
 
 ### 证据系统
 
@@ -219,7 +79,7 @@ BTC 链上数据驱动的仓位（alpha）管理系统。抓取 @glassnode 推�
 Binance U 本位口径），计算 5/10/20 EMA + 50/100/200/250 SMA，向 AI 提供价格所在区间、
 趋势斜率与近期均线事件（穿越/金叉死叉/斜率翻转），并写入 `data/ma_history.jsonl`
 按日去重的历史快照——AI 因此能看到"上次评审区间 → 本次变化"的演化，而非孤立快照。
-均线仅辅助判断周期位置是否与价格结构一致，不构成短期交易信号。
+均线仅辅助判断价格相对成本结构的位置（贵/便宜），不构成短期交易信号。
 
 数据源**不回退本地归档**：DataFeed 不可用（`ok=false`/异常）或 `stale=true` 时，
 均线段整体缺省并打印 `[MA]` 错误日志，主流程继续。
@@ -237,9 +97,9 @@ Binance U 本位口径），计算 5/10/20 EMA + 50/100/200/250 SMA，向 AI 提
 区间档位：强势多头区 / 上升趋势回调区 / 趋势转变观察区 / 转弱/反抽区 / 空头区。
 配置见 `config.json` → `ma_context`（归档路径、均线周期、斜率阈值、事件窗口、历史保留条数）。
 
-每轮正常分析还会把 K 线趋势摘要（`available/as_of/zone/price` + `updated_at`）随
-regime/alpha 一起写入 `state.json` 的 `ma` 字段，供 Web 面板只读展示（`--test-ai`/回溯
-等只读路径不写）；Web 侧由 `Web/web.py::load_alpha_engine_ma` 读取。
+每轮正常分析还会把 K 线趋势摘要（`available/as_of/zone/price` + `updated_at`）与估值一起
+写入 `state.json` 的 `ma` 字段，供 Web 面板只读展示（`--test-ai`/回溯等只读路径不写）；
+Web 侧由 `Web/web.py::load_alpha_engine_ma` 读取。
 
 ### 周期上下文（cycle_context）
 
@@ -259,8 +119,8 @@ regime/alpha 一起写入 `state.json` 的 `ma` 字段，供 Web 面板只读展
   两顶命中 +10d/+5d，2025 顶后 3 段且 `since` 恒为 2025-10-11（修复 ③↔② 闪烁与 since 失真）。
   顶部风险须与链上/宏观/新闻证据（Glassnode 内容）结合判断，不单独构成结论；
 - **阶段判定**：固定规则按 ④→③→②→① 顺序匹配（阈值可配），未命中为"过渡期"：
-  ④熊市（close<SMA200 且 200SMA↓）｜③中后期/顶部（**顶部风险激活** 或 regime=BULL_COOLING；alpha 仅独立展示不参与判定，防时间自推自反馈）｜
-  ②结构确认（250SMA↑ 且 regime∈{RECOVERY,BULL}）｜①复苏早期（regime∈{BEAR_BOTTOM,RECOVERY} 且 close>SMA200 且 250SMA↓）；
+  ④熊市（close<SMA200 且 200SMA↓）｜③中后期/顶部（**顶部风险激活** 或 **估值 ≥ 0.80**）｜
+  ②结构确认（250SMA↑）｜①复苏早期（close>SMA200 且 250SMA↓）；
 - **趋势关键值**：200/250 SMA 值与斜率、距 200SMA%、近 30/90 日站上 200SMA 天数、区间档位
   （传入 `ma_context` 时复用其 zone/days_above/zone_changes）；
 - **四组历史类比**（收盘口径，连续日去重 + 相邻≤5 交易日去抖，前瞻 30/90/180/365 交易日中位/正收益率/极值）：
@@ -332,7 +192,7 @@ nohup python3 -u -m src.alpha > engine.log 2>&1 &
 ### 日常使用
 
 ```bash
-python -m src.alpha --status    # 查看 regime + alpha
+python -m src.alpha --status    # 查看当前估值 + 分析计数
 python -m src.alpha --once      # 手动跑一次
 python -m src.alpha --backfill  # 强制重新回溯历史推文, 重设启动时的 alpha
 python -m src.alpha             # 常驻监控 (每天检测一次)
@@ -360,37 +220,34 @@ glassnode-engine/
 │   ├── config_loader.py           # 配置加载 + 路径解析
 │   ├── fetcher.py                 # RSS 多源 + snscrape 批量 + 文件导入
 │   ├── analyzer.py                # DeepSeek API (system prompt + JSON 修复)
-│   ├── alpha_engine.py            # Regime 状态机 + 证据累积 + α 平滑
+│   ├── valuation.py               # 0–1 估值: 档位/解析/变更文案 (唯一口径)
 │   ├── ma_context.py              # 日线均线结构 (区间/趋势/事件 + 历史快照)
 │   ├── cycle_context.py           # 周期定位/阶段判定/四组历史类比 (辅助参考)
-│   ├── rhythm_gates.py            # 节奏门控 G1/G2/G3 (默认关闭, 可回滚)
-│   ├── shadow_ledger.py           # 影子账本 (四轨迹纯观察, 永不下单)
-│   ├── state_manager.py           # state.json 持久化 + 脏写合批
-│   ├── memory.py                  # 双存储 (memory.md + metrics + alpha_history)
-│   ├── knowledge.py               # 蒸馏/漂移检测/预测审计
-│   ├── tradesync.py               # 交易指令输出 (file/http)
+│   ├── state_manager.py           # state.json v2 持久化 + v1 迁移 + 损坏恢复
+│   ├── memory.py                  # 双存储 (memory.md + metrics + valuation_history)
+│   ├── knowledge.py               # 蒸馏/漂移检测/预测审计 + 价格快照
+│   ├── thesis.py                  # 可证伪命题 (label=估值档位, 仅追溯)
+│   ├── scorecard.py               # 成绩单 (近期审计 + 估值轨迹)
 │   ├── datafeed.py                # BTC 价格获取
 │   ├── notify.py                  # 钉钉推送
 │   └── run.py                     # 主入口 + 回溯 + 循环调度
 │
 ├── tools/                         # 只读报告工具
-│   ├── shadow_report.py           # 影子账本报告 (四轨迹/阶段归因/分叉点)
-│   └── rhythm_report.py           # 节奏校准 + 门控参数敏感性扫描
+│   └── xwatch.py                  # X 抓取诊断
 │
 └── data/                          # 运行时自动生成
-    ├── state.json                 # 持久状态 (regime, alpha, ma, evidence, runtime)
+    ├── state.json                 # 持久状态 v2 (valuation, runtime, ma, thesis)
     ├── tweets.jsonl               # 推文存档 (JSONL)
     ├── memory.md                  # 叙事记忆
     ├── metrics.json               # 结构化指标
-    ├── alpha_history.json         # Alpha 时间线 (最近 500 条)
+    ├── valuation_history.json     # 估值历史 (最近 500 条, 损坏恢复依据)
     ├── knowledge_base.md          # 自进化知识库
     ├── drift_log.jsonl            # 漂移追踪
-    ├── prediction_log.jsonl       # 预测日志
-    ├── ma_history.jsonl           # 日线均线快照历史 (按日去重, 跨轮连续性)
-    ├── params.json                # 校准参数覆盖 (启动时加载, 重启不丢失)
-    ├── calibration_log.jsonl      # 校准审计 (时间/参数/旧→新/来源)
-    ├── shadow/                    # 影子账本 (state.json/ledger.jsonl/equity.jsonl)
-    └── orders/                    # 交易指令输出 (默认关闭)
+    ├── prediction_log.jsonl       # 预测日志 (valuation / forecast / cross_check)
+    ├── price_history.jsonl        # 价格快照 (趋势 + 预测审计)
+    ├── theses.jsonl               # 命题事件 (created/updated/invalidated/expired)
+    ├── run_manifest.jsonl         # 每轮估值前后/输入摘要 (审计)
+    └── ma_history.jsonl           # 日线均线快照历史 (按日去重, 跨轮连续性)
 ```
 
 ## 首次回溯流程
@@ -403,37 +260,30 @@ glassnode-engine/
   │
   ├─ 2. 智能采样 (2000→200 条, 关键推文全保留)
   │
-  ├─ 3. 分批送 DeepSeek (每批 5 条)
-  │     收集 cycle_position + evidence_scores
+  ├─ 3. 分批送 AI (每批 5 条)
+  │     收集 valuation + evidence_scores
   │
-  ├─ 4. 投票决定最终 regime (最近 30% 批次众数)
-  │
-  └─ 5. 一次性执行 regime + 直接设 alpha
+  └─ 4. 以最后一个有效批次的估值作为初始估值 (最新信息, 不做投票)
 ```
 
-重启时**无需清空 data 目录**。若想重新回溯历史推文确认启动时的 alpha：
+重启时**无需清空 data 目录**。若想重新回溯历史推文重建估值：
 
 ```bash
-python -m src.alpha --backfill   # 强制重跑回溯 (重置证据, 重设 regime/alpha)
+python -m src.alpha --backfill   # 强制重跑回溯 (以最新批次估值重建)
 ```
 
 `tweets.jsonl` 是回溯的数据源，请勿删除；`state.json` 保存运行状态，重启自动恢复。
 
-## 7 个周期位置
+## 4 个估值档位
 
-```
-BULL(+1.0) → DEEP_BULL(+0.3) → BULL_COOLING(0) → BEAR(-1.0) → BEAR_DEEP(-0.3) → BEAR_BOTTOM(0) → RECOVERY(+0.7) → BULL(+1.0)
-```
+| 档位 | 区间 | AI 输出倾向 |
+|---|---|---|
+| `极度低估` | 0.00 ≤ v < 0.20 | 多维极值共振向下（投降/机构撤离/深度亏损） |
+| `轻度低估` | 0.20 ≤ v < 0.50 | 多数维度偏便宜，但未到极值 |
+| `轻度高估` | 0.50 ≤ v < 0.80 | 多数维度偏昂贵：获利了结/杠杆偏热 |
+| `极度高估` | 0.80 ≤ v ≤ 1.00 | 多维极值共振向上（MVRV/NUPL 极端/LTH 派发） |
 
-| 位置 | Alpha目标 | 含义 | 仓位操作 |
-|---|---|---|---|
-| `BULL` | +1.00 | 牛市确认 | 多次确认牛市 → 满仓做多 |
-| `DEEP_BULL` | +0.30 | 接近牛顶 | 过热信号 → 减仓多单 |
-| `BULL_COOLING` | 0.00 | 牛顶确认 | 确认转熊 → 清仓多单 |
-| `BEAR` | -1.00 | 熊市确认 | 多次确认熊市 → 满仓做空 |
-| `BEAR_DEEP` | -0.30 | 深熊 | 接近底部 → 减仓做空，等确认 |
-| `BEAR_BOTTOM` | 0.00 | 熊底确认 | 底部信号 → 清仓做空，等翻多 |
-| `RECOVERY` | +0.70 | 牛市恢复 | 多次确认牛市中 → 建仓做多 |
+档位由本地 `src/valuation.py` 按区间映射（AI 只需输出 0–1 数值与证据）。
 
 ## 自我进化
 
@@ -456,16 +306,10 @@ BULL(+1.0) → DEEP_BULL(+0.3) → BULL_COOLING(0) → BEAR(-1.0) → BEAR_DEEP(
 
 - **来源标注**：`signal_board[].source_type` = `retrieved` / `remembered` / `inferred`；`retrieved` 必须带 `source`；`source_type_counts` 随预测落盘。
 - **区间预测**：`forecast` = `horizon_days(30/90)` + `direction` + `price_low/high` + `confidence` + `hit_probability` + `basis`；非法/缺失置 `null`，不阻断分析。
-- **重跑离散**：`_cross_check` 采样 2 次（可配 `alpha.cross_check.samples`），落盘 `cross_check` 块（positions / position_agreement / progress_std / forecast_direction_agreement / dispersed）。只有 `cycle_position` 不一致才降 `cycle_confidence=low`；progress/方向离散仅留痕，不改变 live 置信。
+- **重跑离散**：`_cross_check` 采样 2 次（可配 `valuation.cross_check.samples`），落盘 `cross_check` 块（valuations / valuation_spread / bands / band_agreement / forecast_direction_agreement / dispersed）。只有**跨档**不一致才降 `valuation_confidence=low`；档内离散/方向离散仅留痕。
 - **审计**：`audit_predictions` 对 forecast 取 target ±7 天最近价（平局偏好 after；`before` 表示 horizon 被缩短），落盘 `interval_hit` / `direction_hit` / `brier` / `width_pct` / `horizon_price_offset_days` / `horizon_price_source`；旧预测仍按方向审计。
-- **校准报告**：
-  ```bash
-  python3 tools/calibration_report.py            # 人读
-  python3 tools/calibration_report.py --json     # 机器读
-  ```
-  输出 point 命中率、区间覆盖、Brier、ECE、按 confidence/prompt_hash/model 分桶、重跑离散率、pending/awaiting/skipped、by_horizon 与 by_price_source。
-- **口径注意**：`forecast.confidence` 暂未参与校准（分桶仍用 cycle confidence，字段保留供审计）；方向命中阈值与 point 一致（up/down ±2%、flat ±3%），90 天 flat 的命中率需谨慎解读。
-- **复盘/蒸馏**：月度复盘结果与每周知识蒸馏会记录 `prediction_calibration` 供人读/留档；**自动参数校准 prompt 不读取该字段**，避免它影响 `adjustments` 的自动应用。
+- **口径注意**：direction 命中阈值与 point 一致（up/down ±2%、flat ±3%）；估值→预期方向按 `<0.45 up / >0.55 down / 其余 flat` 推导（旧记录按原 cycle_position 兜底）；90 天 flat 的命中率需谨慎解读。
+- **周度蒸馏**：知识蒸馏会把预测校准摘要写入 prompt，用于归纳模型过/欠置信区间；月度复盘与参数自动校准已随 regime 状态机移除。
 
 ### 知识蒸馏（每周日 0 UTC）
 
@@ -476,7 +320,7 @@ AI 自动运行：
 
 ### 状态恢复
 
-程序 Ctrl+C 正常退出时自动保存 state.json。若文件损坏，从 alpha_history.json 重建。
+程序 Ctrl+C 正常退出时自动保存 state.json。若文件损坏/版本未知，备份损坏文件并从 `valuation_history.json` 重建（估值 + 分析计数）；v1 状态自动迁移为 v2。
 
 ## 钉钉推送
 
@@ -484,33 +328,13 @@ AI 自动运行：
 
 | 事件 | 推送内容 |
 |---|---|
-| **Regime 变更** | 🟩 BEAR → BEAR_DEEP, alpha, 原因 |
-| **Alpha 变更** | 🟢 +0.30 → +0.35, BTC $64K |
-| **分析结果** | 🧠 周期位置 + 信号板 |
+| **估值变更（跨档）** | 🟢 0.42 轻度低估 → 0.62 轻度高估，置信 + 依据 |
+| **分析结果** | 估值 + 档位 + 关键信号 + 评估总结 + 预测 |
 | **风格漂移** | ⚠ 新术语/质量骤降 |
 
 ## Promo 帖子推送
 
 编号帖子经 HTTP POST 推送至 Promo 事件服务（`PROMO_EVENTS_URL`），失败即丢弃、不写文件桥。仅**发往 Promo 的载荷文本**按 `promo.term_replacements` 做品牌词避让（大小写不敏感、按序替换，如 `Coinbase Premium` → `美资现货溢价`）；钉钉消息、记忆/知识库与 AI 原始输出保持原文。配置缺失/非法、替换后为空 → 原文透传并打日志。
-
-## 接入 TradeSync
-
-`config.json` 中启用：
-
-```json
-"tradesync": {
-    "enabled": true,
-    "mode": "file",
-    "output_dir": "orders"
-}
-```
-
-输出格式（`data/orders/YYYYMMDD.jsonl`）：
-
-```json
-{"timestamp":"2026-08-06T12:00:00Z","alpha":0.50,"regime":"BEAR_DEEP",
- "direction":"long","size_pct":50.0,"btc_price":64600,"action":"adjust"}
-```
 
 ## 接入 DataFeed (BTC 价格 / K 线)
 
@@ -533,10 +357,10 @@ AI 自动运行：
 
 | 场景 | 参数调整 |
 |---|---|
-| 更敏感的 regime 切换 | 降 `min_total_score`: 2.0→1.5, 降 `min_categories`: 3→2 |
-| 更稳定的 alpha | 降 `max_change_per_step`: 0.05→0.02, 升 `cooldown_cycles`: 10→20 |
-| 减少 DeepSeek 成本 | 降 `max_analysis_samples`: 200→100 |
-| 加速回溯 | 增 `batch_size`: 5→10 (可能截断), 增 `max_tokens`: 4096→8192 |
+| 关闭交叉验证（降成本） | `valuation.cross_check.samples`: 2→1 |
+| 减少 AI 成本 | 降 `backfill.max_analysis_samples`: 200→100 |
+| 加速回溯 | 增 `backfill.batch_size`: 5→10 (可能截断), 增 `max_tokens`: 4096→8192 |
+| 调整分析频率 | `schedule.daily_time` / `schedule.weekdays` |
 
 ## 故障排查
 
@@ -547,7 +371,7 @@ AI 自动运行：
 | `Snscrape not installed` | 未安装 | `pip install snscrape` |
 | `IP 不在白名单中` | 钉钉安全设置 | 把服务器 IP 加入钉钉机器人白名单 |
 | `All RSS sources failed` | 网络问题 | 等服务恢复；或用 `--import` 手动导入 |
-| Alpha 长期不动 | 无新推文 + 已到 target | 正常，等新数据 |
+| 估值长期不动 | 无新推文 / 数据源故障 | 正常（估值不随时间漂移），等新数据 |
 | 钉钉重复推送 | 回溯阶段 | 正常，仅首次回溯时有 |
 
 ## 安全注意事项

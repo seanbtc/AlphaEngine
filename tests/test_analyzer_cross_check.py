@@ -1,4 +1,4 @@
-"""WP2 ⑤: 单次判断交叉验证 + 结构一致性检查 — 离线单元测试 (stub _call_api)。"""
+"""单次判断交叉验证 (按估值档位一致性) — 离线单元测试 (stub _call_api)。"""
 import sys
 from pathlib import Path
 
@@ -18,15 +18,16 @@ _VALID_SCORES = {"profitability": 0.1, "institutional": 0.1, "onchain": 0.1,
                  "derivatives": 0.1, "macro": 0.1}
 
 
-def _result(cp="RECOVERY", conf="high", **overrides):
+def _result(valuation=0.62, conf="high", forecast=None, **overrides):
     result = {
-        "cycle_position": cp,
-        "cycle_confidence": conf,
-        "regime_progress": 0.5,
-        "regime_evidence": "x",
+        "valuation": valuation,
+        "valuation_confidence": conf,
+        "valuation_evidence": "MVRV 2.1 中性偏高",
         "summary": "x",
         "evidence_scores": dict(_VALID_SCORES),
     }
+    if forecast is not None:
+        result["forecast"] = forecast
     result.update(overrides)
     return result
 
@@ -51,78 +52,93 @@ class _StubAnalyzer(Analyzer):
         return self._responses.pop(0)
 
 
-def _ma_state(price, sma200, alpha=None):
-    state = {"ma_context": {"snapshot": {"price": price,
-                                         "mas": {"sma200": {"value": sma200}}}}}
-    if alpha is not None:
-        state["alpha"] = alpha
-    return state
-
-
-def _structure_analyzer(cp):
-    return _StubAnalyzer([(_result(cp=cp), False)],
-                         cross_check={"samples": 1,
-                                      "structure_check": {"enabled": True}})
-
-
 def test_init_components_injects_cross_check(tmp_path):
     from src.alpha import init_components
 
     cfg = {
         "paths": {"data_dir": str(tmp_path)},
         "ai_service": {"endpoint": "http://127.0.0.1:5010"},
-        "alpha": {"cross_check": {"samples": 3,
-                                  "structure_check": {"enabled": False}}},
+        "valuation": {"cross_check": {"samples": 3}},
     }
     components = init_components(cfg)
 
     assert components["analyzer"].cross_check_samples == 3
-    assert components["analyzer"].structure_check_enabled is False
 
 
-# ---- 交叉验证: 一致 / 不一致 ----
+# ---- 交叉验证: 档位一致 / 跨档 ----
 
-def test_samples_two_consistent(capsys):
-    analyzer = _StubAnalyzer([(_result(), False), (_result(), False)])
+def test_samples_two_same_band_consistent(capsys):
+    analyzer = _StubAnalyzer([(_result(0.62), False), (_result(0.68), False)])
 
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
     assert result is not None
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
-    assert "交叉验证一致 (2 样本): cp=RECOVERY" in out
+    assert "交叉验证一致 (2 样本): 估值=0.62 (轻度高估)" in out
+    assert result["cross_check"]["band_agreement"] == 1.0
+    assert result["cross_check"]["dispersed"] is False
 
 
-def test_samples_two_inconsistent_degrades(capsys):
-    analyzer = _StubAnalyzer([(_result(cp="RECOVERY"), False),
-                              (_result(cp="BULL"), False)])
+def test_samples_two_cross_band_degrades(capsys):
+    analyzer = _StubAnalyzer([(_result(0.42), False), (_result(0.62), False)])
 
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["cycle_confidence"] == "low"
-    assert "交叉验证不一致" in out
-    assert "RECOVERY" in out and "BULL" in out
+    assert result["valuation_confidence"] == "low"
+    assert "交叉验证跨档不一致" in out
+    assert "轻度低估" in out and "轻度高估" in out
     assert analyzer.calls == 2
-    # K-03: 归一后保留原字段，并新增审计字段（不再等于原始 set）
+    # 归一后保留原字段，并新增审计字段
     assert set(_result()) <= set(result)
     assert result["cross_check"]["dispersed"] is True
     assert result["cross_check"]["samples"] == 2
+    assert result["cross_check"]["valuation_spread"] == pytest.approx(0.20)
 
 
-def test_samples_three_inconsistent_degrades(capsys):
-    analyzer = _StubAnalyzer([(_result(cp="RECOVERY"), False),
-                              (_result(cp="RECOVERY"), False),
-                              (_result(cp="BULL"), False)],
+def test_samples_three_cross_band_degrades(capsys):
+    analyzer = _StubAnalyzer([(_result(0.62), False),
+                              (_result(0.65), False),
+                              (_result(0.22), False)],
                              cross_check={"samples": 3})
 
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["cycle_confidence"] == "low"
+    assert result["valuation_confidence"] == "low"
     assert analyzer.calls == 3
-    assert "交叉验证不一致" in out
+    assert "交叉验证跨档不一致" in out
+    assert result["cross_check"]["band_agreement"] == pytest.approx(2 / 3, abs=1e-4)
+
+
+def test_same_band_wide_spread_only_logged(capsys):
+    """档内数值离散 (spread > 0.15) 只留痕, 不改 live 置信。"""
+    analyzer = _StubAnalyzer([(_result(0.52), False), (_result(0.78), False)])
+
+    result = analyzer.analyze(list(_TWEETS), "")
+    out = capsys.readouterr().out
+
+    assert result["valuation_confidence"] == "high"
+    assert "交叉验证档内离散" in out
+    assert result["cross_check"]["dispersed"] is True
+    assert result["cross_check"]["band_agreement"] == 1.0
+
+
+def test_same_band_direction_disagreement_only_logged(capsys):
+    up = {"horizon_days": 30, "direction": "up", "price_low": 1, "price_high": 2,
+          "confidence": 0.6, "hit_probability": 0.6, "basis": ["inferred: x"]}
+    down = dict(up, direction="down")
+    analyzer = _StubAnalyzer([(_result(0.62, forecast=up), False),
+                              (_result(0.64, forecast=down), False)])
+
+    result = analyzer.analyze(list(_TWEETS), "")
+    out = capsys.readouterr().out
+
+    assert result["valuation_confidence"] == "high"
+    assert "交叉验证档内离散" in out
+    assert result["cross_check"]["forecast_direction_agreement"] == 0.5
 
 
 def test_extra_sample_call_failure_logged(capsys):
@@ -131,18 +147,18 @@ def test_extra_sample_call_failure_logged(capsys):
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
     assert "交叉验证样本 2/2 无效 (调用失败, retryable=True), 忽略" in out
 
 
 def test_extra_sample_validation_failure_logged(capsys):
-    analyzer = _StubAnalyzer([(_result(), False), (_result(cp="MOON"), False)])
+    analyzer = _StubAnalyzer([(_result(), False), (_result(valuation=1.7), False)])
 
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
     assert "交叉验证样本 2/2 无效 (输出校验不通过), 忽略" in out
 
@@ -161,7 +177,7 @@ def test_first_sample_invalid_no_cross_check_calls(capsys):
 
 
 def test_first_sample_invalid_schema_no_cross_check_calls(capsys):
-    analyzer = _StubAnalyzer([(_result(cp="MOON"), False), (_result(), False)])
+    analyzer = _StubAnalyzer([(_result(valuation=None), False), (_result(), False)])
 
     result = analyzer.analyze(list(_TWEETS), "", retries=0)
     out = capsys.readouterr().out
@@ -181,9 +197,10 @@ def test_samples_one_single_call(capsys):
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 1
     assert "交叉验证" not in out
+    assert "cross_check" not in result
 
 
 def test_samples_default_is_two(capsys):
@@ -192,7 +209,7 @@ def test_samples_default_is_two(capsys):
 
     result = analyzer.analyze(list(_TWEETS), "")
 
-    assert result["cycle_confidence"] == "high"
+    assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
 
 
@@ -201,156 +218,13 @@ def test_samples_default_is_two(capsys):
 def test_vision_path_uses_same_cross_check(capsys):
     tweets = [dict(_TWEETS[0],
                    images=["https://pbs.twimg.com/media/example.jpg"])]
-    analyzer = _StubAnalyzer([(_result(), False),
-                              (_result(cp="BULL"), False)], vision=True)
+    analyzer = _StubAnalyzer([(_result(0.62), False),
+                              (_result(0.18), False)], vision=True)
 
     result = analyzer.analyze(tweets, "")
     out = capsys.readouterr().out
 
     assert analyzer.calls == 2
-    assert result["cycle_confidence"] == "low"
+    assert result["valuation_confidence"] == "low"
     assert "使用视觉(多模态)评估" in out
-    assert "交叉验证不一致" in out
-
-
-# ---- 结构一致性检查 (方向感知: 仅拦截增加多头暴露的提议) ----
-
-def test_structure_bull_increasing_exposure_degrades(capsys):
-    analyzer = _structure_analyzer("BULL")
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000, alpha=0.70))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "low"
-    assert "结构一致性冲突" in out
-    assert "SMA200" in out
-    assert set(_result()) <= set(result)
-    # samples=1 完全保持旧交叉验证行为：不生成 cross_check
-    assert "cross_check" not in result
-
-
-def test_structure_bull_already_full_not_degraded(capsys):
-    analyzer = _structure_analyzer("BULL")
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000, alpha=1.00))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "high"
-    assert "结构一致性冲突" not in out
-
-
-def test_structure_missing_alpha_fallback_bull_only(capsys):
-    assert _structure_analyzer("BULL").analyze(
-        list(_TWEETS), "",
-        market_state=_ma_state(80000, 90000))["cycle_confidence"] == "low"
-    assert _structure_analyzer("DEEP_BULL").analyze(
-        list(_TWEETS), "",
-        market_state=_ma_state(80000, 90000))["cycle_confidence"] == "high"
-    assert _structure_analyzer("BULL_COOLING").analyze(
-        list(_TWEETS), "",
-        market_state=_ma_state(80000, 90000))["cycle_confidence"] == "high"
-
-
-@pytest.mark.parametrize("cp,alpha", [
-    ("DEEP_BULL", 1.00),     # BULL → DEEP_BULL 1.0 → 0.3 减仓
-    ("DEEP_BULL", 0.70),     # 0.7 → 0.3 减仓
-    ("BULL_COOLING", 0.30),  # DEEP_BULL → BULL_COOLING 0.3 → 0.0 清仓
-    ("BULL_COOLING", 1.00),  # 1.0 → 0.0 清仓
-    ("BEAR_DEEP", -1.00),    # BEAR → BEAR_DEEP 空头减仓 (目标 -0.3 <= 0)
-    ("BEAR_BOTTOM", -0.30),  # BEAR_DEEP → BEAR_BOTTOM 见底准备 (目标 0.0 <= 0)
-])
-def test_structure_risk_reducing_positions_not_degraded(cp, alpha, capsys):
-    analyzer = _structure_analyzer(cp)
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000, alpha=alpha))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "high"
-    assert "结构一致性冲突" not in out
-
-
-@pytest.mark.parametrize("cp,alpha", [
-    ("RECOVERY", 0.00),   # BEAR_BOTTOM → RECOVERY 翻多 (目标 +0.7)
-    ("DEEP_BULL", 0.00),  # BULL_COOLING → DEEP_BULL 回退加多 (目标 +0.3)
-])
-def test_structure_bear_side_to_long_increases_degraded(cp, alpha, capsys):
-    analyzer = _structure_analyzer(cp)
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000, alpha=alpha))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "low"
-    assert "结构一致性冲突" in out
-
-
-@pytest.mark.parametrize("cp", ["BEAR", "BEAR_DEEP", "BEAR_BOTTOM", "RECOVERY"])
-def test_structure_other_positions_not_intervening(cp):
-    analyzer = _structure_analyzer(cp)
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000))
-
-    assert result["cycle_confidence"] == "high"
-
-
-def test_structure_above_sma200_not_intervening(capsys):
-    analyzer = _structure_analyzer("BULL")
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(95000, 90000, alpha=0.70))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "high"
-    assert "结构一致性冲突" not in out
-
-
-@pytest.mark.parametrize("market_state", [
-    None,
-    {},
-    {"ma_context": {}},
-    {"ma_context": {"snapshot": {}}},
-    {"ma_context": {"snapshot": {"price": 80000}}},
-    {"ma_context": {"snapshot": {"price": 80000, "mas": {}}}},
-    {"ma_context": {"snapshot": {"price": 80000,
-                                 "mas": {"sma200": {"value": None}}}}},
-])
-def test_structure_missing_data_not_intervening(market_state):
-    analyzer = _StubAnalyzer([(_result(cp="BULL"), False)],
-                             cross_check={"samples": 1,
-                                          "structure_check": {"enabled": True}})
-
-    result = analyzer.analyze(list(_TWEETS), "", market_state=market_state)
-
-    assert result["cycle_confidence"] == "high"
-
-
-def test_structure_check_disabled(capsys):
-    analyzer = _StubAnalyzer([(_result(cp="BULL"), False)],
-                             cross_check={"samples": 1,
-                                          "structure_check": {"enabled": False}})
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "high"
-    assert "结构一致性冲突" not in out
-
-
-def test_cross_check_and_structure_both_degrade(capsys):
-    analyzer = _StubAnalyzer([(_result(cp="BULL"), False),
-                              (_result(cp="BULL_COOLING"), False)],
-                             cross_check={"samples": 2,
-                                          "structure_check": {"enabled": True}})
-
-    result = analyzer.analyze(list(_TWEETS), "",
-                              market_state=_ma_state(80000, 90000, alpha=0.70))
-    out = capsys.readouterr().out
-
-    assert result["cycle_confidence"] == "low"
-    assert "交叉验证不一致" in out
-    assert "结构一致性冲突" in out
+    assert "交叉验证跨档不一致" in out

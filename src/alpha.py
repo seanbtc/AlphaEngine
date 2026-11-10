@@ -1,5 +1,7 @@
 """
-Glassnode Alpha Engine — 主入口.
+Glassnode Alpha 估值引擎 — 主入口.
+
+AI 直接输出 0–1 市场估值 (0=极度低估, 1=极度高估); 无状态机/无仓位/无发单。
 
 用法:
     python -m src.alpha
@@ -18,29 +20,21 @@ import requests
 
 from src.config_loader import load_config, resolve_data_dir
 from src.memory import Memory
-from src.params_store import apply_overlay, load_overlay
 from src.singleton_lock import SingletonLock
 from src.state_manager import StateManager
 from src.fetcher import Fetcher
 from src.analyzer import Analyzer
-from src.alpha_engine import (AlphaEngine, EvidenceAccumulator,
-                              EXPECTED_DAYS_TOTAL, REGIME_ALPHA_MAP,
-                              REGIME_TRANSITIONS)
 from src.knowledge import Knowledge
 from src.ma_context import build_ma_context, summarize_ma_context
-from src.rhythm_gates import apply_rhythm_gates
-from src.shadow_ledger import ShadowLedger
 from src.pending_analysis import PendingAnalysis
 from src.cycle_context import build_cycle_context
-from src.tradesync import TradeSync
 from src.datafeed import DataFeed
 from src.notify import DingTalk
-from src.review_engine import ReviewEngine
 from src.scorecard import build_scorecard
 from src.thesis import (adopt_thesis, append_event as append_thesis_event,
                         evaluate_thesis, load_current as load_current_thesis,
                         save_current as save_current_thesis)
-from src.risk_state import evaluate_risk, format_risk
+from src.valuation import band_of, change_text, describe, is_cross_band, is_valid
 from src import manifest as run_manifest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -116,7 +110,7 @@ def _apply_promo_term_replacements(text: str, promo_cfg: dict) -> str:
     return result
 
 
-def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha: float):
+def _write_promo_post(cfg: dict, post_text: str, post_no: int, valuation):
     """把编号帖子推送给 Promo: 仅 HTTP 推送, 失败即丢弃 (不写文件桥, 过期不候)。
 
     载荷文本在此应用 promo.term_replacements (品牌词避让): 仅影响 Promo 载荷,
@@ -133,8 +127,8 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
             "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "post_no": post_no,
             "content": payload_text,
-            "cycle": cycle,
-            "alpha": alpha,
+            "valuation": valuation if is_valid(valuation) else None,
+            "valuation_label": band_of(valuation),
         })
         if _push_promo_event(record):
             print(f"[Promo] 帖子 No.{post_no} 已推送到 Promo 事件服务")
@@ -142,34 +136,6 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, cycle: str, alpha
             print(f"[Promo] 帖子 No.{post_no} 推送失败, 已丢弃")
     except Exception as e:
         print(f"[Promo] 推送帖子失败: {e}")
-
-
-def _valid_cycle_position(cp) -> bool:
-    """AI 输出 cp 合法性守卫 (与 analyzer 校验同口径): 仅 7 个 regime."""
-    return cp in REGIME_ALPHA_MAP
-
-
-def _select_progress(rp, ok: bool, cp: str, current_regime: str,
-                     old_progress: float) -> float:
-    """选择本轮要落盘的 regime_progress (纯函数, 便于测试).
-
-    仅当 regime 提议被接受 (ok) 或 AI 描述的就是当前 regime 时才采用新值;
-    提议被拒且指向其它 regime 时保留旧值 —— 被拒的跨级提议若用新进度参与
-    target 计算, 会把"下一阶段"的语义错位到"当前 regime"上。
-    """
-    if rp is None:
-        return old_progress
-    try:
-        new_progress = float(rp)
-    except (TypeError, ValueError):
-        return old_progress
-    if ok or cp == current_regime:
-        return max(0.0, min(1.0, new_progress))
-    return old_progress
-
-
-# 发单一致性: alpha 变化判定阈值 (浮点误差同量级)
-_ALPHA_ORDER_EPS = 1e-9
 
 
 def _record_ai_call_meta(sm, analyzer) -> None:
@@ -188,32 +154,6 @@ def _fetch_retry_delay(value) -> float:
     return max(0.0, min(30.0, delay))
 
 
-def _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start: float,
-                                 btc_price, *, reason: str):
-    """统一发单钩子: 本轮 alpha 相对周期起点变化时, 把最终值发给 TradeSync.
-
-    任何会改 alpha 的路径 (regime 变更 / deferred_build / SIDE-FIX / step /
-    idle 时间推进) 都在该轮结束时调用本钩子一次, 保证引擎 alpha 与发单指令一致;
-    多点变更只发本轮最终值 (每轮至多一次)。
-    引导路径 (run_first_analysis / run_backfill) 豁免, 不调用本钩子。
-    发送异常或 None (未启用/同向去重/发送失败) 不影响主流程。
-    """
-    final = engine.get_alpha()
-    if abs(final - alpha_cycle_start) <= _ALPHA_ORDER_EPS:
-        return None
-    regime = engine.get_regime()
-    try:
-        order = tradesync.send_order(final, regime, btc_price)
-    except Exception as exc:
-        print(f"  [TradeSync] alpha {alpha_cycle_start:+.4f} → {final:+.4f} | "
-              f"regime={regime} | reason={reason} | 发送异常 (不影响本轮): {exc}")
-        return None
-    status = "已发送" if order else "未生效 (未启用/同向去重/发送失败)"
-    print(f"  [TradeSync] alpha {alpha_cycle_start:+.4f} → {final:+.4f} | "
-          f"regime={regime} | reason={reason} | {status}")
-    return order
-
-
 def _alert_state_recovery(dingtalk, info: dict) -> None:
     """state 损坏恢复后的钉钉告警 (通知失败不影响启动)."""
     reason = info.get("reason", "未知")
@@ -221,11 +161,11 @@ def _alert_state_recovery(dingtalk, info: dict) -> None:
     if info.get("rebuilt"):
         title = "state 已从记忆重建"
         body = (f"原因: {reason}\n备份: {backup}\n"
-                f"重建: regime={info.get('regime')}, alpha={info.get('alpha')}")
+                f"重建: 估值={info.get('valuation')}")
     else:
         title = "state 损坏且无记忆可重建"
         body = (f"原因: {reason}\n备份: {backup}\n"
-                f"已使用默认状态 (regime=BEAR, alpha=0.0)")
+                "已回到默认状态 (估值待下一轮 AI 评估)")
     print(f"[State] {title} | " + body.replace("\n", " | "))
     try:
         dingtalk.alert(title, body)
@@ -251,71 +191,34 @@ def init_components(cfg: dict):
         max_age_days=fetcher_cfg.get("pending_max_age_days", 7),
     )
     ai_cfg = dict(cfg.get("ai_service") or cfg.get("deepseek") or {})
-    ai_cfg["cross_check"] = (cfg.get("alpha") or {}).get("cross_check") or {}
+    ai_cfg["cross_check"] = (cfg.get("valuation") or {}).get("cross_check") or {}
     # Phase 1 门控: thesis=false 时 prompt/输出契约回到旧版 (config 注释"关闭即回退")
     ai_cfg["thesis_enabled"] = _feature_enabled(cfg, "thesis")
     analyzer = Analyzer(ai_cfg)
-    engine = AlphaEngine(cfg.get("alpha", {}), state_mgr)
-    evidence = EvidenceAccumulator(
-        state_mgr, cfg.get("alpha", {}).get("evidence", {}).get("decay_per_cycle", 0.02))
     knowledge = Knowledge(cfg.get("knowledge", {}), data_dir, analyzer)
 
-    # 校准覆盖恢复 (data/params.json): 只读加载, 重启后仍生效;
-    # 非法文件容错告警, 不影响启动。--test-ai 等只读入口同样只读不写。
-    overlay = load_overlay(data_dir)
-    if overlay:
-        applied_overlay = apply_overlay(engine, overlay, evidence=evidence,
-                                        knowledge=knowledge)
-        if applied_overlay:
-            print(f"[Params] 已加载校准覆盖 {len(applied_overlay)} 项: "
-                  + ", ".join(applied_overlay))
-
-    tradesync = TradeSync(cfg.get("tradesync", {}), data_dir)
     datafeed = DataFeed(cfg.get("datafeed", {}))
-    review = ReviewEngine(cfg.get("review", {}), data_dir, state_mgr, engine,
-                          knowledge, evidence=evidence)
-    # WP8 8C 影子账本 (纯观察, 永不下单; enabled=false 时完全停用零开销)
-    shadow = ShadowLedger(cfg.get("alpha", {}), data_dir, engine, state_mgr)
 
     return {
         "cfg": cfg, "data_dir": data_dir,
         "memory": memory, "state": state_mgr,
         "fetcher": fetcher, "analyzer": analyzer,
-        "engine": engine, "evidence": evidence,
-        "knowledge": knowledge, "tradesync": tradesync,
+        "knowledge": knowledge,
         "datafeed": datafeed, "dingtalk": dingtalk,
-        "review": review, "pending": pending,
-        "shadow": shadow,
+        "pending": pending,
     }
 
 
 def print_status(components: dict):
     sm = components["state"]
-    regime = sm.get_regime()
-    alpha = sm.get_alpha()
+    valuation = sm.get_valuation()
     count = sm.get("runtime.analysis_count", 0)
-    print(f"\n[Status] Regime={regime} | Alpha={alpha:+.4f} | Analyses={count}")
-    line = (f"         Cooldown={sm.get('regime.cooldown_remaining',0)} | "
-            f"Stability={sm.get('regime.stability_counter',0)}")
+    print(f"\n[Status] 估值={describe(valuation)} | Analyses={count}")
+    line = "        "
     outage = sm.get("runtime.outage") or {}
     if isinstance(outage, dict) and outage:
         line += (f" | Outage={outage.get('reason', '?')}"
                  f"(since {outage.get('since', '?')})")
-    engine = components.get("engine")
-    if engine is not None:
-        try:
-            total_days = engine.expected_days_sum()
-            if total_days == EXPECTED_DAYS_TOTAL:
-                line += f" | RegimeDays={total_days}"
-            else:
-                line += f" | RegimeDays={total_days}(!目标{EXPECTED_DAYS_TOTAL})"
-        except Exception:
-            pass
-        pending = engine.get_pending_proposal()
-        if pending:
-            line += (f" | Pending={pending.get('cp')}"
-                     f"({engine.pending_count(pending)}/"
-                     f"{engine.required_confirmations()})")
     dingtalk = components.get("dingtalk")
     failures = int(getattr(dingtalk, "failure_count", 0) or 0)
     if failures > 0:
@@ -329,40 +232,31 @@ def print_status(components: dict):
             pending_tweets = 0
         if pending_tweets > 0:
             line += f" | PendingTweets={pending_tweets}"
-    print(line)
+    print(line.lstrip() if line.strip() else "")
 
 
 def build_market_state(components: dict, price: float = None,
                        persist_ma: bool = True) -> dict:
-    """组装当前引擎状态, 作为 AI 判断的连续性锚点.
+    """组装当前市场状态 (估值锚点 + 价格/均线/周期上下文), 供 AI 判断.
 
     persist_ma=False (--test-ai / 回溯等路径): 只读均线历史, 不写 ma_history.jsonl。
     """
     sm = components["state"]
-    engine = components["engine"]
-    regime = engine.get_regime()
     state = {
-        "regime": regime,
-        "alpha": engine.get_alpha(),
-        "entered_from": sm.get("regime.entered_from", "") or "",
-        "progress": sm.get("alpha.regime_progress", 0.5),
-        "last_change_at": sm.get("regime.last_changed_at", "") or "",
-        "allowed_transitions": list(REGIME_TRANSITIONS.get(regime, [])),
+        "valuation": sm.get_valuation(),
+        "valuation_label": sm.get("valuation.label", ""),
+        "valuation_updated_at": sm.get("valuation.updated_at", "") or "",
     }
-    # regime 已持续天数
-    started_at = sm.get("regime.started_at", "")
-    if started_at:
-        try:
-            start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            state["regime_days"] = max(0, int((datetime.now(timezone.utc).replace(tzinfo=None) - start_dt.replace(tzinfo=None)).total_seconds() // 86400))
-        except ValueError:
-            state["regime_days"] = None
     if price is not None:
         state["price"] = price
     # 价格趋势 (从 price_history 计算 7d/30d 涨跌)
-    review = components.get("review")
-    if review is not None:
-        trend = review.price_trend()
+    knowledge = components.get("knowledge")
+    if knowledge is not None:
+        try:
+            trend = knowledge.price_trend()
+        except Exception as exc:
+            print(f"[Price] 价格趋势计算失败 (不影响本轮): {exc}")
+            trend = {}
         if trend.get("price") is not None and state.get("price") is None:
             state["price"] = trend["price"]
         if trend.get("change_7d") is not None:
@@ -379,14 +273,14 @@ def build_market_state(components: dict, price: float = None,
                 state["ma_context"] = ma_context
         except Exception as exc:
             print(f"[MA] 均线上下文构建失败 (不影响本轮): {exc}")
-    # 周期定位与历史类比 (日线): 辅助 AI 结合判断; 失败不阻塞主流程
+    # 周期定位与历史类比 (日线, 纯数据): 辅助 AI 校准估值; 失败不阻塞主流程
     cycle_cfg = (components.get("cfg") or {}).get("cycle_context") or {}
     if cycle_cfg.get("enabled", False):
         try:
             cycle_context = build_cycle_context(
                 cycle_cfg, client=components.get("datafeed"),
                 ma_context=state.get("ma_context"),
-                regime={"name": regime, "alpha": engine.get_alpha()})
+                valuation=state.get("valuation"))
             if cycle_context:
                 state["cycle_context"] = cycle_context
         except Exception as exc:
@@ -403,49 +297,6 @@ def _record_ma_state(sm, market_state: dict) -> dict:
     summary["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     sm.set("ma", summary)
     return summary
-
-
-def _apply_rhythm_gates_to_progress(components: dict, regime: str,
-                                    progress: float, market_state: dict) -> float:
-    """按 alpha.rhythm 配置对 progress 应用节奏门控 (默认全关 = 恒等).
-
-    纯函数 apply_rhythm_gates 的接线层: 打印门控原因, 仅在被调整时写回
-    state["alpha.regime_progress"]; 门控异常/数据缺失 → fail-open (返回原值),
-    不影响本轮推进。未配置 rhythm 段时直接返回原值 (零开销零行为变化)。
-    """
-    rhythm_cfg = ((components.get("cfg") or {}).get("alpha") or {}).get("rhythm")
-    if not isinstance(rhythm_cfg, dict) or not rhythm_cfg:
-        return progress
-    try:
-        gated, reasons = apply_rhythm_gates(regime, progress, market_state,
-                                            rhythm_cfg)
-    except Exception as exc:  # 失败隔离: 门控异常不影响本轮
-        print(f"[Rhythm] 门控异常 (fail-open, 不施加): {exc}")
-        return progress
-    for reason in reasons:
-        print(f"  [Rhythm] {reason}")
-    if gated != progress:
-        components["state"].set("alpha.regime_progress", gated)
-    return gated
-
-
-def _record_shadow_cycle(components: dict, btc_price, market_state, *,
-                         advance: bool, mode: str) -> None:
-    """WP8 8C: 轮末影子账记录 (纯观察, 失败只日志, 绝不阻断主流程).
-
-    advance=False 用于 outage 轮 (故障时长不计入镜像周期钟);
-    mode: "analysis" (分析轮) / "idle" (空闲轮) / "outage" (故障轮) —
-    仅影响换挡 deferred_build 的定位时机 (与引擎 step_alpha/tick_alpha 对齐)。
-    """
-    shadow = components.get("shadow")
-    if shadow is None:
-        return
-    try:
-        shadow.on_cycle(price=btc_price, market_state=market_state,
-                        advance=advance, mode=mode)
-    except Exception as exc:  # 隔离: 影子账本任何异常不影响主流程
-        print(f"[Shadow] 本轮记录失败 (不影响主流程): "
-              f"{type(exc).__name__}: {exc}")
 
 
 def _feature_enabled(cfg: dict, name: str) -> bool:
@@ -502,11 +353,17 @@ def _refresh_current_thesis(components: dict, market_state: dict):
     return evaluated
 
 
-def _adopt_analysis_thesis(components: dict, raw_thesis, market_state: dict):
-    """把 AI 本轮 thesis 并入当前命题, 评估并落盘; 非法输出保留旧命题。"""
+def _adopt_analysis_thesis(components: dict, raw_thesis, market_state: dict,
+                           label: str = None):
+    """把 AI 本轮 thesis 并入当前命题, 评估并落盘; 非法输出保留旧命题。
+
+    label: 本轮估值档位; 命题标签以本地估值档位为准 (仅追溯用, 不信任 AI 自报)。
+    """
     if not _feature_enabled(components.get("cfg") or {}, "thesis"):
         return None
     sm = components["state"]
+    if isinstance(raw_thesis, dict) and label:
+        raw_thesis = dict(raw_thesis, label=label)
     try:
         current = load_current_thesis(sm)
         thesis, event, previous = adopt_thesis(raw_thesis, current)
@@ -531,64 +388,14 @@ def _build_scorecard_text(components: dict, btc_price) -> str:
     if not _feature_enabled(components.get("cfg") or {}, "scorecard"):
         return ""
     try:
+        sm = components.get("state")
+        valuation_now = sm.get_valuation() if sm is not None else None
         return build_scorecard(
             components.get("knowledge"), components.get("memory"),
-            components.get("engine"), btc_price)
+            valuation_now, btc_price)
     except Exception as exc:
         print(f"[Scorecard] 构建失败 (不影响主流程): {exc}")
         return ""
-
-
-def _update_risk_v2(components: dict, market_state: dict):
-    """Phase 2: 每轮计算风险姿态/仓位上限 (默认为 dry_run, 不施加)。"""
-    cfg = components.get("cfg") or {}
-    if not _feature_enabled(cfg, "risk_v2"):
-        return None
-    sm = components["state"]
-    price_history = None
-    try:
-        risk_cfg = (cfg.get("alpha") or {}).get("risk_v2") or {}
-        if not isinstance(risk_cfg, dict):
-            risk_cfg = {}
-    except Exception:
-        risk_cfg = {}
-    # 历史价格只用于回撤兜底; 读取失败不得连带丢弃 risk_v2 配置 (否则 offline
-    # 回放会把 enforce/caps 误记成默认值, 污染 Phase 2 证据链)。
-    try:
-        knowledge = components.get("knowledge")
-        if knowledge is not None:
-            price_history = knowledge._price_history()
-    except Exception as exc:
-        price_history = None
-        print(f"[RiskV2] 价格历史读取失败 (回撤兜底不可用): {exc}")
-    try:
-        previous = sm.get("risk_v2.state") or {}
-        risk_state = evaluate_risk(market_state, previous, risk_cfg,
-                                   price_history=price_history)
-        sm.set("risk_v2.state", risk_state)
-        print(f"[RiskV2] {format_risk(risk_state)}")
-        if str(risk_cfg.get("mode") or "dry_run").lower() == "enforce":
-            print("[RiskV2] enforce 尚未启用 (Phase 2 仅 dry_run), 不施加仓位上限")
-        return risk_state
-    except Exception as exc:
-        print(f"[RiskV2] 计算失败 (不影响主流程): {exc}")
-        return None
-
-
-def _risk_manifest(risk_state):
-    if not isinstance(risk_state, dict):
-        return None
-    return {
-        "posture": risk_state.get("posture"),
-        "cap": risk_state.get("cap"),
-        "cap_mapped": risk_state.get("cap_mapped"),
-        "drawdown_pct": (risk_state.get("inputs") or {}).get("drawdown_pct"),
-        "top_risk_active": (risk_state.get("inputs") or {}).get("top_risk_active"),
-        "ratchet": risk_state.get("ratchet"),
-        "release_counter": risk_state.get("release_counter"),
-        "mode": risk_state.get("mode"),
-        "reasons": risk_state.get("reasons"),
-    }
 
 
 def _append_manifest_safe(components: dict, entry: dict) -> None:
@@ -599,27 +406,24 @@ def _append_manifest_safe(components: dict, entry: dict) -> None:
 
 
 def _write_manifest(components: dict, *, cycle_id: str, mode: str,
-                    alpha_before: float, progress_before, regime_before: str,
-                    btc_price, thesis=None, **extra) -> None:
-    """本轮 manifest 落盘 (feature flag 关闭时零开销; 失败不阻断主流程)。"""
+                    valuation_before, btc_price, thesis=None, **extra) -> None:
+    """本轮 manifest 落盘 (feature flag 关闭时零开销; 失败不阻断主流程)。
+
+    记录估值前后值与档位, 不含任何仓位/regime 字段 (2026-11 估值重构)。
+    """
     if not _feature_enabled(components.get("cfg") or {}, "manifest"):
         return
-    engine = components["engine"]
     sm = components["state"]
     try:
-        progress_after = sm.get("alpha.regime_progress", 0.5)
+        valuation_after = sm.get_valuation()
         entry = run_manifest.build_manifest(
             mode=mode,
             cycle_id=cycle_id,
             btc_price=btc_price,
-            alpha_before=alpha_before,
-            alpha_after=engine.get_alpha(),
-            progress_before=progress_before,
-            progress_after=progress_after,
-            regime_before=regime_before,
-            regime_after=engine.get_regime(),
-            target_after=engine.calculate_target_alpha(engine.get_regime(),
-                                                       progress_after),
+            valuation_before=valuation_before if is_valid(valuation_before) else None,
+            valuation_after=valuation_after if is_valid(valuation_after) else None,
+            valuation_label=sm.get("valuation.label", ""),
+            valuation_confidence=sm.get("valuation.confidence", ""),
             thesis=_thesis_manifest(thesis),
             **extra)
     except Exception as exc:
@@ -629,9 +433,10 @@ def _write_manifest(components: dict, *, cycle_id: str, mode: str,
 
 
 def run_backfill(components: dict, force: bool = False) -> bool:
-    """回溯历史推文，构建初始状态。返回是否执行了回填.
+    """回溯历史推文，建立初始估值。返回是否执行了回填.
 
-    force=True 时忽略已有分析记录，重新回溯并重设 regime/alpha.
+    force=True 时忽略已有分析记录，重新回溯并重设估值。
+    估值语义: 取最近一批有效分析的 AI 估值 (最新信息), 不做投票/插值/确认。
     """
     c = components
     cfg = c["cfg"]
@@ -646,16 +451,12 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         print("[Backfill] 已有分析记录，跳过回溯 (用 --backfill 强制重跑)")
         return False
 
-    if force:
-        print("[Backfill] 强制模式: 重新回溯历史推文并重置证据")
-        c["evidence"].reset()
-
     batch_size = backfill_cfg.get("batch_size", 10)
     bulk_limit = backfill_cfg.get("bulk_fetch_limit", 2000)
     max_samples = backfill_cfg.get("max_analysis_samples", 200)
 
     print(f"\n{'='*60}")
-    print("[Backfill] 首次启动 — 回溯历史推文建立初始状态")
+    print("[Backfill] 首次启动 — 回溯历史推文建立初始估值")
     print(f"[Backfill] bulk_limit={bulk_limit}, max_samples={max_samples}, batch_size={batch_size}")
     print("=" * 60)
 
@@ -687,18 +488,16 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     samples = _smart_sample(all_tweets, max_samples)
     print(f"[Backfill] 采样 {len(samples)} 条 (覆盖 {len(all_tweets)} 条全量)")
 
-    # 3. 分批分析 — 仅采集，不执行 regime/alpha 变更
+    # 3. 分批分析 — 仅采集, 不产生任何执行动作
     batches = [samples[i:i+batch_size] for i in range(0, len(samples), batch_size)]
     print(f"\n[Backfill] 阶段3: 分 {len(batches)} 批采集数据 ...")
 
-    engine = c["engine"]
-    evidence = c["evidence"]
     analyzer = c["analyzer"]
     knowledge = c["knowledge"]
     dingtalk = c["dingtalk"]
     kb = knowledge.load_knowledge_base()
 
-    collected = []  # [{cp, scores, summary, conf, regime_evidence, signal_board, meta}]
+    collected = []  # [{valuation, label, scores, summary, conf, evidence, ...}]
 
     for bi, batch in enumerate(batches):
         print(f"\n[Backfill] 批次 {bi+1}/{len(batches)} ({len(batch)} 推文) ...")
@@ -711,9 +510,9 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             print("[Backfill]   分析失败，跳过本批")
             continue
 
-        cp = analysis.get("cycle_position", "BEAR")
-        if not _valid_cycle_position(cp):
-            print(f"[Backfill]   非法 cycle_position={cp!r}, 拒绝本批")
+        valuation = analysis.get("valuation")
+        if not is_valid(valuation):
+            print(f"[Backfill]   非法 valuation={valuation!r}, 拒绝本批")
             continue
 
         sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
@@ -721,16 +520,16 @@ def run_backfill(components: dict, force: bool = False) -> bool:
 
         scores = analysis.get("evidence_scores", {})
         meta = analysis.get("meta", {})
-        print(f"[Backfill]   cycle_position={cp}, scores={json.dumps(scores)}, "
-              f"quality={meta.get('analysis_quality','?')}")
+        print(f"[Backfill]   valuation={float(valuation):.2f} ({band_of(valuation)}), "
+              f"scores={json.dumps(scores)}, quality={meta.get('analysis_quality','?')}")
 
         collected.append({
-            "cp": cp,
+            "valuation": round(float(valuation), 4),
+            "label": band_of(valuation),
             "scores": scores,
-            "progress": analysis.get("regime_progress", 0.5),
             "summary": analysis.get("summary", ""),
-            "conf": analysis.get("cycle_confidence", "low"),
-            "regime_evidence": analysis.get("regime_evidence", ""),
+            "conf": analysis.get("valuation_confidence", "low"),
+            "evidence": analysis.get("valuation_evidence", ""),
             "signal_board": analysis.get("signal_board", []),
             "risks": analysis.get("risks", []),
             "meta": meta,
@@ -744,72 +543,37 @@ def run_backfill(components: dict, force: bool = False) -> bool:
         sm.save()
         return False
 
-    # 4. 整合 — 最终 regime 用最近 30% 批次的众数
+    # 4. 整合 — 最终估值取最后一个有效批次 (最新信息)
     print(f"\n[Backfill] 阶段4: 整合 {len(collected)} 批数据 ...")
-    recent_n = max(1, len(collected) // 3)
-    recent = collected[-recent_n:]
-    regime_votes = {}
-    for c in recent:
-        cp = c["cp"]
-        regime_votes[cp] = regime_votes.get(cp, 0) + 1
-    final_regime = max(regime_votes, key=regime_votes.get)
-    print(f"[Backfill] 最近 {recent_n} 批 regime 投票: {regime_votes} → {final_regime}")
-
-    # 累积全部证据
-    for c in collected:
-        for cat, sc in c["scores"].items():
-            evidence.update(c["cp"], cat, float(sc))
-
-    # 一次性执行 regime 变更
-    current = engine.get_regime()
     rc = collected[-1]
+    final_valuation = rc["valuation"]
+    sm.set_valuation(final_valuation,
+                     confidence=rc.get("conf", "low"),
+                     evidence=rc.get("evidence", ""))
+    print(f"[Backfill] 估值设为 {describe(final_valuation)} "
+          f"(置信={rc.get('conf', 'low')})")
 
-    # 先按最后一批的周期内进度计算目标 alpha, 再执行变更 (回溯不走步进)
-    progress = float(rc.get("progress", 0.5))
-    target = engine.calculate_target_alpha(final_regime, progress)
-
-    if final_regime != current:
-        engine.execute_regime_change(final_regime, progress)
-        print(f"[Backfill] REGIME: {current} → {final_regime} ({rc['regime_evidence']})")
-        dingtalk.regime_change(current, final_regime, rc["regime_evidence"], target)
-
-    # 引导路径豁免发单: 回溯属一次性状态引导, 不调用 run_cycle 的统一发单钩子,
-    # 不产生 TradeSync 交易指令
-    sm.set("alpha.regime_progress", progress)
-    sm.set("alpha.deferred_build", False)
-    sm.set("alpha.current", target)
-    sm.set("alpha.target", target)
-    sm.set("alpha.transition_progress", 1.0)
-    sm.set("alpha.last_change_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
-    sm.set("regime.cooldown_remaining", 0)
-    sm.set("regime.stability_counter", 0)
-    # 回溯为一次性引导: 统一清除待确认提议 (含 final_regime == current 路径)
-    engine.clear_pending_proposal()
-
-    print(f"[Backfill] Alpha 直接设为 {target:+.4f} (regime={final_regime})")
-
-    # 回溯完成 → 输出编号帖子 (与正式分析一致的格式, 发钉钉 + 写 Promo 桥文件)
+    # 回溯完成 → 输出编号帖子
     post_no = int(sm.get("runtime.post_count", 0)) + 1
     post_text = dingtalk.analysis(
         rc.get("summary", ""),
-        final_regime,
-        rc.get("conf", "medium"),
-        target,
-        rc.get("signal_board", []),
+        valuation=final_valuation,
+        confidence=rc.get("conf", "medium"),
+        valuation_evidence=rc.get("evidence", ""),
+        signal_board=rc.get("signal_board", []),
         post_no=post_no,
-        engine_regime=final_regime,
-        regime_evidence=rc.get("regime_evidence", ""),
         forecast=rc.get("forecast"),
     )
     sm.set("runtime.post_count", post_no)
-    _write_promo_post(cfg, post_text, post_no, final_regime, target)
+    _write_promo_post(cfg, post_text, post_no, final_valuation)
 
     # 写一条综合 memory 条目
-    memory.append_alpha({
+    memory.append_valuation({
         "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-        "alpha": target,
-        "regime": final_regime,
-        "target_alpha": target,
+        "valuation": final_valuation,
+        "label": band_of(final_valuation),
+        "confidence": rc.get("conf", "low"),
+        "note": rc.get("evidence", ""),
     })
 
     summaries = [c["summary"] for c in collected[-5:] if c["summary"]]
@@ -819,11 +583,11 @@ def run_backfill(components: dict, force: bool = False) -> bool:
             cat = s.get("category", "?")
             all_signals.setdefault(cat, []).append(s)
 
-    entry = [f"**[回溯完成] {final_regime} (alpha={target:+.4f})**"]
+    entry = [f"**[回溯完成] 估值={describe(final_valuation)}**"]
     if summaries:
         entry.append(f"最近分析: {'; '.join(summaries[:3])}")
-    entry.append(f"\nRegime投票: {regime_votes} → {final_regime}")
-    entry.append(f"覆盖 {len(all_tweets)} 条推文, {len(collected)} 批分析")
+    entry.append(f"\n覆盖 {len(all_tweets)} 条推文, {len(collected)} 批分析")
+    entry.append(f"估值序列: {[item['valuation'] for item in collected[-10:]]}")
 
     top_signals = []
     for cat, sigs in all_signals.items():
@@ -837,14 +601,14 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     memory.append_entry("\n".join(entry))
 
     sm.save()
-    print(f"\n[Backfill] 完成 — regime={final_regime}, alpha={target:+.4f}")
+    print(f"\n[Backfill] 完成 — 估值={describe(final_valuation)}")
     print("=" * 60)
     return True
 
 
 # ---- 智能采样 ----
 
-_REGIME_KEYWORDS = [
+_VALUATION_KEYWORDS = [
     "bottom", "top", "cycle", "regime", "capitulation", "euphoria",
     "bull", "bear", "accumulation", "distribution", "MVRV", "NUPL",
     "SOPR", "ETF flow", "record", "unprecedented", "historic",
@@ -862,7 +626,7 @@ def _smart_sample(tweets: list[dict], max_samples: int) -> list[dict]:
     regular = []
     for t in tweets:
         content = (t.get("content", "") or "").lower()
-        if any(kw.lower() in content for kw in _REGIME_KEYWORDS):
+        if any(kw.lower() in content for kw in _VALUATION_KEYWORDS):
             key_tweets.append(t)
         else:
             regular.append(t)
@@ -886,11 +650,10 @@ def _smart_sample(tweets: list[dict], max_samples: int) -> list[dict]:
 
 
 def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
-    """首次正式运行: 抓取尽量多的历史推文并分析, 确认当前市场状态与 alpha.
+    """首次正式运行: 抓取尽量多的历史推文并分析, 建立首个估值.
 
-    与 backfill 的区别: 不做分批投票重建初始状态, 而是按正常分析流程走一次 —
-    分批分析 (尽量多分析内容), 用最新批次的结果确认 regime (走过渡图校验),
-    并把 alpha 直接定位到当前目标值.
+    与 backfill 的区别: 分批分析后仅采用最后一个有效批次 (最新信息) 的估值,
+    不做投票/插值; 估值直接写入 state, 无任何执行动作。
     """
     c = components
     cfg = c["cfg"]
@@ -898,8 +661,6 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     fetcher = c["fetcher"]
     memory = c["memory"]
     analyzer = c["analyzer"]
-    engine = c["engine"]
-    evidence = c["evidence"]
     knowledge = c["knowledge"]
     dingtalk = c["dingtalk"]
 
@@ -909,7 +670,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     max_samples = min(max_samples, backfill_cfg.get("max_analysis_samples", 200))
 
     print(f"\n{'='*60}")
-    print("[首次分析] 抓取尽量多的历史推文, 确认当前市场状态与 alpha")
+    print("[首次分析] 抓取尽量多的历史推文, 建立初始估值")
     print("=" * 60)
 
     # 1. 获取数据: snscrape 批量 > 网页 > 文件
@@ -932,7 +693,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     samples = _smart_sample(all_tweets, max_samples)
     print(f"[首次分析] 采样 {len(samples)} 条 (覆盖 {len(all_tweets)} 条全量)")
 
-    # 3. 分批分析 — 每批一次 DeepSeek, 用最后一批结果确认当前状态
+    # 3. 分批分析 — 每批一次 AI 调用, 保留最后一个有效批次
     batches = [samples[i:i+batch_size] for i in range(0, len(samples), batch_size)]
     kb = knowledge.load_knowledge_base()
     last_analysis = None
@@ -942,14 +703,13 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
         a = analyzer.analyze(batch, ctx, kb,
                              market_state=build_market_state(c, persist_ma=False))
         if a:
-            cp = a.get("cycle_position")
-            if not _valid_cycle_position(cp):
-                print(f"[首次分析]   非法 cycle_position={cp!r}, 拒绝本批")
+            valuation = a.get("valuation")
+            if not is_valid(valuation):
+                print(f"[首次分析]   非法 valuation={valuation!r}, 拒绝本批")
                 continue
             last_analysis = a
-            print(f"[首次分析]   cycle_position={a.get('cycle_position','?')}, "
-                  f"progress={a.get('regime_progress','?')}, "
-                  f"conf={a.get('cycle_confidence','?')}")
+            print(f"[首次分析]   valuation={float(valuation):.2f} "
+                  f"({band_of(valuation)}), conf={a.get('valuation_confidence','?')}")
             sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             _record_ai_call_meta(sm, analyzer)
             sm.update_runtime()
@@ -958,72 +718,42 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
         sm.save()
         return False
 
-    # 4. 证据累积 + regime 变更
-    # 首次确认: 初始状态为默认值 (无历史连续性), 直接执行 AI 判定,
-    # 不走过渡图/证据共识校验 (否则 BEAR → BEAR_BOTTOM 等会被非法转换拦截)
-    cp = last_analysis.get("cycle_position", "BEAR")
-    conf = last_analysis.get("cycle_confidence", "low")
-    scores = last_analysis.get("evidence_scores", {})
-    meta = last_analysis.get("meta", {})
-    rp = last_analysis.get("regime_progress")
-    if rp is not None:
-        sm.set("alpha.regime_progress", float(rp))
-    progress = float(sm.get("alpha.regime_progress", 0.5))
+    # 4. 写入估值
+    valuation = round(float(last_analysis["valuation"]), 4)
+    conf = last_analysis.get("valuation_confidence", "low")
+    evidence_text = last_analysis.get("valuation_evidence", "")
+    sm.set_valuation(valuation, confidence=conf, evidence=evidence_text)
+    print(f"[首次分析] 估值定位为 {describe(valuation)} (置信={conf})")
 
-    for cat, score in scores.items():
-        evidence.update(cp, cat, float(score))
-
-    current = engine.get_regime()
-    if cp != current:
-        alpha_before = engine.get_alpha()
-        new_regime = engine.execute_regime_change(cp, progress)
-        print(f"[首次分析] REGIME: {current} → {new_regime}")
-        dingtalk.regime_change(current, new_regime,
-                               last_analysis.get("regime_evidence", ""),
-                               engine.get_alpha(),
-                               engine.calculate_target_alpha(new_regime, progress),
-                               old_alpha=alpha_before)
-    else:
-        print(f"[首次分析] Regime 保持 {cp}")
-
-    # 5. alpha 直接定位到当前目标 (首次不走步进)
-    # 引导路径豁免发单: 首次分析属状态引导, 不调用 run_cycle 的统一发单钩子
-    target = engine.calculate_target_alpha(engine.get_regime(), progress)
-    sm.set("alpha.deferred_build", False)
-    sm.set("alpha.current", target)
-    sm.set("alpha.target", target)
-    sm.set("alpha.transition_progress", 1.0)
-    sm.set("alpha.last_change_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
-    sm.set("regime.cooldown_remaining", 0)
-    print(f"[首次分析] Alpha 定位为 {target:+.4f} "
-          f"(regime={engine.get_regime()}, progress={progress:.2f})")
-
-    # 6. 发编号帖子 (钉钉 + Promo 桥文件)
+    # 5. 发编号帖子 (钉钉 + Promo)
     post_no = int(sm.get("runtime.post_count", 0)) + 1
     post_text = dingtalk.analysis(
-        last_analysis.get("summary", ""), cp, conf, target,
-        last_analysis.get("signal_board", []), post_no=post_no,
-        engine_regime=engine.get_regime(),
-        regime_evidence=last_analysis.get("regime_evidence", ""),
+        last_analysis.get("summary", ""),
+        valuation=valuation,
+        confidence=conf,
+        valuation_evidence=evidence_text,
+        signal_board=last_analysis.get("signal_board", []),
+        post_no=post_no,
         forecast=last_analysis.get("forecast"))
     sm.set("runtime.post_count", post_no)
-    _write_promo_post(cfg, post_text, post_no, cp, target)
+    _write_promo_post(cfg, post_text, post_no, valuation)
 
-    # 7. memory 条目
-    memory.append_alpha({
+    # 6. memory 条目
+    memory.append_valuation({
         "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-        "alpha": target,
-        "regime": cp,
-        "target_alpha": target,
+        "valuation": valuation,
+        "label": band_of(valuation),
+        "confidence": conf,
+        "note": evidence_text,
     })
-    entry_parts = [f"**[首次分析] {cp} (alpha={target:+.4f})**"]
+    entry_parts = [f"**[首次分析] 估值={describe(valuation)}**"]
     if last_analysis.get("summary"):
         entry_parts.append(last_analysis["summary"])
-    entry_parts.append(f"Regime证据: {last_analysis.get('regime_evidence', '')}")
+    entry_parts.append(f"估值依据: {evidence_text}")
     memory.append_entry("\n".join(entry_parts))
 
     sm.save()
-    print(f"[首次分析] 完成 — regime={cp}, alpha={target:+.4f}, 帖子 No.{post_no}")
+    print(f"[首次分析] 完成 — 估值={describe(valuation)}, 帖子 No.{post_no}")
     print("=" * 60)
     return True
 
@@ -1196,34 +926,33 @@ def _all_tweets_filtered(analyzer) -> bool:
 
 
 def run_cycle(components: dict) -> bool:
-    """运行一次完整分析循环。返回是否有新推文被分析."""
+    """运行一次完整分析循环。返回是否有新推文被分析.
+
+    估值语义 (2026-11 重构):
+    - 有新推文且分析成功 → AI 直接给出 0–1 估值, 覆盖写入 state;
+    - 无新推文 / 数据源故障 → 估值保持不变 (无时间漂移、无平滑)。
+    """
     c = components
     cfg = c["cfg"]
     memory = c["memory"]
     sm = c["state"]
     fetcher = c["fetcher"]
     analyzer = c["analyzer"]
-    engine = c["engine"]
-    evidence = c["evidence"]
     knowledge = c["knowledge"]
-    tradesync = c["tradesync"]
     datafeed = c["datafeed"]
     dingtalk = c["dingtalk"]
-    review = c["review"]
 
     cycle_id = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    progress_cycle_start = sm.get("alpha.regime_progress", 0.5)
-    regime_cycle_start = engine.get_regime()
+    valuation_cycle_start = sm.get_valuation()
     scorecard_text = ""
     knowledge_chars = 0
     thesis_current = None
-    risk_current = None
     evaluated_this_cycle = False
     idle_reason = "no_new_tweets"
 
     print_status(c)
 
-    # 0. 分析锁: 距上次成功 DeepSeek 分析不足 min_analysis_interval_hours 小时 → 本轮跳过抓取/分析
+    # 0. 分析锁: 距上次成功 AI 分析不足 min_analysis_interval_hours 小时 → 本轮跳过抓取/分析
     lock_hours = float(cfg.get("schedule", {}).get("min_analysis_interval_hours", 0) or 0)
     locked = False
     last_ds = sm.get("runtime.last_deepseek_at", "")
@@ -1234,21 +963,21 @@ def run_cycle(components: dict) -> bool:
             if elapsed_h < lock_hours:
                 locked = True
                 daily = cfg.get("schedule", {}).get("daily_time", "")
-                lock_msg = f"[Lock] 距上次 DeepSeek 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取"
+                lock_msg = f"[Lock] 距上次 AI 分析 {elapsed_h:.1f}h < {lock_hours:.0f}h, 本轮跳过抓取"
                 if daily:
                     lock_msg += f" (下次 {_schedule_desc(cfg)})"
                 print(lock_msg)
         except ValueError:
             pass
 
-    # 1. 获取价格
+    # 1. 获取价格 (价格快照用于趋势/预测审计, 与估值无关)
     btc_price = datafeed.get_price()
     if btc_price:
         print(f"[BTC] ${btc_price:,.2f}")
-        review.record_price(btc_price, engine.get_regime(), engine.get_alpha())
-
-    # 1.1 发单一致性基准: btc_price 确定后、任何 alpha 变更之前记录本轮起点
-    alpha_cycle_start = engine.get_alpha()
+        try:
+            knowledge.record_price(btc_price, sm.get_valuation())
+        except Exception as exc:
+            print(f"[Price] 价格快照写入失败 (不影响本轮): {exc}")
 
     # 1.5 预测审计 (幂等): 到期预测写回结果侧车。
     # 原先只在周日蒸馏时执行, 而当前调度为周二/周四 → 永不触发, 这里改为每轮执行。
@@ -1309,7 +1038,6 @@ def run_cycle(components: dict) -> bool:
 
     has_analysis = False
     analysis = None
-    regime_changed_this_cycle = False
     idle_cycle = not new_tweets
 
     if new_tweets:
@@ -1319,9 +1047,7 @@ def run_cycle(components: dict) -> bool:
         ctx = memory.get_context_for_ai()
         market_state = build_market_state(c, btc_price)
         _record_ma_state(sm, market_state)
-        # Phase 2: 独立于 AI 的风险姿态 (dry_run: 只记录, 不施加)
-        risk_current = _update_risk_v2(c, market_state)
-        # Phase 1: 先评估当前命题, 再把成绩单+命题注入本轮 prompt (只读, 不改仓位)
+        # Phase 1: 先评估当前命题, 再把成绩单+命题注入本轮 prompt (只读)
         thesis_current = _refresh_current_thesis(c, market_state)
         evaluated_this_cycle = True
         scorecard_text = _build_scorecard_text(c, btc_price)
@@ -1338,8 +1064,9 @@ def run_cycle(components: dict) -> bool:
 
         if analysis:
             # Phase 1: AI 命题并入当前命题 (非法则保留旧命题), 评估后落 theses.jsonl
-            thesis_current = (_adopt_analysis_thesis(c, analysis.get("thesis"), market_state)
-                              or thesis_current)
+            thesis_current = (_adopt_analysis_thesis(
+                c, analysis.get("thesis"), market_state,
+                label=band_of(analysis.get("valuation"))) or thesis_current)
             if thesis_current:
                 market_state["thesis"] = thesis_current
             sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
@@ -1366,20 +1093,23 @@ def run_cycle(components: dict) -> bool:
             else:
                 _set_outage(c, "fetch_error", fetch_detail)
 
-        if analysis:
-            cp = analysis.get("cycle_position", "BEAR")
-            conf = analysis.get("cycle_confidence", "low")
-            scores = analysis.get("evidence_scores", {})
-            meta = analysis.get("meta", {})
-            summary = analysis.get("summary", "")
-            regime_evidence = analysis.get("regime_evidence", "")
+        if analysis and not is_valid(analysis.get("valuation")):
+            print(f"  [Valuation] AI 估值非法 {analysis.get('valuation')!r}, 本轮作废")
+            analysis = None
 
-            print(f"  cycle_position: {cp} (confidence: {conf})")
-            print(f"  evidence_scores: {json.dumps(scores)}")
+        if analysis:
+            valuation = round(float(analysis.get("valuation")), 4)
+            conf = analysis.get("valuation_confidence", "low")
+            meta = analysis.get("meta", {})
+            valuation_evidence = analysis.get("valuation_evidence", "")
+            label = band_of(valuation)
+
+            print(f"  valuation: {valuation:.2f} ({label}) confidence: {conf}")
+            print(f"  evidence_scores: {json.dumps(analysis.get('evidence_scores', {}))}")
             print(f"  quality: {meta.get('analysis_quality', '?')}")
 
             # 4. 漂移检测
-            knowledge.log_drift_meta(meta, cp)
+            knowledge.log_drift_meta(meta, label)
             drift_alerts = knowledge.check_drift()
             if drift_alerts:
                 print("\n[DRIFF ALERTS]")
@@ -1387,67 +1117,39 @@ def run_cycle(components: dict) -> bool:
                     print(f"  [WARN] {a}")
                     dingtalk.alert("风格漂移", a)
 
-            # 5. 证据累积 + Regime 变更
-            print("\n--- Alpha Engine ---")
-            for cat, score in scores.items():
-                evidence.update(cp, cat, float(score))
-
-            current_regime = engine.get_regime()
-            # 连续同向确认 (alpha.stability.required_confirmations):
-            # 同一提议需连续 N 轮"有新推文且分析成功"才执行; 被其它门拒绝时 pending 保留;
-            # idle 轮次不计数不重置; 提议回到当前 regime 或执行成功 → 清除。
-            if cp == current_regime:
-                engine.clear_pending_proposal()
-                ok, reason = True, ""
+            # 5. 写入估值 (AI 直接输出, 无平滑/无确认/无状态机)
+            print("\n--- Valuation ---")
+            previous = sm.get_valuation()
+            sm.set_valuation(valuation, confidence=conf, evidence=valuation_evidence)
+            try:
+                memory.append_valuation({
+                    "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+                    "valuation": valuation,
+                    "label": label,
+                    "confidence": conf,
+                    "btc_price": btc_price,
+                    "note": valuation_evidence,
+                })
+            except Exception as exc:
+                print(f"[Memory] 估值历史写入失败 (不影响本轮): {exc}")
+            change = change_text(previous, valuation)
+            if previous is None:
+                print(f"  首次估值: {describe(valuation)} (置信={conf})")
+            elif change:
+                print(f"  估值: {change} (置信={conf})")
             else:
-                pending = engine.note_regime_proposal(cp)
-                if engine.proposal_ready(pending):
-                    ok, reason = engine.request_regime_change(
-                        cp, scores, conf, meta.get("analysis_quality", 8))
-                    if ok:
-                        engine.clear_pending_proposal()
-                else:
-                    count = engine.pending_count(pending)
-                    ok, reason = False, (f"待确认 {count}/"
-                                         f"{engine.required_confirmations()}")
-            # 周期内进度 → 动态目标 (状态感知):
-            # 仅当提议被接受或 AI 描述的正是当前 regime 时才采用新进度;
-            # 被拒且指向其它 regime 时保留旧值, 不参与 target 计算.
-            old_progress = float(sm.get("alpha.regime_progress", 0.5))
-            progress = _select_progress(analysis.get("regime_progress"), ok, cp,
-                                        current_regime, old_progress)
-            if progress != old_progress:
-                sm.set("alpha.regime_progress", progress)
+                print(f"  估值保持 {describe(valuation)} (置信={conf})")
+            if is_cross_band(previous, valuation):
+                dingtalk.valuation_change(previous, valuation, conf,
+                                          valuation_evidence, btc_price)
 
-            if ok and cp != current_regime:
-                alpha_before = engine.get_alpha()
-                # WP8 #2: 变更日不旁路门控 — 以**新 regime** 语境对将用于 target 的
-                # progress 应用节奏门控 (如 G1 熊侧: BULL_COOLING→BEAR 时 AI 0.9
-                # 压回 0.5 → target -0.65, 而非 execute_regime_change 直接定位 -0.37)
-                progress = _apply_rhythm_gates_to_progress(c, cp, progress,
-                                                           market_state)
-                new_regime = engine.execute_regime_change(cp, progress)
-                regime_changed_this_cycle = True
-                print(f"  [REGIME] {current_regime} → {new_regime}")
-                print(f"           原因: {regime_evidence}")
-                dingtalk.regime_change(current_regime, new_regime, regime_evidence,
-                                       engine.get_alpha(),
-                                       engine.calculate_target_alpha(new_regime, progress),
-                                       old_alpha=alpha_before)
-            elif cp != current_regime:
-                print(f"  [REGIME] 请求 {cp} 被拒绝: {reason}")
-
-            if cp != current_regime and not ok:
-                print(f"  regime_progress: {progress:.2f} (提议被拒, 保留旧值)")
-            else:
-                print(f"  regime_progress: {progress:.2f}")
-
-            # 6. 跟踪预测 (K-03: 带来源标注/区间/重跑离散；旧 knowledge 实现可用 **kwargs 吞掉)
+            # 6. 预测留痕 (K-03: 带来源标注/区间/重跑离散)
             knowledge.log_prediction(
-                cp, conf, btc_price,
+                valuation, conf, btc_price,
                 forecast=analysis.get("forecast"),
                 source_type_counts=analysis.get("source_type_counts"),
                 cross_check=analysis.get("cross_check"),
+                valuation_label=label,
             )
 
             has_analysis = True
@@ -1468,7 +1170,7 @@ def run_cycle(components: dict) -> bool:
                     print(f"[Pending] 队列清理失败 (不影响主流程): {exc}")
             idle_cycle = True
         else:
-            print("  Analysis failed, skipping evidence update.")
+            print("  Analysis failed, skipping valuation update.")
             stats = _enqueue_pending_analysis(c, new_tweets, "analysis_failed")
             detail = "AI 分析失败"
             if stats.get("total") is not None:
@@ -1477,16 +1179,10 @@ def run_cycle(components: dict) -> bool:
             _set_outage(c, "analysis_failed", detail)
             sm.update_runtime()
             sm.save()
-            # WP8 8C: outage 轮不推进镜像引擎 (仅刷新锚点, 故障时长不补记)
-            _record_shadow_cycle(c, btc_price, market_state,
-                                 advance=False, mode="outage")
             _write_manifest(
                 c, cycle_id=cycle_id, mode="analysis_failed",
-                alpha_before=alpha_cycle_start,
-                progress_before=progress_cycle_start,
-                regime_before=regime_cycle_start,
+                valuation_before=valuation_cycle_start,
                 btc_price=btc_price, thesis=thesis_current,
-                risk_v2=_risk_manifest(risk_current),
                 error=detail, tweets=len(new_tweets),
                 tweet_ids=[str(t.get("id", "")) for t in new_tweets[-20:]] or None,
                 knowledge_chars=knowledge_chars or None,
@@ -1497,69 +1193,34 @@ def run_cycle(components: dict) -> bool:
             return False
 
     if idle_cycle:
-        # 无新推文 (或全部被过滤跳过)
-        # WP8: 先构建市场上下文 (MA/周期, TTL 缓存复用, 与下方摘要同一份),
-        # 供节奏门控与 MA 摘要使用; 构建失败不影响推进/摘要既有语义 (仅日志).
+        # 无新推文 (或全部被过滤跳过): 估值保持不变, 只刷新 MA/命题锚点
         idle_market_state = None
         try:
             idle_market_state = build_market_state(c, btc_price, persist_ma=False)
         except Exception as exc:
             print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
-        # Phase 1: 空闲轮也评估命题 (无新推文也能发现失效), 只记录不调仓位。
-        # all_filtered 轮在分析块已评估过 → 跳过, 避免同一轮双评估
-        # (否则 release_counter 双倍推进, dry-run 证据失真)。
+        # Phase 1: 空闲轮也评估命题 (无新推文也能发现失效), 只记录不执行任何动作。
+        # all_filtered 轮在分析块已评估过 → 跳过, 避免同一轮双评估。
         if not evaluated_this_cycle:
             thesis_current = _refresh_current_thesis(c, idle_market_state)
             evaluated_this_cycle = True
         if idle_market_state is not None and thesis_current:
             idle_market_state["thesis"] = thesis_current
-        # Phase 2: 空闲轮同样执行硬风控 dry-run (AI 故障日也不能缺风险检查)
-        if risk_current is None:
-            risk_current = _update_risk_v2(c, idle_market_state)
 
         if fetch_error:
-            # 数据源故障: 视为数据缺失, 本轮不推进周期钟 (alpha/progress/cooldown/
-            # stability/evidence 全部冻结), 价格/审计/MA 摘要与 state 保存照常
+            # 数据源故障: 估值/价格锚点全部冻结; 价格/审计/MA 摘要与 state 保存照常
             print("\n--- Idle (fetch_error) ---")
             _set_outage(c, "fetch_error", fetch_detail)
-            print("  [Outage] 数据缺失: 本轮不推进 "
-                  "alpha/progress/cooldown/stability/evidence")
+            print("  [Outage] 数据缺失: 本轮估值保持不变")
         else:
-            # 基于4年周期时间推进 alpha (按自然日折算, 与调度频率解耦;
-            # cooldown/stability 仍按轮次=决策机会数, 与自然日推进相互独立)
             print("\n--- Idle (no new tweets) ---")
             if fetched_ok:
                 _clear_outage(c, "抓取成功 (无新推文)")
-            old_alpha = engine.get_alpha()
-            # WP8 节奏门控: tick_alpha 前对 progress 应用 (默认全关 = 恒等);
-            # 原值传入 (不在此 float()): 脏 progress 由 _parse_progress fail-open 处理
-            _apply_rhythm_gates_to_progress(
-                c, engine.get_regime(),
-                sm.get("alpha.regime_progress", 0.5), idle_market_state)
-            new_alpha, alpha_changed = engine.tick_alpha()
-            evidence.decay_all()
-            engine.tick_cooldown()
-            engine.tick_stability()
-
-            if alpha_changed:
-                progress = float(sm.get("alpha.regime_progress", 0.5))
-                target = engine.calculate_target_alpha(engine.get_regime(), progress)
-                print(f"  Alpha (time-based): {old_alpha:+.4f} → {new_alpha:+.4f} "
-                      f"(target={target:+.2f}, progress={progress:.2f})")
-                memory.append_alpha({
-                    "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-                    "alpha": new_alpha,
-                    "regime": engine.get_regime(),
-                    "target_alpha": target,
-                    "btc_price": btc_price,
-                    "note": "时间推进: 无推文时按4年周期(自然日折算)推进alpha",
-                })
-                dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(),
-                                      btc_price, target)
+            print(f"  估值保持 {describe(sm.get_valuation())} (无新推文, 不推进)")
 
         # 空闲周期也刷新 K 线趋势摘要 (Web 展示用): 只读历史不写 ma_history,
-        # DataFeed 不可用/异常不阻塞 alpha 时间推进 (构建失败时跳过写入, 保持旧语义).
+        # DataFeed 不可用/异常不阻塞估值 (构建失败时跳过写入, 保持旧语义).
         if idle_market_state is not None:
             try:
                 ma_summary = _record_ma_state(sm, idle_market_state)
@@ -1569,18 +1230,10 @@ def run_cycle(components: dict) -> bool:
             except Exception as exc:
                 print(f"[MA] 空闲周期均线摘要更新失败 (不影响本轮): {exc}")
 
-        # 发单一致性: 时间推进改 alpha 也要与 TradeSync 指令保持一致
-        _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start,
-                                     btc_price, reason="idle_tick")
-
         if not fetch_error:
             # 故障轮不计入分析计数, 仅保存状态 (outage/MA 摘要)
             sm.update_runtime()
         sm.save()
-        # WP8 8C: 空闲轮影子账 (fetch_error 轮不推进镜像引擎)
-        _record_shadow_cycle(c, btc_price, idle_market_state,
-                             advance=not fetch_error,
-                             mode=("outage" if fetch_error else "idle"))
         idle_mode = "idle"
         if locked:
             idle_mode = "idle_locked"
@@ -1590,119 +1243,32 @@ def run_cycle(components: dict) -> bool:
             idle_mode = "idle_filtered"
         _write_manifest(
             c, cycle_id=cycle_id, mode=idle_mode,
-            alpha_before=alpha_cycle_start,
-            progress_before=progress_cycle_start,
-            regime_before=regime_cycle_start,
+            valuation_before=valuation_cycle_start,
             btc_price=btc_price, thesis=thesis_current,
-            risk_v2=_risk_manifest(risk_current),
-            order_reason="idle_tick",
             fetched_ok=fetched_ok,
             error=fetch_detail or None)
         return False
 
-    # 6.5 右侧纪律兜底: 仓位符号与周期方向侧冲突 → 先平仓, 本轮不再步进
-    clamp_old = engine.get_alpha()
-    order_reason = "step"
-    if engine.enforce_side_constraint():
-        order_reason = "side_fix"
-        clamp_new = engine.get_alpha()
-        clamp_target = engine.calculate_target_alpha(engine.get_regime(), progress)
-        print(f"  [SIDE-FIX] Alpha {clamp_old:+.4f} → {clamp_new:+.4f} "
-              f"(regime={engine.get_regime()} 方向冲突, 先平仓, 目标 {clamp_target:+.2f})")
-        memory.append_alpha({
-            "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-            "alpha": clamp_new,
-            "regime": engine.get_regime(),
-            "target_alpha": clamp_target,
-            "btc_price": btc_price,
-            "note": "右侧纪律: 方向冲突平仓",
-        })
-        dingtalk.alpha_change(clamp_old, clamp_new, engine.get_regime(), btc_price, clamp_target)
-
-    # 7. Alpha 推进一步 (仅在有新分析 + 非低置信时)
-    old_alpha = engine.get_alpha()
-    alpha_changed = False
-    new_alpha = old_alpha
-
-    if clamp_old != engine.get_alpha():
-        # 已平仓, 本轮不步进, 下轮再向新方向建仓
-        print(f"  Alpha: 本轮已平仓至 {old_alpha:+.4f}, 下轮开始向目标建仓")
-        engine.tick_cooldown()
-        engine.tick_stability()
-    elif regime_changed_this_cycle:
-        # 分两步快速换仓: 变更日只平仓归零, 次日再由 step_alpha 直接定位到目标
-        order_reason = ("deferred_build"
-                        if sm.get("alpha.deferred_build", False)
-                        else "regime_change")
-        target_alpha = engine.calculate_target_alpha(engine.get_regime(), progress)
-        print(f"  Alpha: 变更日平仓至 {old_alpha:+.4f} (deferred_build), "
-              f"次日定位到 {target_alpha:+.4f}")
-        memory.append_alpha({
-            "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-            "alpha": old_alpha,
-            "regime": engine.get_regime(),
-            "target_alpha": target_alpha,
-            "btc_price": btc_price,
-            "note": "周期变更日先平仓, 次日开始建仓",
-        })
-        engine.tick_cooldown()
-        engine.tick_stability()
-    elif conf == "low":
-        order_reason = "low_confidence"
-        # WP8 #2: 低置信冻结 alpha 也不旁路门控 (按当前 regime 语境压回进度,
-        # 避免未确认进度跨轮残留; alpha 锁定语义不变)
-        progress = _apply_rhythm_gates_to_progress(
-            c, engine.get_regime(), progress, market_state)
-        print(f"  Alpha: 保持不变 (置信度 low, 锁定)")
-        engine.tick_cooldown()
-        engine.tick_stability()
-    else:
-        # WP8 节奏门控: step_alpha 前对 progress 应用 (默认全关 = 恒等)
-        progress = _apply_rhythm_gates_to_progress(
-            c, engine.get_regime(), progress, market_state)
-        new_alpha, alpha_changed = engine.step_alpha()
-        engine.tick_cooldown()
-        engine.tick_stability()
-
-        if alpha_changed:
-            print(f"  Alpha: {old_alpha:+.4f} → {new_alpha:+.4f} "
-                  f"(target={engine.calculate_target_alpha(engine.get_regime(), progress):+.2f})")
-            memory.append_alpha({
-                "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-                "alpha": new_alpha,
-                "regime": engine.get_regime(),
-                "target_alpha": engine.calculate_target_alpha(engine.get_regime(), progress),
-                "btc_price": btc_price,
-            })
-            dingtalk.alpha_change(old_alpha, new_alpha, engine.get_regime(), btc_price,
-                                  engine.calculate_target_alpha(engine.get_regime(), progress))
-
-    # 8. 发送交易指令 (统一发单钩子: 任何 alpha 变更路径都补发, 每轮至多一次;
-    #    多点变更只发本轮最终值, 客户端内存去重)
-    _send_alpha_order_if_changed(engine, tradesync, alpha_cycle_start, btc_price,
-                                 reason=order_reason)
-
-    # 9. 更新 memory (仅当有新分析)
+    # 9. 更新 memory + 发帖 (仅当有新分析)
     if has_analysis and analysis:
+        valuation = sm.get_valuation()
         post_no = int(sm.get("runtime.post_count", 0)) + 1
         post_text = dingtalk.analysis(
             analysis.get("summary", ""),
-            analysis.get("cycle_position", "?"),
-            analysis.get("cycle_confidence", "?"),
-            new_alpha,
-            analysis.get("signal_board", []),
+            valuation=valuation,
+            confidence=sm.get("valuation.confidence", "low"),
+            valuation_evidence=analysis.get("valuation_evidence", ""),
+            signal_board=analysis.get("signal_board", []),
             post_no=post_no,
-            engine_regime=engine.get_regime(),
-            regime_evidence=analysis.get("regime_evidence", ""),
             forecast=analysis.get("forecast"),
         )
         sm.set("runtime.post_count", post_no)
-        _write_promo_post(cfg, post_text, post_no,
-                          analysis.get("cycle_position", "?"), new_alpha)
+        _write_promo_post(cfg, post_text, post_no, valuation)
 
         entry_parts = [f"**{analysis.get('summary', 'N/A')}**"]
-        entry_parts.append(f"Regime: {analysis.get('cycle_position', '?')} → alpha → {new_alpha:+.4f}")
-        entry_parts.append(f"Regime证据: {analysis.get('regime_evidence', '')}")
+        entry_parts.append(f"估值: {describe(valuation)} "
+                           f"(置信: {sm.get('valuation.confidence', 'low')})")
+        entry_parts.append(f"估值依据: {analysis.get('valuation_evidence', '')}")
 
         s = analysis.get("signal_board", [])
         if s:
@@ -1710,10 +1276,6 @@ def run_cycle(components: dict) -> bool:
             for si in s[:5]:
                 entry_parts.append(f"- [{si.get('category','?')}] {si.get('name','?')}: "
                                    f"{si.get('signal',0):+.2f} — {si.get('detail','')}")
-
-        pos = analysis.get("position_narrative", "")
-        if pos:
-            entry_parts.append(f"\n**仓位叙述**: {pos}")
 
         memory.append_entry("\n".join(entry_parts))
 
@@ -1733,35 +1295,17 @@ def run_cycle(components: dict) -> bool:
             knowledge.distill(memory, sm, btc_price)
             sm.set("runtime.last_distill_at", now.isoformat() + "Z")
 
-    # 11. 月度复盘
-    if review.should_review():
-        review_result = review.run_review()
-        if review_result:
-            review.apply_calibration(review_result)
-            if review_result.get("calibration", {}).get("warnings"):
-                for w in review_result["calibration"]["warnings"]:
-                    dingtalk.alert("月度复盘", w)
-
-    # 12. 保存状态
+    # 11. 保存状态
     sm.update_runtime()
     sm.save()
-
-    # WP8 8C: 分析轮影子账 (轮末记录, 纯观察)
-    _record_shadow_cycle(c, btc_price, market_state,
-                         advance=True, mode="analysis")
 
     _write_manifest(
         c, cycle_id=cycle_id,
         mode="analysis",
-        alpha_before=alpha_cycle_start,
-        progress_before=progress_cycle_start,
-        regime_before=regime_cycle_start,
+        valuation_before=valuation_cycle_start,
         btc_price=btc_price, thesis=thesis_current,
-        risk_v2=_risk_manifest(risk_current),
-        label=(analysis or {}).get("cycle_position"),
-        confidence=(analysis or {}).get("cycle_confidence"),
-        regime_change=regime_changed_this_cycle,
-        order_reason=order_reason,
+        label=sm.get("valuation.label"),
+        confidence=sm.get("valuation.confidence"),
         tweets=len(new_tweets),
         tweet_ids=[str(t.get("id", "")) for t in new_tweets[-20:]] or None,
         knowledge_chars=knowledge_chars or None,
@@ -1971,13 +1515,6 @@ def main():
     if lock_mode:
         _acquire_lock_or_exit(cfg, lock_mode)
     c = init_components(cfg)
-    # 参数治理: 启动日志展示各 regime 预期天数合计 (含校准 overlay 后, 目标 1461)
-    try:
-        total = c["engine"].warn_if_expected_days_mismatch()
-        print(f"[Alpha] regime_expected_days 合计={total} "
-              f"(目标 {EXPECTED_DAYS_TOTAL})")
-    except Exception as exc:
-        print(f"[Alpha] 预期天数合计读取失败 (不影响启动): {exc}")
 
     if test_ai_urls:
         _run_test_ai(c, urls_only=True)

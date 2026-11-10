@@ -6,17 +6,19 @@
 - 失效阈值: unmet >= max(2, ceil(n/2)); 数据缺失 (unknown) 不计入 unmet,
   避免数据源故障把命题误判为失效;
 - 生命周期: active → weakened → invalidated / expired / superseded.
-- Phase 1 不影响仓位: 只写 theses.jsonl 与下一轮 prompt。
+- label 为提出命题时所处的估值档位 (极度低估/轻度低估/轻度高估/极度高估),
+  仅作追溯, 不参与任何执行逻辑。
 """
 import json
 import math
 import os
 from datetime import datetime, timedelta, timezone
 
+from src.valuation import BAND_LABELS
+
 THESIS_FILE = "theses.jsonl"
 
-REGIMES = {"BEAR", "BEAR_DEEP", "BEAR_BOTTOM", "RECOVERY",
-           "BULL", "DEEP_BULL", "BULL_COOLING"}
+REGIMES = set(BAND_LABELS)
 
 NUMERIC_METRICS = {
     "close", "sma50", "sma100", "sma200", "sma250",
@@ -191,8 +193,8 @@ def normalize_thesis(raw, now: datetime = None) -> dict | None:
         return None
     if not any(cond["metric"] in PRICE_METRICS for cond in conditions):
         return None
-    label = str(raw.get("label") or "").strip().upper()
-    if label not in REGIMES:
+    label = str(raw.get("label") or "").strip()
+    if label not in BAND_LABELS:
         label = ""
     confidence = raw.get("confidence")
     try:

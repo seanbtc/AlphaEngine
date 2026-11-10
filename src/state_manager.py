@@ -1,17 +1,28 @@
-"""持久状态管理器 — state.json 读写 + 重启恢复."""
+"""持久状态管理器 — state.json 读写 + 重启恢复 + v1→v2 迁移.
+
+state v2 schema (2026-11 估值重构):
+    version: 2
+    valuation: {current(0~1 或 null), previous, label, confidence, evidence,
+                updated_at, changes}
+    runtime:   {analysis_count, post_count, last_*_at, outage, ...}
+    ma / thesis: 由各模块写入
+
+v1 (regime/alpha/evidence 三件套) 启动时一次性迁移: 保留 runtime 计数与
+ma/thesis, 丢弃 regime/alpha/evidence, 估值置 null (等待下一轮 AI 重新评估)。
+"""
 import json
 import os
 from datetime import datetime, timezone
 from typing import Optional
 
 from src.atomic_io import atomic_copy, atomic_write_text
+from src.valuation import UNASSESSED_LABEL, band_of, is_valid
 
-try:
-    from src.alpha_engine import REGIME_ALPHA_MAP
-    _LEGAL_REGIMES = tuple(REGIME_ALPHA_MAP.keys())
-except Exception:  # pragma: no cover - 兜底, 防止 import 路径异常时无法校验
-    _LEGAL_REGIMES = ("BEAR_BOTTOM", "RECOVERY", "BULL", "DEEP_BULL",
-                      "BULL_COOLING", "BEAR", "BEAR_DEEP")
+STATE_VERSION = 2
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
 class StateManager:
@@ -22,31 +33,20 @@ class StateManager:
         self._dirty = False
         self.last_recovery: Optional[dict] = None
 
-    def _default_state(self) -> dict:
+    @staticmethod
+    def _default_state() -> dict:
+        now = _utc_iso()
         return {
-            "version": 1,
-            "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-            "regime": {
-                "current": "BEAR",
-                "started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-                "entered_from": "INIT",
-                "cooldown_remaining": 0,
-                "stability_counter": 0,
-                "last_changed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-            },
-            "alpha": {
-                "current": 0.0,
-                "target": 0.0,
-                "regime_progress": 0.5,
-                "deferred_build": False,
-                "transition_progress": 0.0,
-                "last_change_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-                "locked": False,
-                "lock_reason": "",
-            },
-            "evidence": {
-                "accumulators": {},
-                "by_category": {},
+            "version": STATE_VERSION,
+            "created_at": now,
+            "valuation": {
+                "current": None,
+                "previous": None,
+                "label": UNASSESSED_LABEL,
+                "confidence": "low",
+                "evidence": "",
+                "updated_at": "",
+                "changes": 0,
             },
             "runtime": {
                 "analysis_count": 0,
@@ -55,10 +55,9 @@ class StateManager:
                 "last_deepseek_at": "",
                 "last_distill_at": "",
                 "last_calibration_at": "",
-                "last_review_at": "",
                 "last_tick_at": "",
                 "last_prompt_hash": "",
-                "uptime_started_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+                "uptime_started_at": now,
                 "outage": {},
             },
         }
@@ -67,28 +66,37 @@ class StateManager:
         """加载 state.json; 损坏 (JSON 非法/版本不符/结构非法) 时备份并从记忆重建.
 
         on_recovered(info) 在发生损坏恢复后回调 (info 含 reason/backup_path/rebuilt/
-        regime/alpha); 回调异常不影响启动。memory 缺省时按 data_dir 惰性构建。
+        valuation); 回调异常不影响启动。memory 缺省时按 data_dir 惰性构建。
+
+        v1 → v2: 就地迁移 (保留 runtime/ma/thesis, regime/alpha/evidence 丢弃),
+        不触发损坏恢复, 迁移结果随下一次 save 落盘。
         """
         if self._state is not None:
             return self._state
         os.makedirs(self.data_dir, exist_ok=True)
         if os.path.exists(self.state_file):
             problem = None
+            loaded = None
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                problem = self._validate_state(loaded)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 problem = f"JSON 解析失败: {exc}"
             except IOError as exc:
                 problem = f"读取失败: {exc}"
+            if problem is None and isinstance(loaded, dict) and loaded.get("version") == 1:
+                migrated = self._migrate_v1(loaded)
+                self._state = migrated
+                self._dirty = True
+                self.save()
+                print("[StateManager] state v1 → v2 迁移完成: "
+                      "regime/alpha/evidence 已移除, 估值待下一轮 AI 重新评估 "
+                      f"(runtime.analysis_count={migrated['runtime'].get('analysis_count', 0)} 保留)")
+                return self._state
+            if problem is None:
+                problem = self._validate_state(loaded)
             if problem is None:
                 self._state = loaded
-                warning = self._normalize_regime_progress(loaded)
-                if warning:
-                    self._dirty = True
-                    print(f"[StateManager] 告警: {warning} (已归一化为 "
-                          f"{loaded['alpha']['regime_progress']})")
                 return self._state
             self._recover_from_corruption(problem, on_recovered, memory)
             return self._state
@@ -98,61 +106,50 @@ class StateManager:
         return self._state
 
     @staticmethod
-    def _validate_state(loaded) -> Optional[str]:
-        """校验 state 结构; 合法返回 None, 否则返回原因字符串.
-
-        alpha.regime_progress 非法/越界不在此判定 (不触发损坏恢复): 由
-        _normalize_regime_progress 就地归一化并告警 (脏 progress 会让
-        tick_alpha/step_alpha 抛错)。
-        """
-        if not isinstance(loaded, dict):
-            return "顶层结构非法 (非 JSON 对象)"
-        if loaded.get("version") != 1:
-            return f"version 不匹配: {loaded.get('version')!r} != 1"
-        regime = loaded.get("regime")
-        if not isinstance(regime, dict):
-            return "regime 结构非法"
-        if regime.get("current") not in _LEGAL_REGIMES:
-            return f"regime.current 非法: {regime.get('current')!r}"
-        alpha = loaded.get("alpha")
-        if not isinstance(alpha, dict):
-            return "alpha 结构非法"
-        value = alpha.get("current")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return f"alpha.current 非数值: {value!r}"
-        if not (-1.0 <= float(value) <= 1.0):
-            return f"alpha.current 越界: {value!r}"
-        return None
+    def _migrate_v1(loaded: dict) -> dict:
+        """v1 (regime/alpha) → v2 (valuation): 保留非仓位字段, 估值重置为空."""
+        state = {
+            "version": STATE_VERSION,
+            "created_at": loaded.get("created_at") or _utc_iso(),
+            "valuation": {
+                "current": None,
+                "previous": None,
+                "label": UNASSESSED_LABEL,
+                "confidence": "low",
+                "evidence": "",
+                "updated_at": "",
+                "changes": 0,
+            },
+            "runtime": loaded.get("runtime") if isinstance(loaded.get("runtime"), dict) else {},
+        }
+        defaults = StateManager._default_state()["runtime"]
+        for key, value in defaults.items():
+            state["runtime"].setdefault(key, value)
+        # old alpha 为仓位语义 (-1~+1), 不能当作估值沿用; 仅清空 last_tick 锚点
+        state["runtime"].pop("last_tick_at", None)
+        for key in ("ma", "thesis"):
+            if key in loaded:
+                state[key] = loaded[key]
+        return state
 
     @staticmethod
-    def _normalize_regime_progress(loaded) -> Optional[str]:
-        """alpha.regime_progress 非法/越界 → 就地归一化, 返回告警原因 (None=正常).
-
-        仅归一化, 不触发损坏恢复 (区别于 _validate_state 的返回原因路径):
-        脏 progress (非数值/NaN/越界) 会让 tick_alpha/step_alpha 抛错, 这里统一
-        收敛为 [0,1] 浮点并告警; 归一化值随下一次 save 落盘 (标记 dirty)。
-        """
-        alpha = loaded.get("alpha") if isinstance(loaded, dict) else None
-        if not isinstance(alpha, dict) or "regime_progress" not in alpha:
-            return None
-        value = alpha.get("regime_progress")
-        if isinstance(value, bool):
-            alpha["regime_progress"] = 0.5
-            return f"alpha.regime_progress 非数值: {value!r}"
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            alpha["regime_progress"] = 0.5
-            return f"alpha.regime_progress 非数值: {value!r}"
-        if number != number:  # NaN
-            alpha["regime_progress"] = 0.5
-            return f"alpha.regime_progress 非数值: {value!r}"
-        if not isinstance(value, (int, float)):
-            alpha["regime_progress"] = max(0.0, min(1.0, number))
-            return f"alpha.regime_progress 非数值: {value!r}"
-        if not (0.0 <= number <= 1.0):
-            alpha["regime_progress"] = max(0.0, min(1.0, number))
-            return f"alpha.regime_progress 越界: {value!r}"
+    def _validate_state(loaded) -> Optional[str]:
+        """校验 state 结构; 合法返回 None, 否则返回原因字符串."""
+        if not isinstance(loaded, dict):
+            return "顶层结构非法 (非 JSON 对象)"
+        if loaded.get("version") != STATE_VERSION:
+            return f"version 不匹配: {loaded.get('version')!r} != {STATE_VERSION}"
+        valuation = loaded.get("valuation")
+        if not isinstance(valuation, dict):
+            return "valuation 结构非法"
+        current = valuation.get("current")
+        if current is not None and not is_valid(current):
+            return f"valuation.current 非法: {current!r}"
+        runtime = loaded.get("runtime")
+        if not isinstance(runtime, dict):
+            return "runtime 结构非法"
+        if "analysis_count" not in runtime or "post_count" not in runtime:
+            return "runtime 计数缺失"
         return None
 
     def _recover_from_corruption(self, problem: str, on_recovered, memory) -> dict:
@@ -160,7 +157,7 @@ class StateManager:
         backup_path = self._backup_corrupt_state()
         print(f"[StateManager] state 损坏 ({problem}); 备份: {backup_path or '备份失败'}")
         info = {"reason": problem, "backup_path": backup_path, "rebuilt": False,
-                "regime": None, "alpha": None}
+                "valuation": None}
         if memory is None:
             memory = self._build_memory()
         rebuilt = False
@@ -175,8 +172,7 @@ class StateManager:
             self.save(force=True)
             print("[StateManager] 无记忆可重建, 已使用默认状态")
         info["rebuilt"] = rebuilt
-        info["regime"] = self.get_regime()
-        info["alpha"] = self.get_alpha()
+        info["valuation"] = self.get_valuation()
         self.last_recovery = info
         if on_recovered is not None:
             try:
@@ -245,51 +241,64 @@ class StateManager:
     def update_runtime(self):
         state = self.load()
         state["runtime"]["analysis_count"] += 1
-        state["runtime"]["last_analysis_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+        state["runtime"]["last_analysis_at"] = _utc_iso()
         self._state = state
         # 本方法直接改内存而未走 set(): 必须置脏, 否则 save() 会被脏门控
         # 静默跳过 (复盘轮 set+save 清脏后, 内存已 +1 但磁盘停在旧快照)。
         self._dirty = True
         self.save()
 
-    @staticmethod
-    def _clamp_alpha(value) -> float:
-        """把任意输入收敛为 [-1, 1] 内的浮点数 (非数值/NaN → 0.0)."""
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return 0.0
-        if value != value:  # NaN
-            return 0.0
-        return max(-1.0, min(1.0, value))
+    def set_valuation(self, value, *, confidence: str = "low", evidence: str = "",
+                      updated_at: str = "") -> dict:
+        """写入新估值 (0~1): 记录 previous/label/changes 并置脏 (不落盘).
+
+        非法估值直接抛 ValueError (调用方必须先校验) —— 不静默写入脏值。
+        """
+        if not is_valid(value):
+            raise ValueError(f"非法估值: {value!r} (需要 0~1 数字)")
+        conf = str(confidence or "low").strip().lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "low"
+        state = self.load()
+        block = state.setdefault("valuation", {})
+        previous = block.get("current")
+        block["previous"] = previous if is_valid(previous) else None
+        block["current"] = round(float(value), 4)
+        block["label"] = band_of(value)
+        block["confidence"] = conf
+        block["evidence"] = str(evidence or "")[:300]
+        block["updated_at"] = updated_at or _utc_iso()
+        if is_valid(previous) and float(previous) != float(value):
+            block["changes"] = int(block.get("changes", 0) or 0) + 1
+        self._state = state
+        self._dirty = True
+        return block
 
     def regenerate_from_memory(self, memory) -> bool:
-        """从 alpha_history.json 重建状态（用于状态文件损坏/丢失时恢复）.
+        """从 valuation_history.json 重建状态 (状态文件损坏/丢失时恢复).
 
-        重建后校验 regime 为 7 个合法枚举之一、alpha/target 收敛到 [-1, 1];
-        非法值回退 (regime→BEAR, alpha→0.0) 并打印告警。无 alpha 历史返回 False。
+        重建后校验估值落在 [0,1]; 非法值回退 null (未评估) 并打印告警。
+        无估值历史返回 False。
         """
-        alpha_hist = memory.load_alpha_history()
-        if not alpha_hist:
-            print("[StateManager] No alpha history to rebuild from, using default state")
+        history = memory.load_valuation_history()
+        if not history:
+            print("[StateManager] 无估值历史可重建, 使用默认状态")
             return False
 
-        last = alpha_hist[-1] if isinstance(alpha_hist[-1], dict) else {}
-        regime = last.get("regime", "BEAR")
-        if regime not in _LEGAL_REGIMES:
-            print(f"[StateManager] 重建 regime 非法 {regime!r}, 回退 BEAR")
-            regime = "BEAR"
-        alpha = self._clamp_alpha(last.get("alpha", 0.0))
-        target = self._clamp_alpha(last.get("target_alpha", alpha))
-
+        last = history[-1] if isinstance(history[-1], dict) else {}
+        raw = last.get("valuation")
         state = self._default_state()
-        state["regime"]["current"] = regime
-        state["regime"]["started_at"] = last.get("date", state["regime"]["started_at"])
-        state["regime"]["last_changed_at"] = last.get("date", state["regime"]["last_changed_at"])
-        state["alpha"]["current"] = alpha
-        state["alpha"]["target"] = target
-        state["alpha"]["last_change_at"] = last.get("date", state["alpha"]["last_change_at"])
-        state["runtime"]["analysis_count"] = len(alpha_hist)
+        if is_valid(raw):
+            state["valuation"].update({
+                "current": round(float(raw), 4),
+                "label": band_of(raw),
+                "confidence": str(last.get("confidence") or "low"),
+                "evidence": str(last.get("note") or "")[:300],
+                "updated_at": str(last.get("date") or ""),
+            })
+        elif raw is not None:
+            print(f"[StateManager] 重建估值非法 {raw!r}, 回退未评估")
+        state["runtime"]["analysis_count"] = len(history)
 
         problem = self._validate_state(state)
         if problem:
@@ -298,12 +307,11 @@ class StateManager:
 
         self._state = state
         self.save(force=True)
-        print(f"[StateManager] Rebuilt state from alpha history "
-              f"(regime={state['regime']['current']}, alpha={state['alpha']['current']})")
+        print(f"[StateManager] 已从估值历史重建 (估值={state['valuation']['current']}, "
+              f"records={len(history)})")
         return True
 
-    def get_regime(self) -> str:
-        return self.get("regime.current", "BEAR")
-
-    def get_alpha(self) -> float:
-        return float(self.get("alpha.current", 0.0))
+    def get_valuation(self) -> Optional[float]:
+        """当前估值 (0~1); 尚未评估返回 None."""
+        value = self.get("valuation.current", None)
+        return float(value) if is_valid(value) else None

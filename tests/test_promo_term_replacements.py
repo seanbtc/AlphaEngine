@@ -15,7 +15,6 @@ if str(_ALPHA_ROOT) not in sys.path:
 import src.alpha as alpha_module  # noqa: E402
 from src.alpha import (  # noqa: E402
     _apply_promo_term_replacements, _write_promo_post, run_cycle)
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator  # noqa: E402
 from src.analyzer import SYSTEM_PROMPT  # noqa: E402
 from src.notify import DingTalk  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
@@ -58,7 +57,7 @@ def test_promo_payload_replaced_case_insensitive(monkeypatch, capsys):
     text = ("No.18: Coinbase Premium 转负, COINBASE 流出放缓, "
             "coinbase premium 收窄")
 
-    _write_promo_post(cfg, text, 18, "BEAR", -1.0)
+    _write_promo_post(cfg, text, 18, 0.62)
 
     content = records[0]["content"]
     assert "美资现货溢价" in content
@@ -72,14 +71,14 @@ def test_promo_event_structure_unchanged(monkeypatch):
     records = _capture_promo(monkeypatch)
     cfg = {"promo": {"enabled": True, "term_replacements": _DEFAULT_RULES}}
 
-    _write_promo_post(cfg, "Coinbase Premium 转负", 18, "BEAR", -0.42)
+    _write_promo_post(cfg, "Coinbase Premium 转负", 18, 0.62)
 
     record = records[0]
     assert record["event_type"] == "alpha_post"
     assert record["source"] == "AlphaEngine"
     assert record["post_no"] == 18
-    assert record["cycle"] == "BEAR"
-    assert record["alpha"] == -0.42
+    assert record["valuation"] == 0.62
+    assert record["valuation_label"] == "轻度高估"
     assert isinstance(record["content"], str)
     assert record["ts"]
 
@@ -141,7 +140,7 @@ class _Memory:
     def get_context_for_ai(self):
         return ""
 
-    def append_alpha(self, record):
+    def append_valuation(self, record):
         pass
 
     def append_entry(self, text):
@@ -155,22 +154,23 @@ class _KnowledgeStub:
     def load_knowledge_base(self):
         return ""
 
-    def log_drift_meta(self, meta, cycle_position):
+    def log_drift_meta(self, meta, valuation_label=""):
         pass
 
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
+    def log_prediction(self, valuation, confidence, btc_price=None, **kwargs):
         pass
 
     def distill_due(self, state_manager, now=None):
         return False
 
+    def record_price(self, price, valuation=None):
+        pass
 
-class _TradeSync:
-    def send_order(self, alpha, regime, price=None):
-        return None
+    def price_trend(self):
+        return {}
 
 
 class _DataFeed:
@@ -178,35 +178,17 @@ class _DataFeed:
         return None
 
 
-class _Review:
-    def record_price(self, *args, **kwargs):
-        pass
-
-    def price_trend(self):
-        return {}
-
-    def should_review(self):
-        return False
-
-
 class _RecordingDingTalk:
     def __init__(self):
         self.analysis_texts = []
         self._inner = DingTalk({"enabled": False})
 
-    def analysis(self, summary, cycle, conf, alpha, signals,
-                 post_no=None, engine_regime=None,
-                 regime_evidence=None, forecast=None):
-        text = self._inner.analysis_text(
-            summary, cycle, conf, alpha, signals, post_no, engine_regime,
-            regime_evidence, forecast)
+    def analysis(self, summary, valuation=None, **kwargs):
+        text = self._inner.analysis_text(summary, valuation, **kwargs)
         self.analysis_texts.append(text)
         return text
 
-    def regime_change(self, *args, **kwargs):
-        pass
-
-    def alpha_change(self, *args, **kwargs):
+    def valuation_change(self, *args, **kwargs):
         pass
 
     def alert(self, *args, **kwargs):
@@ -243,10 +225,9 @@ def test_promo_replaced_but_dingtalk_and_memory_keep_original(
     memory = _Memory()
     dingtalk = _RecordingDingTalk()
     analyzer = _RunAnalyzer({
-        "cycle_position": "BEAR",
-        "cycle_confidence": "high",
-        "regime_progress": 0.5,
-        "regime_evidence": "evidence",
+        "valuation": 0.42,
+        "valuation_confidence": "high",
+        "valuation_evidence": "Coinbase Premium 转负 evidence",
         "summary": summary,
         "evidence_scores": {"profitability": 0.1, "institutional": 0.1,
                             "onchain": 0.1, "derivatives": 0.1, "macro": 0.1},
@@ -255,17 +236,14 @@ def test_promo_replaced_but_dingtalk_and_memory_keep_original(
     })
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    engine = AlphaEngine({"smoothing": {},
-                          "stability": {"required_confirmations": 1}}, sm)
     components = {
         "cfg": {"schedule": {"min_analysis_interval_hours": 0},
                 "promo": {"enabled": True,
                           "term_replacements": _DEFAULT_RULES}},
         "data_dir": str(tmp_path), "memory": memory, "state": sm,
-        "fetcher": _Fetcher(), "analyzer": analyzer, "engine": engine,
-        "evidence": EvidenceAccumulator(sm, 0.02),
-        "knowledge": _KnowledgeStub(), "tradesync": _TradeSync(),
-        "datafeed": _DataFeed(), "dingtalk": dingtalk, "review": _Review(),
+        "fetcher": _Fetcher(), "analyzer": analyzer,
+        "knowledge": _KnowledgeStub(),
+        "datafeed": _DataFeed(), "dingtalk": dingtalk,
     }
 
     run_cycle(components)
@@ -295,9 +273,9 @@ def test_system_prompt_has_brand_avoidance_guidance():
 
 
 def test_system_prompt_schema_unchanged_by_guidance():
-    for field in ("cycle_position", "cycle_confidence", "regime_progress",
-                  "evidence_scores", "summary", "regime_evidence",
-                  "signal_board", "tweet_draft", "position_narrative",
-                  "risks", "meta"):
+    for field in ("valuation", "valuation_confidence", "valuation_evidence",
+                  "evidence_scores", "summary",
+                  "signal_board", "tweet_draft",
+                  "thesis", "risks", "meta"):
         assert f'"{field}"' in SYSTEM_PROMPT
     assert "## 输出格式 (严格 JSON)" in SYSTEM_PROMPT

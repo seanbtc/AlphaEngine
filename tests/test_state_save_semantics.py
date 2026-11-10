@@ -113,11 +113,11 @@ def test_set_marks_dirty_and_save_writes(tmp_path):
 
 def test_regenerate_from_memory_forces_save(tmp_path):
     memory = Memory(str(tmp_path))
-    memory.save_alpha_history([
-        {"date": "2026-09-10T00:00:00Z", "regime": "BEAR_DEEP",
-         "alpha": -0.25, "target_alpha": -0.3},
-        {"date": "2026-09-20T00:00:00Z", "regime": "BEAR_DEEP",
-         "alpha": -0.2, "target_alpha": -0.25},
+    memory.save_valuation_history([
+        {"date": "2026-09-10T00:00:00Z", "valuation": 0.18, "label": "极度低估",
+         "confidence": "medium", "note": "投降"},
+        {"date": "2026-09-20T00:00:00Z", "valuation": 0.32, "label": "轻度低估",
+         "confidence": "high", "note": "ETF 回流"},
     ])
     sm = StateManager(str(tmp_path), "state.json")
 
@@ -126,7 +126,8 @@ def test_regenerate_from_memory_forces_save(tmp_path):
     disk = _disk_runtime(tmp_path)
     assert disk["analysis_count"] == 2
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["regime"]["current"] == "BEAR_DEEP"
+    assert persisted["valuation"]["current"] == pytest.approx(0.32)
+    assert persisted["valuation"]["label"] == "轻度低估"
     # force 落盘后恢复干净: 裸 save() 不再写盘
     before = (tmp_path / "state.json").stat().st_mtime_ns
     sm.save()
@@ -140,8 +141,9 @@ def test_default_state_written_on_first_load(tmp_path):
 
     assert (tmp_path / "state.json").exists()
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["version"] == 1
+    assert persisted["version"] == 2
     assert persisted["runtime"]["analysis_count"] == 0
+    assert persisted["valuation"]["current"] is None
 
 
 def test_duplicate_alpha_count_scenario_no_skips(tmp_path):

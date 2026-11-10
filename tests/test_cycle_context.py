@@ -13,7 +13,6 @@ if str(_ALPHA_ROOT) not in sys.path:
 
 from src import cycle_context  # noqa: E402
 from src.alpha import build_market_state  # noqa: E402
-from src.alpha_engine import AlphaEngine  # noqa: E402
 from src.analyzer import SYSTEM_PROMPT, Analyzer  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
 
@@ -165,13 +164,13 @@ def test_phase_top_variants():
     assert by_risk["code"] == 3
     assert by_risk["reasons"][0].startswith("距90日")
 
-    by_regime = cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                             regime="BULL_COOLING")
-    assert by_regime["code"] == 3
-    assert by_regime["reasons"] == ["regime=BULL_COOLING (牛顶确认)"]
+    by_valuation = cycle_context.classify_phase(105, 100, 95, "up", "down",
+                                                valuation=0.85)
+    assert by_valuation["code"] == 3
+    assert by_valuation["reasons"] == ["估值极度高估 (0.85 ≥ 0.80)"]
 
     both = cycle_context.classify_phase(
-        105, 100, 95, "up", "down", regime="BULL_COOLING",
+        105, 100, 95, "up", "down", valuation=0.85,
         top_risk={"active": True, "reasons": ["距90日最高收盘回撤 -12.0%"]})
     assert both["code"] == 3 and len(both["reasons"]) == 2
 
@@ -179,56 +178,53 @@ def test_phase_top_variants():
 def test_phase_distance_alone_no_longer_triggers_top():
     # 旧 top_deviation_pct 口径已移除: 距200SMA +40% 不再单独触发 ③
     phase = cycle_context.classify_phase(140, 100, 95, "up", "up")
-    assert phase["code"] == 0
+    assert phase["code"] == 2                  # 仅结构确认, 不因偏离触发 ③
     assert "top_deviation_pct" not in cycle_context._DEFAULT_TOP_RISK
 
 
 def test_phase_top_risk_inactive_does_not_trigger():
     phase = cycle_context.classify_phase(
         105, 100, 95, "up", "down", top_risk={"active": False, "reasons": []})
-    assert phase["code"] == 0
+    assert phase["code"] == 1                  # 复苏早期结构, 未误判顶部
 
 
-def test_phase_alpha_decoupled_from_judgement():
-    # alpha 由引擎按时间自推, 不再参与阶段判定 (防自反馈):
-    # alpha 0.95 且结构非顶部 (距200SMA +5%, 250SMA↓, BULL) → 过渡期而非 ③
-    phase = cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                         regime="BULL", alpha=0.95)
-    assert phase["code"] != 3
-    assert phase["code"] == 0
-    assert all("alpha" not in reason for reason in phase["reasons"])
-    # 相同结构传 alpha=None 结果一致 (alpha 完全不影响判定)
-    assert cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                        regime="BULL") == phase
+def test_phase_valuation_threshold_boundary():
+    # 估值仅作"牛市后期"门槛: 0.79 不触发 ③, 0.80 触发
+    below = cycle_context.classify_phase(105, 100, 95, "up", "up",
+                                         valuation=0.7999)
+    assert below["code"] == 2
+    at = cycle_context.classify_phase(105, 100, 95, "up", "up", valuation=0.80)
+    assert at["code"] == 3
+    assert "0.80 ≥ 0.80" in at["reasons"][0]
+    # 非法估值不参与判定, 也不报错
+    assert cycle_context.classify_phase(105, 100, 95, "up", "up",
+                                        valuation="bad")["code"] == 2
     assert "top_alpha" not in cycle_context._DEFAULT_TOP_RISK
 
 
 def test_phase_zone_changes_does_not_trigger_top():
     # 区间变更次数已移除独立触发; 遗留配置键不应影响判定
     phase = cycle_context.classify_phase(
-        112, 100, 95, "up", "down", regime="RECOVERY",
+        112, 100, 95, "up", "down",
         cfg={"phase": {"top_zone_changes": 3}})
     assert phase["code"] == 1
     assert "top_zone_changes" not in cycle_context._DEFAULT_TOP_RISK
 
 
 def test_phase_confirmed_and_early_recovery():
-    confirmed = cycle_context.classify_phase(105, 100, 95, "up", "up",
-                                             regime="RECOVERY")
+    confirmed = cycle_context.classify_phase(105, 100, 95, "up", "up")
     assert confirmed["code"] == 2 and "250SMA斜率↑" in confirmed["reasons"][0]
 
-    early = cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                         regime="BEAR_BOTTOM")
-    assert early["code"] == 1 and "regime=BEAR_BOTTOM" in early["reasons"][0]
+    early = cycle_context.classify_phase(105, 100, 95, "up", "down")
+    assert early["code"] == 1 and "250SMA未转正" in early["reasons"][0]
 
 
 def test_phase_transition_and_precedence():
-    transition = cycle_context.classify_phase(105, 100, 95, "up", "down",
-                                              regime="BULL")
+    transition = cycle_context.classify_phase(100, 100, 95, "flat", "down")
     assert transition["code"] == 0 and transition["label"] == "过渡期"
 
     bear_wins = cycle_context.classify_phase(90, 100, 95, "down", "up",
-                                             regime="BULL", alpha=0.95)
+                                             valuation=0.95)
     assert bear_wins["code"] == 4
 
 
@@ -383,11 +379,11 @@ def test_cycle_context_computes_top_risk_and_phase3():
     assert context["phase"]["code"] == 3
     assert any("回撤" in reason for reason in context["phase"]["reasons"])
 
-    # 收复 SMA50 后回落为未激活 (且阶段不再为 ③)
+    # 收复 SMA50 后回落为未激活 (结构确认 → ②, 不再判顶部)
     prices.append(400.0)
     recovered = cycle_context.compute_cycle_context(_dated(prices), _cfg(min_bars=1))
     assert recovered["top_risk"]["active"] is False
-    assert recovered["phase"]["code"] == 0
+    assert recovered["phase"]["code"] == 2
 
 
 # ---- 类比统计 (小序列手工可验) ----
@@ -527,7 +523,7 @@ def test_build_cycle_context_reuses_ma_context():
                                "days_above_long_90d": 40, "zone_changes_30d": 3}}
 
     context = cycle_context.build_cycle_context(_cfg(), fake, ma_context=ma_context,
-                                                regime="RECOVERY")
+                                                valuation=0.42)
 
     trend = context["trend"]
     assert trend["zone"] == "上升趋势回调区"
@@ -535,25 +531,30 @@ def test_build_cycle_context_reuses_ma_context():
     assert trend["days_above_200_30d"] == 12
     assert trend["days_above_200_90d"] == 40
     assert trend["zone_changes_30d"] == 3
-    assert context["phase"]["code"] == 2    # 250SMA↑ + RECOVERY → ②, 不再看区间变更
+    assert context["phase"]["code"] == 2    # 250SMA↑ → ②, 不再看区间变更
 
 
-def test_build_cycle_context_alpha_and_regime_inputs():
+def test_build_cycle_context_valuation_inputs():
     # 长平台+深跌+修复: close 刚站上 200SMA (+2%), 250SMA 仍向下
     prices = [200.0] * 150 + [50.0] * 100
     prices += [50.0 + i * 45.0 / 49.0 for i in range(50)]
     fake = _FakeDataFeed(result=_klines_result(prices))
 
-    # alpha 0.95 不再触发 ③ (解耦): 结构为复苏早期 → ①
-    high_alpha = cycle_context.build_cycle_context(
-        _cfg(), fake, regime={"name": "RECOVERY", "alpha": 0.95})
-    assert high_alpha["phase"]["code"] == 1
+    # 估值 0.95 触发 ③ (极度高估)
+    expensive = cycle_context.build_cycle_context(_cfg(), fake, valuation=0.95)
+    assert expensive["phase"]["code"] == 3
 
-    early = cycle_context.build_cycle_context(
-        _cfg(), fake, regime={"name": "RECOVERY", "alpha": 0.70})
-    assert early["phase"]["code"] == 1
-    assert early["phase"]["reasons"] == [
-        "regime=RECOVERY 且 close>SMA200 且 250SMA未转正(斜率↓)"]
+    cycle_context.clear_cache()
+    cheap = cycle_context.build_cycle_context(_cfg(), fake, valuation=0.30)
+    assert cheap["phase"]["code"] == 1
+    assert cheap["phase"]["reasons"] == ["close>SMA200 且 250SMA未转正(斜率↓)"]
+
+    # 估值进入缓存键: 同数据不同估值必须重算
+    cycle_context.clear_cache()
+    first = cycle_context.build_cycle_context(_cfg(), fake, valuation=0.30)
+    second = cycle_context.build_cycle_context(_cfg(), fake, valuation=0.90)
+    assert second["phase"]["code"] == 3
+    assert first["phase"]["code"] == 1
 
 
 def test_build_cycle_context_cache_respects_ttl():
@@ -714,7 +715,8 @@ def test_format_market_state_omits_cycle_section_without_context():
 
 
 def test_system_prompt_mentions_cycle_context():
-    for phrase in ("周期定位与历史类比用于辅助判断 cycle_position/confidence",
+    for phrase in ("周期定位与历史类比 (辅助参考)",
+                   "回撤 -70% 与回撤 -10% 的估值含义不同",
                    "样本量小仅作参考",
                    "顶部风险为**价格结构警示**",
                    "须与链上/宏观/新闻证据 (Glassnode 内容) 结合判断",
@@ -724,16 +726,16 @@ def test_system_prompt_mentions_cycle_context():
 
 def test_ai_output_schema_unchanged():
     result = {
-        "cycle_position": "RECOVERY", "cycle_confidence": "high",
-        "regime_progress": 0.5, "regime_evidence": "x", "summary": "x",
+        "valuation": 0.62, "valuation_confidence": "high",
+        "valuation_evidence": "x", "summary": "x",
         "evidence_scores": {"profitability": 0.1, "institutional": 0.1,
                             "onchain": 0.1, "derivatives": 0.1, "macro": 0.1},
         "signal_board": [], "meta": {"analysis_quality": 8},
     }
     assert Analyzer._validate(result) is True
-    for field in ("cycle_position", "cycle_confidence", "regime_progress",
-                  "evidence_scores", "summary", "regime_evidence",
-                  "signal_board", "tweet_draft", "position_narrative",
+    for field in ("valuation", "valuation_confidence", "valuation_evidence",
+                  "evidence_scores", "summary",
+                  "signal_board", "tweet_draft", "thesis",
                   "risks", "meta"):
         assert f'"{field}"' in SYSTEM_PROMPT
     assert "## 输出格式 (严格 JSON)" in SYSTEM_PROMPT
@@ -744,9 +746,7 @@ def test_ai_output_schema_unchanged():
 def _market_state_components(tmp_path, cycle_cfg, datafeed):
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    engine = AlphaEngine({}, sm)
-    return {"state": sm, "engine": engine,
-            "cfg": {"cycle_context": cycle_cfg}, "datafeed": datafeed}
+    return {"state": sm, "cfg": {"cycle_context": cycle_cfg}, "datafeed": datafeed}
 
 
 def test_build_market_state_attaches_cycle_context(tmp_path):
@@ -759,7 +759,8 @@ def test_build_market_state_attaches_cycle_context(tmp_path):
     assert state["cycle_context"]["cycle"]["close"] == pytest.approx(249.5)
     assert state["cycle_context"]["top_risk"]["enabled"] is True
     assert state["cycle_context"]["top_risk"]["active"] is False
-    assert state["regime"] == "BEAR"
+    assert state["valuation"] is None
+    assert state["valuation_label"] == "未评估"
 
 
 def test_build_market_state_cycle_failure_does_not_block(tmp_path):
@@ -769,14 +770,13 @@ def test_build_market_state_cycle_failure_does_not_block(tmp_path):
     state = build_market_state(_market_state_components(tmp_path, cfg, fake))
 
     assert "cycle_context" not in state
-    assert state["regime"] == "BEAR"
+    assert state["valuation"] is None
 
 
 def test_build_market_state_cycle_disabled_by_default(tmp_path):
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    engine = AlphaEngine({}, sm)
-    state = build_market_state({"state": sm, "engine": engine, "cfg": {}})
+    state = build_market_state({"state": sm, "cfg": {}})
     assert "cycle_context" not in state
 
 

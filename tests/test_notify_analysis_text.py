@@ -1,4 +1,4 @@
-"""分析帖子文本: 中文类目 + 评估总结/预测 + 不展示周期标签."""
+"""分析帖子文本: 估值头部 + 中文类目 + 评估总结/预测 + 不展示置信标签."""
 import sys
 from pathlib import Path
 
@@ -26,39 +26,43 @@ FORECAST = {"horizon_days": 30, "direction": "flat", "price_low": 70000,
             "price_high": 80000, "confidence": 0.55, "hit_probability": 0.65}
 
 
-def test_analysis_text_hides_cycle_and_uses_chinese_categories():
-    text = _dt().analysis_text("摘要", "RECOVERY", "medium", 0.7071, SIGNALS,
-                               post_no=38, engine_regime="RECOVERY")
+def test_analysis_text_header_shows_valuation_band():
+    text = _dt().analysis_text("摘要", 0.62, confidence="medium",
+                               signal_board=SIGNALS, post_no=39)
 
-    assert text.startswith("No.38 | Alpha: +0.7071")
+    assert text.startswith("No.39 | 估值 0.62 · 轻度高估")
     assert "周期" not in text
     assert "置信: medium" not in text
-    assert "RECOVERY" not in text
     for label in ("[机构]", "[衍生品]", "[盈利]", "[链上]", "[宏观]"):
         assert label in text
     assert "[institutional]" not in text
 
 
+def test_analysis_text_unassessed_when_valuation_missing():
+    text = _dt().analysis_text("摘要", None)
+
+    assert text.startswith("估值 未评估")
+    assert "No." not in text
+
+
 def test_analysis_text_appends_assessment_and_forecast():
     text = _dt().analysis_text(
-        "摘要", "RECOVERY", "medium", 0.7071, SIGNALS, post_no=38,
-        engine_regime="RECOVERY",
-        regime_evidence="200SMA 未破但反弹失败，维持谨慎",
+        "摘要", 0.62, confidence="medium", signal_board=SIGNALS, post_no=39,
+        valuation_evidence="MVRV 2.1 偏高, ETF 流入放缓",
         forecast=FORECAST)
 
-    assert "评估总结: 200SMA 未破但反弹失败，维持谨慎" in text
+    assert "评估总结: MVRV 2.1 偏高, ETF 流入放缓" in text
     assert "预测: 30天震荡 | 区间 $70,000-$80,000 | 置信 55%" in text
     assert text.index("评估总结") < text.index("预测:")
     assert text.rstrip().endswith("置信 55%")
 
 
 def test_analysis_text_without_forecast_omits_prediction():
-    text = _dt().analysis_text("摘要", "BEAR", "high", -0.3, SIGNALS)
+    text = _dt().analysis_text("摘要", 0.18, signal_board=SIGNALS)
 
     assert "评估总结" not in text
     assert "预测:" not in text
-    assert "No." not in text
-    assert text.startswith("Alpha: -0.3000")
+    assert text.startswith("估值 0.18 · 极度低估")
 
 
 def test_format_forecast_handles_invalid_payload():

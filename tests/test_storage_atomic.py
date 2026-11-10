@@ -95,12 +95,12 @@ def test_memory_json_write_is_atomic(tmp_path):
     memory = Memory(str(tmp_path))
 
     memory.save_metrics({"m": [{"value": 1}]})
-    memory.save_alpha_history([{"alpha": 0.1}])
+    memory.save_valuation_history([{"valuation": 0.1}])
 
     assert json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))["m"][0]["value"] == 1
-    assert json.loads((tmp_path / "alpha_history.json").read_text(encoding="utf-8"))[0]["alpha"] == 0.1
+    assert json.loads((tmp_path / "valuation_history.json").read_text(encoding="utf-8"))[0]["valuation"] == 0.1
     assert not (tmp_path / "metrics.json.tmp").exists()
-    assert not (tmp_path / "alpha_history.json.tmp").exists()
+    assert not (tmp_path / "valuation_history.json.tmp").exists()
 
 
 def test_memory_write_failure_keeps_previous_file(tmp_path, monkeypatch):
@@ -223,8 +223,8 @@ def test_compress_memory_rejects_truncated_output(tmp_path):
 def test_distill_backs_up_knowledge_base(tmp_path):
     memory = Memory(str(tmp_path))
     memory.save_memory_md("narrative")
-    memory.save_alpha_history([{"date": "2026-01-01T00:00:00Z",
-                                "alpha": 0.1, "regime": "BULL"}])
+    memory.save_valuation_history([{"date": "2026-01-01T00:00:00Z",
+                                    "valuation": 0.1, "label": "轻度低估"}])
     kb_file = tmp_path / "knowledge_base.md"
     kb_file.write_text("OLD KNOWLEDGE", encoding="utf-8")
     new_kb = ("# 知识库\n\n## Bull 信号\n- ETF 净流入 + 站上 200SMA: 3/4 命中\n"

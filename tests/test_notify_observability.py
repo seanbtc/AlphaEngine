@@ -112,12 +112,11 @@ def test_unconfigured_status_line_silent(tmp_path, capsys):
 def test_templates_share_failure_counter():
     dt = _dingtalk(result=False)
 
-    dt.regime_change("BEAR", "BEAR_DEEP", "reason", -0.3, -0.3)
-    dt.alpha_change(-0.3, -0.5, "BEAR_DEEP", 60000, -0.5)
-    dt.analysis("summary", "BEAR_DEEP", "high", -0.5, [])
+    dt.valuation_change(0.42, 0.62, "medium", "MVRV 偏高", 60000)
+    dt.analysis("summary", 0.62, signal_board=[])
     dt.alert("title", "body")
 
-    assert dt.failure_count == 4
+    assert dt.failure_count == 3
 
 
 def test_print_status_shows_notify_failures(tmp_path, capsys):

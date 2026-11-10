@@ -10,7 +10,6 @@ if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
 from src.alpha import run_cycle  # noqa: E402
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator  # noqa: E402
 from src.analyzer import PROMPT_HASH, SYSTEM_PROMPT, Analyzer  # noqa: E402
 from src.knowledge import Knowledge  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
@@ -97,13 +96,14 @@ def test_log_prediction_records_hash_model_temperature(tmp_path):
                              temperature=0.3)
     knowledge = Knowledge({}, str(tmp_path), analyzer)
 
-    knowledge.log_prediction("BULL", "high", 100000.0)
+    knowledge.log_prediction(0.82, "high", 100000.0)
 
     entry = _read_jsonl(tmp_path / "prediction_log.jsonl")[0]
     assert entry["prompt_hash"] == "deadbeefcafe"
     assert entry["model"] == "deepseek-v3"
     assert entry["temperature"] == 0.3
-    assert entry["cycle_position"] == "BULL"
+    assert entry["valuation"] == 0.82
+    assert entry["valuation_label"] == "极度高估"
     assert entry["btc_price"] == 100000.0
 
 
@@ -111,7 +111,7 @@ def test_log_prediction_explicit_args_override(tmp_path):
     analyzer = _StubAnalyzer(prompt_hash="deadbeefcafe", model="m1", temperature=0.3)
     knowledge = Knowledge({}, str(tmp_path), analyzer)
 
-    knowledge.log_prediction("BEAR", "low", 90000.0,
+    knowledge.log_prediction(0.18, "low", 90000.0,
                              prompt_hash="000000000000", model="m2", temperature=0.7)
 
     entry = _read_jsonl(tmp_path / "prediction_log.jsonl")[0]
@@ -123,7 +123,7 @@ def test_log_prediction_explicit_args_override(tmp_path):
 def test_log_prediction_falls_back_to_module_hash_and_omits_meta(tmp_path):
     knowledge = Knowledge({}, str(tmp_path), _StubAnalyzer())
 
-    knowledge.log_prediction("BEAR_DEEP", "medium", 90000.0)
+    knowledge.log_prediction(0.12, "medium", 90000.0)
 
     entry = _read_jsonl(tmp_path / "prediction_log.jsonl")[0]
     assert entry["prompt_hash"] == PROMPT_HASH
@@ -160,7 +160,7 @@ class _Memory:
     def get_context_for_ai(self):
         return ""
 
-    def append_alpha(self, record):
+    def append_valuation(self, record):
         pass
 
     def append_entry(self, text):
@@ -177,22 +177,23 @@ class _KnowledgeStub:
     def load_knowledge_base(self):
         return ""
 
-    def log_drift_meta(self, meta, cycle_position):
+    def log_drift_meta(self, meta, valuation_label=""):
         pass
 
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
-        self.predictions.append((cycle_position, confidence, btc_price))
+    def log_prediction(self, valuation, confidence, btc_price=None, **kwargs):
+        self.predictions.append((valuation, confidence, btc_price))
 
     def distill_due(self, state_manager, now=None):
         return False
 
+    def record_price(self, price, valuation=None):
+        pass
 
-class _TradeSync:
-    def send_order(self, alpha, regime, price=None):
-        return None
+    def price_trend(self):
+        return {}
 
 
 class _DataFeed:
@@ -200,22 +201,8 @@ class _DataFeed:
         return None
 
 
-class _Review:
-    def record_price(self, *args, **kwargs):
-        pass
-
-    def price_trend(self):
-        return {}
-
-    def should_review(self):
-        return False
-
-
 class _DingTalk:
-    def regime_change(self, *args, **kwargs):
-        pass
-
-    def alpha_change(self, *args, **kwargs):
+    def valuation_change(self, *args, **kwargs):
         pass
 
     def analysis(self, *args, **kwargs):
@@ -250,12 +237,11 @@ class _RunAnalyzer:
         return dict(self.result)
 
 
-def _analysis(cp="BEAR"):
+def _analysis(valuation=0.42):
     return {
-        "cycle_position": cp,
-        "cycle_confidence": "high",
-        "regime_progress": 0.5,
-        "regime_evidence": "evidence",
+        "valuation": valuation,
+        "valuation_confidence": "high",
+        "valuation_evidence": "evidence",
         "summary": "summary",
         "evidence_scores": {"profitability": 0.4, "institutional": 0.4,
                             "onchain": 0.3, "derivatives": 0.2, "macro": 0.1},
@@ -268,8 +254,6 @@ def _components(tmp_path, fetcher, analyzer):
     data_dir = str(tmp_path)
     sm = StateManager(data_dir, "state.json")
     sm.load()
-    engine = AlphaEngine({"smoothing": {},
-                          "stability": {"required_confirmations": 1}}, sm)
     return {
         "cfg": {"schedule": {"min_analysis_interval_hours": 0}},
         "data_dir": data_dir,
@@ -277,13 +261,9 @@ def _components(tmp_path, fetcher, analyzer):
         "state": sm,
         "fetcher": fetcher,
         "analyzer": analyzer,
-        "engine": engine,
-        "evidence": EvidenceAccumulator(sm, 0.02),
         "knowledge": _KnowledgeStub(),
-        "tradesync": _TradeSync(),
         "datafeed": _DataFeed(),
         "dingtalk": _DingTalk(),
-        "review": _Review(),
     }
 
 
@@ -299,7 +279,7 @@ def test_run_cycle_syncs_last_prompt_hash(tmp_path):
     run_cycle(comp)
 
     assert comp["state"].get("runtime.last_prompt_hash") == "abc123abc123"
-    assert comp["knowledge"].predictions == [("BEAR", "high", None)]
+    assert comp["knowledge"].predictions == [(0.42, "high", None)]
 
 
 def test_run_cycle_missing_hash_attribute_stays_empty(tmp_path):

@@ -17,6 +17,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from commons.notify import DingTalkNotifier
+from src.valuation import describe
 
 _ENV_WEBHOOK_NAMES = ("ALPHAENGINE_DINGTALK_WEBHOOK", "DINGTALK_WEBHOOK",
                       "DINGTALK_WEBHOOK_URL")
@@ -146,65 +147,52 @@ class DingTalk:
 
     # ---- 模板 ----
 
-    def regime_change(self, fr: str, to: str, reason: str, alpha: float, target: float = None,
-                      old_alpha: float = None):
-        arrow = "🟩" if alpha > 0 else ("🟥" if alpha < 0 else "⬜")
-        if old_alpha is not None and old_alpha != alpha:
-            alpha_line = f"Alpha: {old_alpha:+.4f} → {alpha:+.4f}"
-        else:
-            alpha_line = f"Alpha: {alpha:+.4f}"
-        if target is not None:
-            alpha_line += f" (目标: {target:+.4f})"
-        return self.send(
-            f"{arrow} **Regime 变更**\n\n"
-            f"{fr} → {to}\n"
-            f"{alpha_line}\n"
-            f"原因: {reason}"
-        )
-
-    def alpha_change(self, old: float, new: float, regime: str, btc_price=None, target: float = None):
-        arrow = "🟢" if new > old else ("🔴" if new < old else "⚪")
+    def valuation_change(self, old, new, confidence: str = "low",
+                         evidence: str = "", btc_price=None):
+        """估值跨档通知 (0=极度低估, 1=极度高估); 非跨档微调不打扰。"""
+        arrow = "🟢" if float(new) < float(old) else "🔴"
         price_str = f" | BTC ${btc_price:,.0f}" if btc_price else ""
-        tgt = new if target is None else target
-        direction = "做多" if tgt > 0 else ("做空" if tgt < 0 else "观望")
         return self.send(
-            f"{arrow} **Alpha 变更**\n\n"
-            f"Regime: {regime}{price_str}\n"
-            f"Alpha: {old:+.4f} → {new:+.4f} (target: {tgt:+.2f} {direction})"
+            f"{arrow} **估值变更**\n\n"
+            f"{describe(old)} → {describe(new)}\n"
+            f"置信: {confidence}{price_str}"
+            + (f"\n依据: {evidence}" if evidence else "")
         )
 
-    def analysis(self, summary: str, cycle: str, conf: str, alpha: float, signals: list,
-                 post_no: int = None, engine_regime: str = None,
-                 regime_evidence: str = None, forecast: dict = None) -> str:
+    def analysis(self, summary: str, valuation=None, *, confidence: str = None,
+                 valuation_evidence: str = None, signal_board: list = None,
+                 post_no: int = None, forecast: dict = None) -> str:
         """发送分析通知。返回构建的帖子文本 (供 Promo 桥接复用)."""
-        text = self.analysis_text(summary, cycle, conf, alpha, signals, post_no,
-                                  engine_regime, regime_evidence, forecast)
+        text = self.analysis_text(
+            summary, valuation, confidence=confidence,
+            valuation_evidence=valuation_evidence, signal_board=signal_board,
+            post_no=post_no, forecast=forecast)
         self.send(text)
         return text
 
-    def analysis_text(self, summary: str, cycle: str, conf: str, alpha: float,
-                      signals: list, post_no: int = None, engine_regime: str = None,
-                      regime_evidence: str = None, forecast: dict = None) -> str:
+    def analysis_text(self, summary: str, valuation=None, *, confidence: str = None,
+                      valuation_evidence: str = None, signal_board: list = None,
+                      post_no: int = None, forecast: dict = None) -> str:
         """构建分析帖子文本 — 无图标/无 markdown 加粗, 适合直接发布.
 
-        对外文本不再展示周期/置信标签 (cycle/conf/engine_regime 仅为兼容旧调用
-        保留, 不参与渲染); 末尾追加「评估总结」(AI regime_evidence) 与「预测」。
+        头部为 0–1 估值与档位 (如「估值 0.62 · 轻度高估」); 置信度仅内部使用,
+        不对外展示。末尾追加「评估总结」(AI valuation_evidence) 与「预测」。
         """
-        header = f"Alpha: {alpha:+.4f}"
+        header = f"估值 {describe(valuation)}"
         if post_no is not None:
             header = f"No.{post_no} | {header}"
         lines = [header + "\n"]
         if summary:
             lines.append(summary)
-        if signals:
+        if signal_board:
             lines.append("\n关键信号:")
-            for i, s in enumerate(signals[:5], 1):
+            for i, s in enumerate(signal_board[:5], 1):
                 name = s.get('name', '?')
                 cat = _category_label(s.get('category', ''))
                 detail = s.get('detail', '')
                 prefix = f"{i}. [{cat}] {name}" if cat else f"{i}. {name}"
                 lines.append(f"{prefix}: {detail}")
-        evidence = str(regime_evidence or "").strip()
+        evidence = str(valuation_evidence or "").strip()
         if evidence:
             lines.append(f"\n评估总结: {evidence}")
         forecast_line = _format_forecast(forecast)

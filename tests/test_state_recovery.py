@@ -1,8 +1,6 @@
-"""WP4 ①: state 损坏备份 + 从记忆重建 — 离线单元测试 (真实 data/ 样例只读)."""
+"""state 损坏备份 + 从估值历史重建 + v1→v2 迁移 — 离线单元测试."""
 import json
-import shutil
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,28 +9,23 @@ _ALPHA_ROOT = Path(__file__).resolve().parents[1]
 if str(_ALPHA_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALPHA_ROOT))
 
-from src.alpha_engine import AlphaEngine  # noqa: E402
 from src.memory import Memory  # noqa: E402
-from src.state_manager import StateManager  # noqa: E402
+from src.state_manager import STATE_VERSION, StateManager  # noqa: E402
 
-_REAL_ALPHA_HISTORY = _ALPHA_ROOT / "data" / "alpha_history.json"
-_REAL_MEMORY_MD = _ALPHA_ROOT / "data" / "memory.md"
-
-
-def _seed_real_memory(data_dir: Path) -> int:
-    """把真实 alpha_history.json/memory.md 复制到临时目录, 返回历史条数."""
-    if not _REAL_ALPHA_HISTORY.exists():
-        pytest.skip("真实 data/alpha_history.json 不存在")
-    shutil.copy2(_REAL_ALPHA_HISTORY, data_dir / "alpha_history.json")
-    if _REAL_MEMORY_MD.exists():
-        shutil.copy2(_REAL_MEMORY_MD, data_dir / "memory.md")
-    history = json.loads(_REAL_ALPHA_HISTORY.read_text(encoding="utf-8"))
-    return len(history)
+_HISTORY = [
+    {"date": "2026-09-01T00:00:00Z", "valuation": 0.35, "label": "轻度低估",
+     "confidence": "medium", "note": "ETF 流出放缓"},
+    {"date": "2026-09-15T00:00:00Z", "valuation": 0.48, "label": "轻度低估",
+     "confidence": "low", "note": "分歧"},
+    {"date": "2026-10-01T00:00:00Z", "valuation": 0.62, "label": "轻度高估",
+     "confidence": "high", "note": "MVRV 偏高"},
+]
 
 
-def _expected_last():
-    history = json.loads(_REAL_ALPHA_HISTORY.read_text(encoding="utf-8"))
-    return history[-1]["regime"], float(history[-1]["alpha"])
+def _seed_memory(data_dir: Path) -> int:
+    (data_dir / "valuation_history.json").write_text(
+        json.dumps(_HISTORY, ensure_ascii=False), encoding="utf-8")
+    return len(_HISTORY)
 
 
 def _corrupt_backups(data_dir: Path):
@@ -47,9 +40,8 @@ def _load_with_events(data_dir: Path):
 
 
 def test_corrupt_json_backup_and_rebuild(tmp_path):
-    count = _seed_real_memory(tmp_path)
+    count = _seed_memory(tmp_path)
     (tmp_path / "state.json").write_text("{ this is not json", encoding="utf-8")
-    regime, alpha = _expected_last()
 
     sm, state, events = _load_with_events(tmp_path)
 
@@ -61,83 +53,116 @@ def test_corrupt_json_backup_and_rebuild(tmp_path):
     assert backup.exists()
     assert backup.name.startswith("state.json.corrupt.")
     assert backup.read_text(encoding="utf-8") == "{ this is not json"
-    assert state["regime"]["current"] == regime
-    assert state["alpha"]["current"] == pytest.approx(alpha)
+    assert state["version"] == STATE_VERSION
+    assert state["valuation"]["current"] == pytest.approx(0.62)
+    assert state["valuation"]["label"] == "轻度高估"
     assert state["runtime"]["analysis_count"] == count
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["regime"]["current"] == regime
-    assert persisted["alpha"]["current"] == pytest.approx(alpha)
+    assert persisted["valuation"]["current"] == pytest.approx(0.62)
     # 二次 load 走缓存, 不再回调/不再备份
     assert sm.load(on_recovered=events.append) is state
     assert len(events) == 1
     assert len(_corrupt_backups(tmp_path)) == 1
 
 
-def test_version_mismatch_rebuilds(tmp_path):
-    _seed_real_memory(tmp_path)
-    legacy = {"version": 2, "regime": {"current": "BULL"}, "alpha": {"current": 0.5}}
+def test_unknown_version_rebuilds(tmp_path):
+    _seed_memory(tmp_path)
+    legacy = {"version": 99, "valuation": {"current": 0.5}}
     (tmp_path / "state.json").write_text(json.dumps(legacy), encoding="utf-8")
-    regime, alpha = _expected_last()
 
     _, state, events = _load_with_events(tmp_path)
 
     assert events[0]["rebuilt"] is True
     assert "version 不匹配" in events[0]["reason"]
     assert Path(events[0]["backup_path"]).read_text(encoding="utf-8") == json.dumps(legacy)
-    assert state["regime"]["current"] == regime
-    assert state["alpha"]["current"] == pytest.approx(alpha)
+    assert state["valuation"]["current"] == pytest.approx(0.62)
 
 
-def test_invalid_regime_rebuilds(tmp_path):
-    _seed_real_memory(tmp_path)
-    broken = {"version": 1, "regime": {"current": "MOON"}, "alpha": {"current": 0.1}}
+def test_v1_state_migrates_without_recovery(tmp_path):
+    """v1 (regime/alpha) 启动时迁移: 保留 runtime/ma/thesis, 估值置空, 不触发恢复回调."""
+    v1 = {
+        "version": 1,
+        "created_at": "2026-08-01T00:00:00Z",
+        "regime": {"current": "RECOVERY", "started_at": "2026-08-01T00:00:00Z"},
+        "alpha": {"current": 0.7, "target": 0.7, "regime_progress": 0.5},
+        "runtime": {"analysis_count": 62, "post_count": 38,
+                    "last_analysis_at": "2026-11-10T04:25:00Z",
+                    "last_tick_at": "2026-11-10T04:25:00Z",
+                    "outage": {"reason": "fetch_error", "since": "2026-11-09T00:00:00Z"}},
+        "ma": {"available": True, "zone": "above"},
+        "thesis": {"thesis_id": "t-1", "status": "active"},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(v1), encoding="utf-8")
+
+    sm, state, events = _load_with_events(tmp_path)
+
+    assert events == [] and sm.last_recovery is None
+    assert state["version"] == STATE_VERSION
+    assert state["valuation"]["current"] is None
+    assert state["valuation"]["label"] == "未评估"
+    assert state["runtime"]["analysis_count"] == 62
+    assert state["runtime"]["post_count"] == 38
+    assert "last_tick_at" not in state["runtime"]
+    assert state["ma"]["zone"] == "above"
+    assert state["thesis"]["thesis_id"] == "t-1"
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["version"] == STATE_VERSION
+    assert "regime" not in persisted and "alpha" not in persisted
+
+
+def test_invalid_valuation_rebuilds(tmp_path):
+    _seed_memory(tmp_path)
+    broken = {"version": STATE_VERSION,
+              "valuation": {"current": 1.5, "label": "极度高估"},
+              "runtime": {"analysis_count": 1, "post_count": 0}}
     (tmp_path / "state.json").write_text(json.dumps(broken), encoding="utf-8")
 
     _, state, events = _load_with_events(tmp_path)
 
     assert events[0]["rebuilt"] is True
-    assert "regime.current 非法" in events[0]["reason"]
-    assert state["regime"]["current"] in ("BEAR", "RECOVERY")
+    assert "valuation.current 非法" in events[0]["reason"]
+    assert state["valuation"]["current"] == pytest.approx(0.62)
 
 
-def test_alpha_out_of_range_rebuilds(tmp_path):
-    _seed_real_memory(tmp_path)
-    broken = {"version": 1, "regime": {"current": "BULL"}, "alpha": {"current": 1.5}}
-    (tmp_path / "state.json").write_text(json.dumps(broken), encoding="utf-8")
-
-    _, state, events = _load_with_events(tmp_path)
-
-    assert events[0]["rebuilt"] is True
-    assert "alpha.current 越界" in events[0]["reason"]
-    assert -1.0 <= state["alpha"]["current"] <= 1.0
-
-
-def test_missing_regime_structure_rebuilds(tmp_path):
-    _seed_real_memory(tmp_path)
+def test_missing_valuation_structure_rebuilds(tmp_path):
+    _seed_memory(tmp_path)
     (tmp_path / "state.json").write_text(
-        json.dumps({"version": 1, "alpha": {"current": 0.0}}), encoding="utf-8")
+        json.dumps({"version": STATE_VERSION,
+                    "runtime": {"analysis_count": 1, "post_count": 0}}),
+        encoding="utf-8")
 
     _, _, events = _load_with_events(tmp_path)
 
     assert events[0]["rebuilt"] is True
-    assert "regime 结构非法" in events[0]["reason"]
+    assert "valuation 结构非法" in events[0]["reason"]
 
 
-def test_illegal_history_sanitized_on_rebuild(tmp_path):
-    (tmp_path / "alpha_history.json").write_text(json.dumps([
-        {"date": "2026-09-01T00:00:00Z", "regime": "INIT",
-         "alpha": 2.5, "target_alpha": -9},
+def test_missing_runtime_structure_rebuilds(tmp_path):
+    _seed_memory(tmp_path)
+    (tmp_path / "state.json").write_text(
+        json.dumps({"version": STATE_VERSION,
+                    "valuation": {"current": 0.5}}), encoding="utf-8")
+
+    _, _, events = _load_with_events(tmp_path)
+
+    assert events[0]["rebuilt"] is True
+    assert "runtime 结构非法" in events[0]["reason"]
+
+
+def test_illegal_history_not_reused(tmp_path):
+    (tmp_path / "valuation_history.json").write_text(json.dumps([
+        {"date": "2026-09-01T00:00:00Z", "valuation": 2.5, "label": "?"},
     ]), encoding="utf-8")
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
 
     _, state, events = _load_with_events(tmp_path)
 
     assert events[0]["rebuilt"] is True
-    assert state["regime"]["current"] == "BEAR"
-    assert state["alpha"]["current"] == 1.0
-    assert state["alpha"]["target"] == -1.0
+    assert state["valuation"]["current"] is None
+    assert state["valuation"]["label"] == "未评估"
+    assert state["runtime"]["analysis_count"] == 1
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["alpha"]["current"] == 1.0
+    assert persisted["valuation"]["current"] is None
 
 
 def test_no_memory_falls_back_to_default(tmp_path):
@@ -148,15 +173,14 @@ def test_no_memory_falls_back_to_default(tmp_path):
     info = events[0]
     assert info["rebuilt"] is False
     assert Path(info["backup_path"]).read_text(encoding="utf-8") == "broken"
-    assert state["regime"]["current"] == "BEAR"
-    assert state["alpha"]["current"] == 0.0
+    assert state["valuation"]["current"] is None
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["version"] == 1
-    assert persisted["regime"]["current"] == "BEAR"
+    assert persisted["version"] == STATE_VERSION
+    assert persisted["valuation"]["current"] is None
 
 
-def test_empty_alpha_history_falls_back_to_default(tmp_path):
-    (tmp_path / "alpha_history.json").write_text("[]", encoding="utf-8")
+def test_empty_valuation_history_falls_back_to_default(tmp_path):
+    (tmp_path / "valuation_history.json").write_text("[]", encoding="utf-8")
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
 
     _, _, events = _load_with_events(tmp_path)
@@ -165,7 +189,7 @@ def test_empty_alpha_history_falls_back_to_default(tmp_path):
 
 
 def test_lazy_memory_built_when_not_passed(tmp_path):
-    _seed_real_memory(tmp_path)
+    _seed_memory(tmp_path)
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
     events = []
     sm = StateManager(str(tmp_path), "state.json")
@@ -174,11 +198,11 @@ def test_lazy_memory_built_when_not_passed(tmp_path):
 
     assert events[0]["rebuilt"] is True
     assert sm.last_recovery is not None
-    assert state["regime"]["current"] == _expected_last()[0]
+    assert state["valuation"]["current"] == pytest.approx(0.62)
 
 
 def test_callback_exception_does_not_break_load(tmp_path):
-    _seed_real_memory(tmp_path)
+    _seed_memory(tmp_path)
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
     sm = StateManager(str(tmp_path), "state.json")
 
@@ -187,20 +211,20 @@ def test_callback_exception_does_not_break_load(tmp_path):
 
     state = sm.load(on_recovered=_boom)
 
-    assert state["regime"]["current"] == _expected_last()[0]
+    assert state["valuation"]["current"] == pytest.approx(0.62)
     assert sm.last_recovery["rebuilt"] is True
 
 
 def test_normal_load_no_backup_no_rebuild(tmp_path):
     valid = {
-        "version": 1,
-        "regime": {"current": "DEEP_BULL", "started_at": "2026-01-01T00:00:00Z",
-                   "entered_from": "BULL", "cooldown_remaining": 0,
-                   "stability_counter": 0, "last_changed_at": "2026-01-01T00:00:00Z"},
-        "alpha": {"current": 0.3, "target": 0.3, "regime_progress": 0.5,
-                  "deferred_build": False, "transition_progress": 1.0,
-                  "last_change_at": "2026-01-01T00:00:00Z", "locked": False,
-                  "lock_reason": ""},
+        "version": STATE_VERSION,
+        "created_at": "2026-11-01T00:00:00Z",
+        "valuation": {
+            "current": 0.55, "previous": 0.5, "label": "轻度高估",
+            "confidence": "medium", "evidence": "x",
+            "updated_at": "2026-11-01T00:00:00Z", "changes": 1,
+        },
+        "runtime": {"analysis_count": 7, "post_count": 3},
     }
     (tmp_path / "state.json").write_text(json.dumps(valid), encoding="utf-8")
     events = []
@@ -210,8 +234,7 @@ def test_normal_load_no_backup_no_rebuild(tmp_path):
 
     assert events == []
     assert sm.last_recovery is None
-    assert state["regime"]["current"] == "DEEP_BULL"
-    assert state["alpha"]["current"] == 0.3
+    assert state["valuation"]["current"] == pytest.approx(0.55)
     assert _corrupt_backups(tmp_path) == []
     assert not (tmp_path / "state.json.tmp").exists()
 
@@ -223,14 +246,16 @@ def test_default_state_when_file_missing(tmp_path):
     state = sm.load(on_recovered=events.append)
 
     assert events == []
-    assert state["version"] == 1
-    assert state["regime"]["current"] == "BEAR"
+    assert state["version"] == STATE_VERSION
+    assert state["valuation"]["current"] is None
+    assert state["runtime"]["analysis_count"] == 0
 
 
 def test_rebuild_uses_passed_memory_object(tmp_path):
     memory = Memory(str(tmp_path))
-    memory.save_alpha_history([{"date": "2026-09-10T00:00:00Z", "regime": "BEAR_DEEP",
-                                "alpha": -0.25, "target_alpha": -0.3}])
+    memory.save_valuation_history([{"date": "2026-09-10T00:00:00Z",
+                                    "valuation": 0.18, "label": "极度低估",
+                                    "confidence": "high", "note": "投降"}])
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
     events = []
     sm = StateManager(str(tmp_path), "state.json")
@@ -238,56 +263,49 @@ def test_rebuild_uses_passed_memory_object(tmp_path):
     state = sm.load(on_recovered=events.append, memory=memory)
 
     assert events[0]["rebuilt"] is True
-    assert state["regime"]["current"] == "BEAR_DEEP"
-    assert state["alpha"]["current"] == pytest.approx(-0.25)
-    assert state["alpha"]["target"] == pytest.approx(-0.3)
+    assert state["valuation"]["current"] == pytest.approx(0.18)
+    assert state["valuation"]["label"] == "极度低估"
+    assert state["valuation"]["confidence"] == "high"
+    assert state["valuation"]["evidence"] == "投降"
 
 
-# ---- WP8 8C 附带加固: alpha.regime_progress 非法/越界归一化 ----
+# ---- set_valuation 语义 ----
 
-@pytest.mark.parametrize("bad,expected", [
-    ("bad", 0.5), (None, 0.5), (True, 0.5), (float("nan"), 0.5),
-    (1.5, 1.0), (-0.2, 0.0), ("1.5", 1.0), ("0.25", 0.25),
-])
-def test_dirty_regime_progress_normalized(tmp_path, bad, expected, capsys):
-    """非法/越界 progress → 归一化+告警 (不触发损坏恢复), tick_alpha 不抛错。"""
-    state = {
-        "version": 1,
-        "regime": {"current": "BEAR"},
-        "alpha": {"current": 0.0, "regime_progress": bad},
-        "runtime": {"last_tick_at": "2026-09-22T00:00:00Z"},
-    }
-    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
-
+def test_set_valuation_tracks_previous_and_changes(tmp_path):
     sm = StateManager(str(tmp_path), "state.json")
-    loaded = sm.load()
+    sm.load()
 
-    assert loaded["alpha"]["regime_progress"] == pytest.approx(expected)
-    assert sm.get("alpha.regime_progress") == pytest.approx(expected)
-    out = capsys.readouterr().out
-    assert "告警" in out and "regime_progress" in out
-    assert sm.last_recovery is None
-    assert _corrupt_backups(tmp_path) == []
-    # 归一化值随下一次 save 落盘 (在 tick 改变 progress 之前校验)
-    sm.save(force=True)
-    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert persisted["alpha"]["regime_progress"] == pytest.approx(expected)
-    # 归一化后 tick_alpha 正常推进 (旧实现字符串会 TypeError)
-    engine = AlphaEngine({}, sm)
-    engine.tick_alpha(now=datetime(2026, 9, 23, 0, 0, 0))
-    assert 0.0 <= float(sm.get("alpha.regime_progress")) <= 1.0
+    sm.set_valuation(0.42, confidence="medium", evidence="a")
+    block = sm.set_valuation(0.62, confidence="high", evidence="b")
+
+    assert block["previous"] == pytest.approx(0.42)
+    assert block["current"] == pytest.approx(0.62)
+    assert block["label"] == "轻度高估"
+    # 首次评估 (None → 0.42) 不算变更, 0.42 → 0.62 记 1 次
+    assert block["changes"] == 1
+    assert sm.get_valuation() == pytest.approx(0.62)
 
 
-def test_valid_regime_progress_no_warning(tmp_path, capsys):
+def test_set_valuation_same_value_not_counted_as_change(tmp_path):
+    sm = StateManager(str(tmp_path), "state.json")
+    sm.load()
+
+    sm.set_valuation(0.62)
+    block = sm.set_valuation(0.62)
+
+    assert block["changes"] == 0
+
+
+def test_get_valuation_invalid_falls_back_to_none(tmp_path):
     state = {
-        "version": 1,
-        "regime": {"current": "BEAR"},
-        "alpha": {"current": 0.0, "regime_progress": 0.5},
+        "version": STATE_VERSION,
+        "valuation": {"current": None, "label": "未评估"},
+        "runtime": {"analysis_count": 0, "post_count": 0},
     }
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
     sm = StateManager(str(tmp_path), "state.json")
-    assert sm.load()["alpha"]["regime_progress"] == 0.5
-    assert capsys.readouterr().out == ""
+
+    assert sm.get_valuation() is None
 
 
 # ---- 主入口告警接线 ----
@@ -304,10 +322,9 @@ def test_alert_state_recovery_sends_and_swallows_failure(capsys):
 
     recorder = _Recorder()
     _alert_state_recovery(recorder, {"reason": "r", "backup_path": "b",
-                                     "rebuilt": True, "regime": "BEAR",
-                                     "alpha": -0.5})
+                                     "rebuilt": True, "valuation": 0.62})
     assert recorder.calls[0][0] == "state 已从记忆重建"
-    assert "BEAR" in recorder.calls[0][1]
+    assert "0.62" in recorder.calls[0][1]
 
     class _Boom:
         def alert(self, title, body=""):
@@ -323,7 +340,7 @@ def test_alert_state_recovery_sends_and_swallows_failure(capsys):
 def test_init_components_alerts_on_recovery(tmp_path, monkeypatch):
     from src import alpha as alpha_mod
 
-    _seed_real_memory(tmp_path)
+    _seed_memory(tmp_path)
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
     alerts = []
 
@@ -343,4 +360,4 @@ def test_init_components_alerts_on_recovery(tmp_path, monkeypatch):
 
     assert alerts and alerts[0][0] == "state 已从记忆重建"
     assert components["state"].last_recovery["rebuilt"] is True
-    assert components["state"].get_regime() == _expected_last()[0]
+    assert components["state"].get_valuation() == pytest.approx(0.62)

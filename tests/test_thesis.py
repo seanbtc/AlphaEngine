@@ -182,14 +182,6 @@ def test_format_thesis_for_prompt_mentions_status_and_reason():
     assert "close" in text
 
 
-class _FakeEngine:
-    def __init__(self, alpha):
-        self.alpha = alpha
-
-    def get_alpha(self):
-        return self.alpha
-
-
 def test_build_scorecard_includes_result_streak_and_thesis(tmp_path):
     knowledge = Knowledge({}, str(tmp_path), analyzer=None)
     now = _now()
@@ -200,7 +192,8 @@ def test_build_scorecard_includes_result_streak_and_thesis(tmp_path):
         ts = (now - timedelta(days=index * 5)).isoformat() + "Z"
         pid = f"p{index}"
         predictions.append({"prediction_id": pid, "ts": ts,
-                            "cycle_position": "RECOVERY", "confidence": "high"})
+                            "valuation": 0.42, "valuation_label": "轻度低估",
+                            "confidence": "high"})
         outcomes.append({"prediction_id": pid, "verdict": verdict,
                          "expected": "up", "move_pct": move})
     (tmp_path / "prediction_log.jsonl").write_text(
@@ -213,18 +206,18 @@ def test_build_scorecard_includes_result_streak_and_thesis(tmp_path):
         + json.dumps({"ts": now.isoformat() + "Z", "btc_price": 80000}) + "\n",
         encoding="utf-8")
     memory = Memory(str(tmp_path))
-    memory.save_alpha_history([{
+    memory.save_valuation_history([{
         "date": (now - timedelta(days=30)).isoformat() + "Z",
-        "alpha": 0.9, "btc_price": 90000, "regime": "RECOVERY"}])
+        "valuation": 0.28, "label": "轻度低估", "btc_price": 90000}])
     thesis = evaluate_thesis(normalize_thesis(_raw()), _market(price=74000))
 
-    text = build_scorecard(knowledge, memory, _FakeEngine(0.7), 80000)
+    text = build_scorecard(knowledge, memory, 0.55, 80000)
 
     assert "你的近期成绩" in text
     assert "命中率 33.3%" in text
     assert "连续方向错 2 条" in text
     assert "当前回撤 -20.0%" in text
-    assert "α=+0.900" in text and "α=+0.700" in text
+    assert "30天前 估值=0.28 → 现在 0.55" in text
     # 命题由 format_thesis_for_prompt 单独注入, 成绩单不重复渲染
     assert "当前命题" not in text
     assert len(text) <= 900  # max_chars + 截断标记余量

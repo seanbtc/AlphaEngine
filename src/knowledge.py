@@ -8,7 +8,7 @@ from src.atomic_io import atomic_copy, atomic_write_text
 
 
 def _prediction_key(pred: dict) -> str:
-    return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('cycle_position','')}")
+    return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('valuation','')}")
 
 
 def _rate(numerator, denominator):
@@ -224,19 +224,35 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
 
     cross_rows = [pred.get("cross_check") for pred in predictions
                   if isinstance(pred.get("cross_check"), dict)]
+
+    def _band_mismatch(item):
+        """跨档判定: 新字段 bands 优先, 旧字段 positions 兜底。"""
+        bands = item.get("bands")
+        if isinstance(bands, list):
+            return len(set(bands)) > 1
+        return len(set(item.get("positions") or [])) > 1
+
+    def _first_number(item, *keys):
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                return value
+        return None
+
     dispersed = sum(1 for item in cross_rows if item.get("dispersed"))
-    position_mismatch = sum(
-        1 for item in cross_rows
-        if len(set(item.get("positions") or [])) > 1
-    )
+    position_mismatch = sum(1 for item in cross_rows if _band_mismatch(item))
     soft_dispersed = sum(
         1 for item in cross_rows
-        if item.get("dispersed") and len(set(item.get("positions") or [])) <= 1
+        if item.get("dispersed") and not _band_mismatch(item)
     )
-    position_agreements = [item.get("position_agreement") for item in cross_rows
-                           if isinstance(item.get("position_agreement"), (int, float))]
-    progress_stds = [item.get("progress_std") for item in cross_rows
-                     if isinstance(item.get("progress_std"), (int, float))]
+    position_agreements = [value for value in
+                           (_first_number(item, "band_agreement", "position_agreement")
+                            for item in cross_rows)
+                           if value is not None]
+    progress_stds = [value for value in
+                     (_first_number(item, "valuation_spread", "progress_std")
+                      for item in cross_rows)
+                     if value is not None]
     direction_agreements = [item.get("forecast_direction_agreement") for item in cross_rows
                             if isinstance(item.get("forecast_direction_agreement"), (int, float))]
 
@@ -348,13 +364,23 @@ def build_calibration_summary(predictions: list, outcomes: list) -> dict:
             "n": len(cross_rows),
             "dispersed": dispersed,
             "dispersed_rate": _rate(dispersed, len(cross_rows)),
+            "band_mismatch": position_mismatch,
+            "band_mismatch_rate": _rate(position_mismatch, len(cross_rows)),
             "position_mismatch": position_mismatch,
             "position_mismatch_rate": _rate(position_mismatch, len(cross_rows)),
             "soft_dispersed": soft_dispersed,
             "soft_dispersed_rate": _rate(soft_dispersed, len(cross_rows)),
+            "mean_band_agreement": (
+                round(sum(position_agreements) / len(position_agreements), 4)
+                if position_agreements else None
+            ),
             "mean_position_agreement": (
                 round(sum(position_agreements) / len(position_agreements), 4)
                 if position_agreements else None
+            ),
+            "mean_valuation_spread": (
+                round(sum(progress_stds) / len(progress_stds), 4)
+                if progress_stds else None
             ),
             "mean_progress_std": (
                 round(sum(progress_stds) / len(progress_stds), 4)
@@ -463,14 +489,14 @@ class Knowledge:
 
     # ---- 漂移检测 (每轮分析) ----
 
-    def log_drift_meta(self, meta: dict, cycle_position: str):
+    def log_drift_meta(self, meta: dict, valuation_label: str = ""):
         entry = {
             "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "quality": meta.get("analysis_quality", 0),
             "new_terms": meta.get("unrecognized_topics", []),
             "deprecated_candidates": meta.get("deprecated_terms", []),
             "drift_suspected": meta.get("threshold_drift_suspected", False),
-            "cycle_position": cycle_position,
+            "valuation_label": valuation_label,
         }
         self._append_jsonl(self.drift_log_file, entry)
 
@@ -501,12 +527,12 @@ class Knowledge:
 
     # ---- 预测审计 ----
 
-    def log_prediction(self, cycle_position: str, confidence: str, btc_price: float = None,
+    def log_prediction(self, valuation, confidence: str, btc_price: float = None,
                        prompt_hash: str = None, model: str = None,
                        temperature: float = None,
                        forecast: dict = None, source_type_counts: dict = None,
-                       cross_check: dict = None):
-        """记录一条预测。
+                       cross_check: dict = None, valuation_label: str = None):
+        """记录一条预测 (valuation = 本轮 AI 估值 0~1)。
 
         追溯字段: prompt_hash 可选 (缺省取 analyzer.prompt_hash, 再回退模块常量
         PROMPT_HASH; 最终兜底 "unknown"), 写入时必带该键;
@@ -517,8 +543,8 @@ class Knowledge:
         - forecast: {horizon_days, direction, price_low, price_high, confidence,
           hit_probability, basis}
         - source_type_counts: {retrieved, remembered, inferred, unknown}
-        - cross_check: {samples, positions, position_agreement, progress_std,
-          forecast_direction_agreement, dispersed, ...}
+        - cross_check: {samples, valuations, valuation_spread, bands,
+          band_agreement, forecast_direction_agreement, dispersed, ...}
         """
         if btc_price is None:
             # DataFeed 不可用时用历史最后已知价格兜底, 避免预测价格全为 null (审计空转)
@@ -535,11 +561,15 @@ class Knowledge:
             model = getattr(self.analyzer, "last_call_model", None)
         if temperature is None:
             temperature = getattr(self.analyzer, "last_call_temperature", None)
+        from src.valuation import band_of, is_valid
+        value_text = f"{float(valuation):.4f}" if is_valid(valuation) else "na"
+        label = valuation_label or (band_of(valuation) if is_valid(valuation) else "")
         ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         entry = {
             "ts": ts,
-            "prediction_id": f"{ts}|{cycle_position}",
-            "cycle_position": cycle_position,
+            "prediction_id": f"{ts}|{value_text}",
+            "valuation": round(float(valuation), 4) if is_valid(valuation) else None,
+            "valuation_label": label,
             "confidence": confidence,
             "btc_price": btc_price,
             "verified": False,
@@ -562,7 +592,7 @@ class Knowledge:
         self._append_jsonl(self.prediction_log_file, entry)
 
     def _prediction_id(self, pred: dict) -> str:
-        return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('cycle_position','')}")
+        return str(pred.get("prediction_id") or f"{pred.get('ts','')}|{pred.get('valuation','')}")
 
     def _load_prediction_outcomes(self) -> dict:
         """读取预测审计侧车 (prediction_outcomes.jsonl), 返回 prediction_id -> 结果。"""
@@ -613,26 +643,73 @@ class Knowledge:
                 break
         return selected
 
-    @staticmethod
-    def _expected_direction(cycle_position: str):
-        """按 regime 的目标 alpha 判断价格预期: up/down/flat; 未知返回 None。"""
+    # ---- 价格快照 (原 review_engine.record_price/price_trend 并入) ----
+
+    def record_price(self, price, valuation=None) -> None:
+        """追加一条价格快照到 price_history.jsonl (趋势/预测审计共用)。"""
         try:
-            from src.alpha_engine import REGIME_ALPHA_MAP
-        except Exception:
-            REGIME_ALPHA_MAP = {}
-        if cycle_position in REGIME_ALPHA_MAP:
-            alpha = float(REGIME_ALPHA_MAP[cycle_position])
-            if alpha > 0:
-                return "up"
-            if alpha < 0:
-                return "down"
-            return "flat"
-        # 兜底与 REGIME_ALPHA_MAP 对齐 (import 失败时口径不能反转)
-        fallback = {
-            "BEAR_BOTTOM": "flat", "RECOVERY": "up", "BULL": "up", "DEEP_BULL": "up",
-            "BULL_COOLING": "flat", "BEAR": "down", "BEAR_DEEP": "down",
+            value = float(price)
+        except (TypeError, ValueError):
+            return
+        if not (value > 0):
+            return
+        from src.valuation import is_valid
+        entry = {
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+            "btc_price": value,
         }
-        return fallback.get(cycle_position)
+        if is_valid(valuation):
+            entry["valuation"] = round(float(valuation), 4)
+        self._append_jsonl(os.path.join(self.data_dir, "price_history.jsonl"), entry)
+
+    def price_trend(self, days_7: int = 7, days_30: int = 30) -> dict:
+        """返回近 N 天价格趋势: {price, change_7d, change_30d}; 数据不足时对应项为 None."""
+        result = {"price": None, "change_7d": None, "change_30d": None}
+        history = self._price_history()
+        if not history:
+            return result
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        window = [(ts, price) for ts, price in history
+                  if (now - ts).total_seconds() >= 0]
+        if not window:
+            return result
+        result["price"] = window[-1][1]
+        cutoff7 = now - timedelta(days=days_7)
+        recent7 = [price for ts, price in window if ts >= cutoff7]
+        if len(recent7) >= 2 and recent7[0]:
+            result["change_7d"] = round((recent7[-1] - recent7[0]) / recent7[0] * 100, 2)
+        cutoff30 = now - timedelta(days=days_30)
+        recent30 = [price for ts, price in window if ts >= cutoff30]
+        if len(recent30) >= 2 and recent30[0]:
+            result["change_30d"] = round((recent30[-1] - recent30[0]) / recent30[0] * 100, 2)
+        return result
+
+    # 估值 → 价格预期死区: 0.45/0.55 之间视为"合理", 不押方向 (避免边界抖动制造假预测)
+    EXPECT_UP_BELOW = 0.45
+    EXPECT_DOWN_ABOVE = 0.55
+    # 旧 (v1, regime 语义) 预测的审计口径兜底: 保证历史记录仍可被方向性审计
+    _LEGACY_REGIME_EXPECTATION = {
+        "RECOVERY": "up", "BULL": "up", "DEEP_BULL": "up",
+        "BEAR": "down", "BEAR_DEEP": "down",
+        "BEAR_BOTTOM": "flat", "BULL_COOLING": "flat",
+    }
+
+    @classmethod
+    def _expected_direction(cls, valuation, legacy_cycle_position=None):
+        """按估值判断价格预期: 低估→up, 高估→down, 合理→flat; 非法返回 None。
+
+        旧记录 (无 valuation) 按 cycle_position 映射兜底, 不改变历史审计结论。
+        """
+        from src.valuation import is_valid
+        if not is_valid(valuation):
+            return cls._LEGACY_REGIME_EXPECTATION.get(
+                str(legacy_cycle_position or ""))
+        value = float(valuation)
+        if value < cls.EXPECT_UP_BELOW:
+            return "up"
+        if value > cls.EXPECT_DOWN_ABOVE:
+            return "down"
+        return "flat"
 
     @staticmethod
     def _prediction_verdict(expected: str, move_pct: float) -> str:
@@ -763,7 +840,8 @@ class Knowledge:
                     outcome = {
                         "prediction_id": pid,
                         "ts": ts,
-                        "cycle_position": pred.get("cycle_position"),
+                        "valuation": pred.get("valuation"),
+                        "valuation_label": pred.get("valuation_label"),
                         "confidence": pred.get("confidence"),
                         "forecast": forecast,
                         "horizon_days": horizon,
@@ -787,7 +865,8 @@ class Knowledge:
                 outcome = {
                     "prediction_id": pid,
                     "ts": ts,
-                    "cycle_position": pred.get("cycle_position"),
+                    "valuation": pred.get("valuation"),
+                    "valuation_label": pred.get("valuation_label"),
                     "confidence": pred.get("confidence"),
                     "verdict": "skipped",
                     "reason": "missing entry/audit price",
@@ -799,12 +878,14 @@ class Knowledge:
                 continue
 
             move_pct = (audit_price - entry_price) / entry_price * 100.0
-            expected = self._expected_direction(pred.get("cycle_position"))
+            expected = self._expected_direction(pred.get("valuation"),
+                                                pred.get("cycle_position"))
             verdict = self._prediction_verdict(expected, move_pct)
             outcome = {
                 "prediction_id": pid,
                 "ts": ts,
-                "cycle_position": pred.get("cycle_position"),
+                "valuation": pred.get("valuation"),
+                "valuation_label": pred.get("valuation_label"),
                 "confidence": pred.get("confidence"),
                 "entry_price": round(entry_price, 2),
                 "audit_price": round(audit_price, 2),
@@ -958,9 +1039,10 @@ class Knowledge:
             calibration = {"error": f"{type(exc).__name__}: {exc}"}
         drift_log = self._read_jsonl_tail(self.drift_log_file, 20)
 
-        alpha_hist = memory.load_alpha_history()
-        regime_history = " → ".join(
-            f"{h.get('date','')[:10]}:{h.get('regime','')}" for h in alpha_hist[-10:])
+        valuation_hist = memory.load_valuation_history()
+        valuation_history = " → ".join(
+            f"{h.get('date','')[:10]}:{h.get('valuation','?')}({h.get('label','?')})"
+            for h in valuation_hist[-10:])
 
         prompts = [
             "## 近期记忆摘要",
@@ -975,19 +1057,19 @@ class Knowledge:
             "## 漂移检测",
             json.dumps(drift_log[-5:], ensure_ascii=False),
             "",
-            "## Regime 变迁",
-            regime_history,
+            "## 估值变迁 (0=极度低估 1=极度高估)",
+            valuation_history,
         ]
         context = "\n".join(prompts)
 
         distill_prompt = f"""你是知识蒸馏引擎。基于以下历史数据, 生成新的知识库。
 
 要求:
-1. 归纳出 "最可靠的 Bull 判定信号" (历史准确率排序)
-2. 归纳出 "最可靠的 Bear/Bottom 判定信号" (历史准确率排序)
-3. 列出 "常见误判模式" (如过早翻多, regime 变更滞后等)
-4. 给出 "当前周期特殊结构" (与历史周期的差异, 如 ETF 改变供需结构等)
-5. 建议 "Regime 变更阈值是否调整" (以引擎运行时参数 data/params.json 覆盖为准)
+1. 归纳出 "历史上指向低估最可靠的信号" (按后续涨幅排序)
+2. 归纳出 "历史上指向高估最可靠的信号" (按后续跌幅排序)
+3. 列出 "常见误判模式" (如过早判断低估/高估, 估值调整滞后等)
+4. 给出 "当前市场特殊结构" (与历史周期的差异, 如 ETF 改变供需结构等)
+5. 建议 "估值档位阈值是否需要复核" (口径固定为 0-0.2/0.2-0.5/0.5-0.8/0.8-1, 只评估证据是否支持)
 6. 根据「预测校准」归纳模型的过/欠置信区间与重跑离散问题
 7. 更新 ## 知识库 (自动进化) 章节
 
@@ -1054,7 +1136,7 @@ class Knowledge:
             return False
 
         compress_prompt = f"""压缩以下分析历史为关键转折点摘要。
-保留: regime 变更时刻、alpha 方向性变化、关键信号出现/消失、错误判断修正。
+保留: 估值档位变化时刻、估值大幅变动、关键信号出现/消失、错误判断修正。
 丢弃: 重复的日常更新、无变化的分析。
 输出: 简洁 Markdown (必须包含 ## 标题与 - 列表), 按时间倒序, 每条 1-2 行。
 

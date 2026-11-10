@@ -16,7 +16,6 @@ if str(_ALPHA_ROOT) not in sys.path:
 from src import ma_context  # noqa: E402
 from src.alpha import (_record_ma_state, _run_test_ai, build_market_state,  # noqa: E402
                        run_cycle)
-from src.alpha_engine import AlphaEngine, EvidenceAccumulator  # noqa: E402
 from src.analyzer import SYSTEM_PROMPT, Analyzer  # noqa: E402
 from src.state_manager import StateManager  # noqa: E402
 
@@ -455,7 +454,7 @@ def test_system_prompt_has_ma_cheatsheet():
     for phrase in ("5 EMA ⚡动能", "10 EMA 🔍短期趋势", "20 EMA 🎯均值回归",
                    "50 SMA 🛡️强劲上升趋势支撑", "100 SMA 📉回调买入警报",
                    "200 SMA 🔄趋势转变", "250 SMA 💰公允价值",
-                   "不构成短期交易信号", "价格结构与周期位置明显背离"):
+                   "不构成短期交易信号", "估值与价格结构背离"):
         assert phrase in SYSTEM_PROMPT
 
 
@@ -464,9 +463,7 @@ def test_system_prompt_has_ma_cheatsheet():
 def _market_state_components(tmp_path, ma_cfg, datafeed):
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    engine = AlphaEngine({}, sm)
-    return {"state": sm, "engine": engine,
-            "cfg": {"ma_context": ma_cfg}, "datafeed": datafeed}
+    return {"state": sm, "cfg": {"ma_context": ma_cfg}, "datafeed": datafeed}
 
 
 def test_build_market_state_attaches_ma_context(tmp_path):
@@ -488,7 +485,7 @@ def test_build_market_state_ma_failure_does_not_block(tmp_path):
     state = build_market_state(_market_state_components(tmp_path, ma_cfg, fake))
 
     assert "ma_context" not in state
-    assert state["regime"] == "BEAR"
+    assert state["valuation"] is None
 
 
 def test_build_market_state_persist_ma_false_is_read_only(tmp_path):
@@ -512,8 +509,7 @@ def test_build_market_state_persist_ma_false_is_read_only(tmp_path):
 def test_build_market_state_ma_disabled_by_default(tmp_path):
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    engine = AlphaEngine({}, sm)
-    state = build_market_state({"state": sm, "engine": engine, "cfg": {}})
+    state = build_market_state({"state": sm, "cfg": {}})
     assert "ma_context" not in state
 
 
@@ -546,7 +542,6 @@ def _test_ai_components(tmp_path, datafeed, history_file):
     sm.load()
     return {
         "state": sm,
-        "engine": AlphaEngine({}, sm),
         "cfg": {"ma_context": {"enabled": True, "history_file": history_file,
                                "kline_limit": 400, "cache_ttl_seconds": 0}},
         "datafeed": datafeed,
@@ -692,8 +687,9 @@ def test_record_ma_state_legacy_state_without_ma_key(tmp_path):
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert persisted["ma"]["zone"] == "上升趋势回调区"
     assert persisted["ma"]["updated_at"].endswith("Z")
-    assert persisted["regime"]["current"] == "BULL"
-    assert persisted["alpha"]["current"] == 0.42
+    assert persisted["version"] == 2
+    assert persisted["valuation"]["current"] is None      # v1 迁移: 估值待重新评估
+    assert "regime" not in persisted and "alpha" not in persisted
     assert persisted["runtime"]["analysis_count"] == 7
 
 
@@ -703,7 +699,7 @@ class _CycleMemory:
     def get_context_for_ai(self):
         return ""
 
-    def append_alpha(self, record):
+    def append_valuation(self, record):
         pass
 
     def append_entry(self, text):
@@ -732,29 +728,27 @@ class _CycleKnowledge:
     def load_knowledge_base(self):
         return ""
 
-    def log_drift_meta(self, meta, cycle_position):
+    def log_drift_meta(self, meta, valuation_label=""):
         pass
 
     def check_drift(self):
         return []
 
-    def log_prediction(self, cycle_position, confidence, btc_price=None, **kwargs):
+    def log_prediction(self, valuation, confidence, btc_price=None, **kwargs):
         pass
 
     def distill_due(self, state_manager, now=None):
         return False
 
+    def record_price(self, price, valuation=None):
+        pass
 
-class _CycleTradeSync:
-    def send_order(self, alpha, regime, price=None):
-        return None
+    def price_trend(self):
+        return {}
 
 
 class _CycleDingTalk:
-    def regime_change(self, *args, **kwargs):
-        pass
-
-    def alpha_change(self, *args, **kwargs):
+    def valuation_change(self, *args, **kwargs):
         pass
 
     def analysis(self, *args, **kwargs):
@@ -764,22 +758,10 @@ class _CycleDingTalk:
         pass
 
 
-class _CycleReview:
-    def record_price(self, *args, **kwargs):
-        pass
-
-    def price_trend(self):
-        return {}
-
-    def should_review(self):
-        return False
-
-
 _CYCLE_ANALYSIS = {
-    "cycle_position": "RECOVERY",
-    "cycle_confidence": "high",
-    "regime_progress": 0.5,
-    "regime_evidence": "",
+    "valuation": 0.42,
+    "valuation_confidence": "high",
+    "valuation_evidence": "",
     "summary": "ma state cycle",
     "evidence_scores": {},
     "signal_board": [],
@@ -790,9 +772,6 @@ _CYCLE_ANALYSIS = {
 def _cycle_components(tmp_path, ma_cfg, datafeed):
     sm = StateManager(str(tmp_path), "state.json")
     sm.load()
-    sm.set("regime.current", "RECOVERY")
-    sm.set("alpha.current", 0.70)
-    engine = AlphaEngine({}, sm)
     return {
         "cfg": {"schedule": {"min_analysis_interval_hours": 0},
                 "ma_context": ma_cfg},
@@ -800,13 +779,9 @@ def _cycle_components(tmp_path, ma_cfg, datafeed):
         "state": sm,
         "fetcher": _CycleFetcher(),
         "analyzer": _CycleAnalyzer(_CYCLE_ANALYSIS),
-        "engine": engine,
-        "evidence": EvidenceAccumulator(sm, 0.02),
         "knowledge": _CycleKnowledge(),
-        "tradesync": _CycleTradeSync(),
         "datafeed": datafeed,
         "dingtalk": _CycleDingTalk(),
-        "review": _CycleReview(),
     }
 
 
@@ -848,10 +823,7 @@ class _IdleFetcher:
 def _idle_components(tmp_path, ma_cfg, datafeed):
     components = _cycle_components(tmp_path, ma_cfg, datafeed)
     components["fetcher"] = _IdleFetcher()
-    # WP6 时间语义: 预置 1 天前的自然日锚点 (旧 state 首轮仅初始化不推进)
-    components["state"].set(
-        "runtime.last_tick_at",
-        (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)).isoformat() + "Z")
+    components["state"].set_valuation(0.70, confidence="medium", evidence="seed")
     return components
 
 
@@ -872,9 +844,10 @@ def test_run_cycle_idle_refreshes_ma_state(tmp_path):
     assert ma_state["zone"] == "强势多头区"
     assert ma_state["price"] == pytest.approx(249.5, abs=0.01)
     assert ma_state["updated_at"] != "2026-01-01T00:00:00Z"
-    # 只读刷新: 不写 ma_history, 不影响 alpha 时间推进
+    # 只读刷新: 不写 ma_history, 估值保持不变 (无新推文不推进)
     assert not (tmp_path / "h.jsonl").exists()
-    assert persisted["alpha"]["current"] > 0.70
+    assert persisted["valuation"]["current"] == pytest.approx(0.70)
+    assert persisted["runtime"]["analysis_count"] == 1
 
 
 def test_run_cycle_idle_datafeed_exception_keeps_cycle(tmp_path, capsys):
@@ -891,27 +864,33 @@ def test_run_cycle_idle_datafeed_exception_keeps_cycle(tmp_path, capsys):
     assert persisted["ma"]["available"] is False
     assert persisted["ma"]["zone"] is None
     assert persisted["ma"]["updated_at"].endswith("Z")
-    assert persisted["runtime"]["analysis_count"] >= 1
-    assert persisted["alpha"]["current"] > 0.70
+    assert persisted["runtime"]["analysis_count"] == 1
+    assert persisted["valuation"]["current"] == pytest.approx(0.70)
     assert not (tmp_path / "h.jsonl").exists()
 
 
-class _BrokenTrendReview(_CycleReview):
+class _BrokenTrendKnowledge:
+    def __init__(self):
+        self._inner = _CycleKnowledge()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
     def price_trend(self):
         raise RuntimeError("trend boom")
 
 
-def test_run_cycle_idle_build_failure_does_not_block(tmp_path, capsys):
+def test_run_cycle_idle_price_trend_failure_does_not_block(tmp_path, capsys):
     fake = _FakeDataFeed(result=_klines_result(_rising_prices(300)), price=None)
     ma_cfg = {"enabled": True, "history_file": str(tmp_path / "h.jsonl"),
               "kline_limit": 400, "cache_ttl_seconds": 0}
     components = _idle_components(tmp_path, ma_cfg, fake)
-    components["review"] = _BrokenTrendReview()
+    components["knowledge"] = _BrokenTrendKnowledge()
 
-    run_cycle(components)  # build_market_state 异常也不阻塞
+    run_cycle(components)  # 价格趋势异常不阻塞
 
     out = capsys.readouterr().out
-    assert "空闲周期均线摘要更新失败" in out
+    assert "价格趋势计算失败" in out
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert "ma" not in persisted
-    assert persisted["runtime"]["analysis_count"] >= 1
+    assert persisted["ma"]["available"] is True
+    assert persisted["runtime"]["analysis_count"] == 1

@@ -11,7 +11,7 @@
     enter_immediate_drawdown_pct 立即进入; 退出 — 收盘 > 结构均线 (结构修复) 或 回撤收窄至
     ≥ exit_drawdown_pct (可选 exit_below_200sma=true 时收盘跌破 200SMA 也退出)。
     since 为当前风险簇最初激活日 (新激活距簇首 ≤ since_latch_days 交易日则沿用, 否则重置)。
-    阶段 ③ 触发 = top_risk.active 或 regime=BULL_COOLING。
+    阶段 ③ 触发 = top_risk.active 或估值 ≥ 0.80 (极度高估)。
     回放选型: 原"距200SMA>30%"口径牛市误报占比 52.5%/25.5% 且漏掉 2025-10 浅顶 (+17.8%);
     纯状态口径 (90日回撤10%+跌破SMA50+仍在200SMA上) 占比 12.7%/14.9% 但顶后 6 段闪烁;
     滞回口径顶后收敛为 3 段且 since 稳定, 两顶 ±10 交易日内命中。
@@ -178,38 +178,6 @@ def _zone_from_closes(closes, cfg=None):
     return (zones[-1] if zones else ""), _count_zone_changes(zones, 30)
 
 
-def _extract_regime(regime, alpha=None):
-    """归一化 regime 参数 (str / dict / 带 get_regime 的引擎对象) → (name, alpha)."""
-    name = None
-    if isinstance(regime, dict):
-        name = regime.get("name") or regime.get("regime") or regime.get("current")
-        if alpha is None:
-            alpha = regime.get("alpha")
-    elif isinstance(regime, str):
-        name = regime or None
-    elif regime is not None:
-        getter = getattr(regime, "get_regime", None)
-        if callable(getter):
-            try:
-                name = getter()
-            except Exception:
-                name = None
-        if alpha is None:
-            alpha_getter = getattr(regime, "get_alpha", None)
-            if callable(alpha_getter):
-                try:
-                    alpha = alpha_getter()
-                except Exception:
-                    alpha = None
-    try:
-        alpha = float(alpha) if alpha is not None else None
-    except (TypeError, ValueError):
-        alpha = None
-    return (str(name) if name else None), alpha
-
-
-# ---- 顶部风险 (价格结构警示) ----
-
 def _confirmed(base, index, days):
     """连续 days 日 (含当日) 均满足 base; 数据不足返回 False."""
     if days <= 1:
@@ -331,14 +299,13 @@ def compute_top_risk(dates, closes, sma200, structure_ma, *, cfg=None):
 # ---- 阶段判定 ----
 
 def classify_phase(close, sma200, sma250, slope200, slope250, *,
-                   regime=None, alpha=None, cfg=None, top_risk=None):
+                   valuation=None, cfg=None, top_risk=None):
     """固定规则阶段判定 (按 ④→③→②→① 顺序, 未命中为过渡期).
 
     close/sma200/sma250 为最新值; slope200/slope250 为斜率方向 (up/down/None);
     ③ 触发: top_risk.active (价格结构警示, 由 compute_top_risk 计算)
-    或 regime=BULL_COOLING; 距200SMA偏离不再单独触发 (仅 trend 展示)。
-    alpha 参数仅保留签名兼容 (仓位由引擎按时间自推, 参与判定会形成
-    "时间推进→alpha 升→判顶部" 自反馈回路), 不参与阶段判定。
+    或估值 ≥ 0.80 (极度高估); 距200SMA偏离不再单独触发 (仅 trend 展示)。
+    valuation 仅作"是否处于牛市后期"的辅助门槛 (0–1, 非仓位/非状态机);
     区间变更次数 (zone_changes_30d) 仅作 trend 参考, 不参与阶段判定。
     cfg 参数仅保留签名兼容 (顶部阈值改由 cycle_context.top_risk 配置,
     经 compute_top_risk 生效)。
@@ -351,17 +318,20 @@ def classify_phase(close, sma200, sma250, slope200, slope250, *,
     if isinstance(top_risk, dict) and top_risk.get("active"):
         top_reasons.extend(list(top_risk.get("reasons") or [])
                            or ["顶部风险结构激活"])
-    if regime == "BULL_COOLING":
-        top_reasons.append("regime=BULL_COOLING (牛顶确认)")
+    try:
+        valuation_value = float(valuation) if valuation is not None else None
+    except (TypeError, ValueError):
+        valuation_value = None
+    if valuation_value is not None and valuation_value >= 0.80:
+        top_reasons.append(f"估值极度高估 ({valuation_value:.2f} ≥ 0.80)")
     if top_reasons:
         return {"label": _PHASE_LABELS[3], "code": 3, "reasons": top_reasons}
-    if slope250 == "up" and regime in ("RECOVERY", "BULL"):
+    if slope250 == "up":
         return {"label": _PHASE_LABELS[2], "code": 2,
-                "reasons": [f"250SMA斜率↑ 且 regime={regime}"]}
-    if regime in ("BEAR_BOTTOM", "RECOVERY") and ratio is not None and ratio > 0 \
-            and slope250 == "down":
+                "reasons": ["250SMA斜率↑ (结构确认)"]}
+    if ratio is not None and ratio > 0 and slope250 == "down":
         return {"label": _PHASE_LABELS[1], "code": 1,
-                "reasons": [f"regime={regime} 且 close>SMA200 且 250SMA未转正(斜率↓)"]}
+                "reasons": ["close>SMA200 且 250SMA未转正(斜率↓)"]}
     return {"label": _PHASE_LABELS[0], "code": 0,
             "reasons": ["未满足阶段④③②①任一条件"]}
 
@@ -482,8 +452,8 @@ def _build_analog(key, indices, mask, dates, closes, *, windows, merge_gap,
 
 # ---- 主计算 ----
 
-def compute_cycle_context(bars, cfg=None, *, ma_context=None, regime=None,
-                          alpha=None, now=None):
+def compute_cycle_context(bars, cfg=None, *, ma_context=None, valuation=None,
+                          now=None):
     """从日线序列计算周期定位 + 阶段 + 趋势 + 历史类比 (纯计算, 无 IO).
 
     bars: [(YYYY-MM-DD, close, high), (YYYY-MM-DD, close) 或 close, ...] (升序);
@@ -555,10 +525,8 @@ def compute_cycle_context(bars, cfg=None, *, ma_context=None, regime=None,
         else ema_series(closes, 50)
     top_risk = compute_top_risk(dates, closes, sma200, structure_ma, cfg=top_cfg)
 
-    regime_name, alpha = _extract_regime(regime, alpha)
     phase = classify_phase(close, sma200[last], sma250[last], slope200, slope250,
-                           regime=regime_name, alpha=alpha, cfg=cfg,
-                           top_risk=top_risk)
+                           valuation=valuation, cfg=cfg, top_risk=top_risk)
 
     masks = _analog_masks(closes, sma200, sma250, slope_lookback, analog_cfg)
     analogs = {}
@@ -685,7 +653,7 @@ def _get_daily_bars(client, cfg):
     return bars, info
 
 
-def build_cycle_context(cfg=None, client=None, *, ma_context=None, regime=None,
+def build_cycle_context(cfg=None, client=None, *, ma_context=None, valuation=None,
                         now=None):
     """组装周期上下文: 取数 → 计算 → 缓存.
 
@@ -693,7 +661,7 @@ def build_cycle_context(cfg=None, client=None, *, ma_context=None, regime=None,
         cfg:        cycle_context 配置段 (缺省用内置默认);
         client:     DataFeed 客户端 (必须注入; 无则返回 None);
         ma_context: 已构建的均线上下文 (复用 zone/days_above/zone_changes_30d);
-        regime:     str / dict / 带 get_regime 的引擎对象 (供阶段判定);
+        valuation:  当前 0–1 市场估值 (供阶段判定; 缺省不影响结构规则);
         now:        参考日期 (复现/测试用);
     返回 None 并打印 [Cycle] 错误日志的条件: 无客户端 / 异常 / ok=false / stale /
     数据不足 min_bars。不抛异常, 不影响主流程。
@@ -718,14 +686,17 @@ def build_cycle_context(cfg=None, client=None, *, ma_context=None, regime=None,
         print(f"[Cycle] 日线数据不足 (需 ≥{min_bars} 根, 实际 {len(bars)}), 跳过周期上下文")
         return None
 
-    regime_name, alpha = _extract_regime(regime, None)
+    try:
+        valuation_value = round(float(valuation), 4) if valuation is not None else None
+    except (TypeError, ValueError):
+        valuation_value = None
     snapshot = ((ma_context or {}).get("snapshot") or {}) \
         if isinstance(ma_context, dict) else {}
     cache_key = (
         getattr(client, "endpoint", ""), getattr(client, "symbol", ""),
         str(cfg.get("interval") or "1d"), int(cfg.get("kline_limit", 3000) or 3000),
         info.get("source"), bars[-1], len(bars), str(now or ""),
-        regime_name, alpha,
+        valuation_value,
         snapshot.get("zone"), snapshot.get("zone_changes_30d"),
         snapshot.get("days_above_long_30d"), snapshot.get("days_above_long_90d"),
     )
@@ -733,7 +704,7 @@ def build_cycle_context(cfg=None, client=None, *, ma_context=None, regime=None,
         return _CONTEXT_CACHE["value"]
 
     context = compute_cycle_context(bars, cfg, ma_context=ma_context,
-                                    regime=regime, alpha=alpha, now=now)
+                                    valuation=valuation_value, now=now)
     if not context:
         print("[Cycle] 周期上下文计算失败 (数据不足), 跳过")
         return None

@@ -1,14 +1,11 @@
 {
   "_note": "Glassnode Alpha Engine 配置文件",
-
   "features": {
-    "_note": "Phase 门控 (FRAMEWORK-V2): 关闭即回到旧行为。thesis/scorecard/manifest=Phase1 反馈闭环 (不影响仓位); risk_v2=Phase2 风险预算 (mode=dry_run 只记录不施加)。",
+    "_note": "Phase 门控 (FRAMEWORK-V2): 关闭即回到旧行为。thesis/scorecard/manifest=Phase1 反馈闭环 (不影响任何执行动作)。",
     "thesis": true,
     "scorecard": true,
-    "manifest": true,
-    "risk_v2": true
+    "manifest": true
   },
-
   "ai_service": {
     "_note": "统一 AI 服务 (AIService): API Key/模型版本由服务集中管理, 此处只配服务地址与业务参数。模型映射见 AIService/config.json。",
     "enabled": true,
@@ -35,13 +32,17 @@
     "image_cache_max_entries": 32,
     "image_cache_max_bytes": 67108864
   },
-
   "fetcher": {
     "username": "glassnode",
-    "usernames": ["glassnode",  "n3ocortex"],
+    "usernames": [
+      "glassnode",
+      "n3ocortex"
+    ],
     "max_tweets_per_fetch": 20,
     "timeout_seconds": 20,
-    "retweet_whitelist": ["n3ocortex"],
+    "retweet_whitelist": [
+      "n3ocortex"
+    ],
     "_note_web": "web_fallback: x.com 不可达时解析 web/ 目录保存的 X 主页 HTML; web_dir 为网页目录 (相对项目根)",
     "web_fallback": true,
     "web_dir": "web",
@@ -51,100 +52,15 @@
     "pending_max_items": 100,
     "pending_max_age_days": 7,
     "_note_fxtwitter": "fxtwitter 加装源 (免费 API v2, 无 key, 默认关闭=零行为变化)。enabled=true 后: 账号时间线 mode=fallback 仅当现有 x.com/web 结果为空时补入 (always=总是补入), 每源单页 max_tweets 条 (clamp [1,100]), with_replies 是否含回复, timeout_seconds 为请求超时 (clamp [1,120]s); keywords 为搜索词列表 (始终执行, 独立路径, 作者不做 tracked 过滤, 支持 from:/min_faves: 等操作符)。异常内部消化 (打印 [FxClient]/[Fetcher] 日志), 不影响现有抓取/outage/重放/截断语义。",
-    "fxtwitter": {"enabled": false, "mode": "fallback", "max_tweets": 20, "with_replies": false, "timeout_seconds": 20},
+    "fxtwitter": {
+      "enabled": false,
+      "mode": "fallback",
+      "max_tweets": 20,
+      "with_replies": false,
+      "timeout_seconds": 20
+    },
     "keywords": []
   },
-
-  "alpha": {
-    "smoothing": {
-      "_note": "基于BTC 4年周期的alpha推进规则 (自然日折算): 单轮步长 = clamp(距上次推进的自然日数 / 当前regime预期天数, min_daily_step, max_change_per_step). min_daily_step=单轮下限, max_change_per_step=单轮上限; 无推文轮次 progress 同样按自然日推进 (days/expected_days).",
-      "max_change_per_step": 0.05,
-      "min_daily_step": 0.015,
-      "cooldown_cycles_after_regime_change": 10
-    },
-    "time_semantics": {
-      "_note": "自然日推进: state.runtime.last_tick_at 记录上次推进时刻, 每轮 days_elapsed=clamp((now-last_tick_at)/86400, 0, max_catchup_days); 同日重复运行 elapsed≈0 不重复推进; 旧 state 无 last_tick_at 时首轮仅初始化. 注意: tick_cooldown/tick_stability 仍按轮次(决策机会数)计数, 与自然日推进相互独立.",
-      "max_catchup_days": 7
-    },
-    "regime_expected_days": {
-      "_note": "4年周期(1461天)各阶段预期天数, 覆盖代码内 REGIME_EXPECTED_DAYS (等比放大自旧 1270 天锚表); 用于 progress 推进速率与动态步长折算, 需与 src/alpha_engine.py 锚表保持同步. 覆盖值 clamp [20,700]; 合计应为 1461 (不一致仅告警不阻断, 见 --status RegimeDays 与启动日志).",
-      "BEAR_BOTTOM": 207,
-      "RECOVERY": 103,
-      "BULL": 420,
-      "DEEP_BULL": 104,
-      "BULL_COOLING": 103,
-      "BEAR": 420,
-      "BEAR_DEEP": 104
-    },
-    "evidence": {
-      "min_categories_for_regime_change": 3,
-      "min_total_score_for_regime_change": 2.0,
-      "high_conf_min_categories": 2,
-      "high_conf_min_total": 1.5,
-      "decay_per_cycle": 0.01,
-      "require_quality": true,
-      "min_quality_for_regime_change": 5
-    },
-    "stability": {
-      "_note": "连续同向确认: 提议 regime ≠ 当前时, 需连续 N 轮'有新推文且分析成功'的同一提议才执行变更 (1=关闭确认, 与旧行为一致); 被其它门(冷却/低置信/质量/共识)拒绝时待确认计数保留; idle 不计数不重置; 首轮/回溯豁免确认",
-      "required_confirmations": 2
-    },
-    "rhythm": {
-      "_note": "WP8 节奏门控 (防过拟合: 不改节奏表数值, 只修定性结构错误; 全部默认关闭、可开关、可回滚; 数据缺失/异常 fail-open=baseline 行为; 失败隔离不阻断主流程)。三门控 regime 互斥: G1 bear_reclaim_gate 熊侧 (BEAR/BEAR_DEEP) 连续 reclaim_confirm_days 日收盘>长均线(默认SMA200)未确认前 progress 上限 progress_cap, 确认后放行; G2 recovery_completion_gate 复苏 (RECOVERY) 250SMA 斜率↑ 时 progress=1.0 (结构完成即完成); G3 bull_top_gate 牛市 (BULL) progress>progress_threshold 需释放条件 (top_risk.active 或 250SMA 斜率↓) 才允许继续推进, 否则压回阈值。数据来自 ma_context/cycle_context (连续站上天数 snapshot.days_above_long_streak)。详见 README「节奏门控」。",
-      "bear_reclaim_gate": {"enabled": false, "progress_cap": 0.5, "reclaim_confirm_days": 10},
-      "recovery_completion_gate": {"enabled": false},
-      "bull_top_gate": {"enabled": false, "progress_threshold": 0.7}
-    },
-    "shadow": {
-      "_note": "WP8 8C 影子账本 (纯观察, 永不下单): enabled=true 表示开始观察, 不影响任何引擎/AI/通知/发单行为, 设为 false 完全停用。四轨迹 baseline/+G1/+G1G2/+G1G2G3 独立模拟 (regime 与引擎共享, 门控参数取自 alpha.rhythm), 产物写入 data/shadow/ (state.json/ledger.jsonl/equity.jsonl, 已 gitignore)。notional 为固定参考本金(U, 不复利); fee_pct/slip_pct 为 taker+滑点成本(%); rebalance_threshold_pp 复刻 TradeSync 去重 (同向且仓位变化 < 该值不记事件)。报告: py -3 tools/shadow_report.py; 参数敏感性: py -3 tools/rhythm_report.py。",
-      "enabled": true,
-      "notional": 10000,
-      "fee_pct": 0.05,
-      "slip_pct": 0.02,
-      "rebalance_threshold_pp": 1.0
-    },
-    "risk_v2": {
-      "_note": "Phase 2 风险预算 (独立于 AI 的硬风控, 默认 dry_run=只记录不施加)。mode: dry_run|enforce (enforce 未上线, 即使配置也仅告警); exposure_cap 为姿态→仓位上限映射 (Phase 3 才用于限制 alpha); fast_channel 为回撤快通道 (距90日高点回撤, 负值): <= -drawdown_defensive_pct → defensive, <= -drawdown_flat_pct → flat; close<SMA200 → defensive; close>SMA200 且 200SMA 斜率↑ → offensive; 其余 neutral。棘轮: 风险事件内 cap 只降不升, 需连续 release.confirm_evals 轮 close>SMA50 且回撤>-release_drawdown_pct 且 top_risk 消失才释放; 数据缺失 fail-open 不误降。",
-      "mode": "dry_run",
-      "exposure_cap": {
-        "offensive": 0.8,
-        "neutral": 0.5,
-        "defensive": 0.25,
-        "flat": 0.0
-      },
-      "fast_channel": {
-        "drawdown_defensive_pct": 12.0,
-        "drawdown_flat_pct": 20.0
-      },
-      "release": {
-        "confirm_evals": 3,
-        "release_drawdown_pct": 8.0,
-        "require_above_sma50": true
-      }
-    },
-    "cross_check": {
-      "_note": "单次判断交叉验证: 同一 prompt 采样 samples 次 (1=关闭); 样本 cycle_position 不一致 → cycle_confidence 降级 low (走既有低置信门, 不新增 cross_check; K-03 forecast/source_type_counts 由归一化添加); structure_check (方向感知): 仅当提议 cp 为多头侧正暴露 (REGIME_ALPHA_MAP[cp] > 0) 且 > 当前 alpha + 0.005 (加多) 且 close<SMA200 (MA 数据可用时) 才降级; 熊侧空头减仓 (BEAR→BEAR_DEEP/BEAR_DEEP→BEAR_BOTTOM) 与牛侧减仓/清仓 (BULL→DEEP_BULL/DEEP_BULL→BULL_COOLING) 不拦截; market_state 缺 alpha 时回退为仅 cp==BULL 触发",
-      "samples": 2,
-      "structure_check": {
-        "enabled": true
-      }
-    },
-    "confidence_gate": {
-      "low_confidence_blocks_regime_change": true,
-      "low_confidence_max_alpha_abs": 0.3
-    },
-    "regime_alpha_map": {
-      "_note": "确认制: 确认改变方向, 多次确认逐步积累仓位。中性(=0)是清仓翻转点, 不直接跳满仓。",
-      "BEAR_BOTTOM": 0.00,
-      "RECOVERY": 0.70,
-      "BULL": 1.00,
-      "DEEP_BULL": 0.30,
-      "BULL_COOLING": 0.00,
-      "BEAR": -1.00,
-      "BEAR_DEEP": -0.30
-    }
-  },
-
   "knowledge": {
     "distill": {
       "schedule_day": "sunday",
@@ -159,17 +75,6 @@
       "quality_drop_persistence": 3
     }
   },
-
-  "tradesync": {
-    "_note": "交易指令输出配置。可以是 HTTP endpoint 或文件路径。",
-    "enabled": false,
-    "mode": "file",
-    "output_dir": "orders",
-    "http_endpoint": "",
-    "api_key": "",
-    "_output_format": "JSONL with {timestamp, alpha, direction, size_pct, limit, stop}"
-  },
-
   "datafeed": {
     "_note": "DataFeed 服务基址 (本机服务, 默认 9550)。实时价走 GET /price?symbol=BTCUSDT; 日线均线走上 GET /klines?symbol=BTCUSDT&interval=1d&limit=N (Binance U 本位)。strict_stale_price=true 时 stale 价格视为不可用 (默认仍采用并告警)。",
     "enabled": true,
@@ -179,27 +84,23 @@
     "timeout_seconds": 10,
     "strict_stale_price": false
   },
-
   "paths": {
     "data_dir": "data",
     "state_file": "state.json"
   },
-
   "schedule": {
     "_note": "daily_time: 运行时间 (北京时间, 如 12:25)。weekdays: 仅在指定星期运行, 0=周一,1=周二,2=周三,3=周四,4=周五,5=周六,6=周日, 留空=每天。min_analysis_interval_hours: 距上次成功 DeepSeek 分析不足该小时数则跳过抓取/分析 (0=禁用)。retry_on_fetch_failure: 抓取异常后本轮内重试 1 次 (等待 clamp(retry_delay_seconds, 0, 30) 秒, 避免拖长轮次), 仍失败走 outage 路径",
     "daily_time": "12:25",
-    "weekdays": [1, 3, 5],
+    "weekdays": [
+      1,
+      3,
+      5
+    ],
     "poll_interval_seconds": 86400,
     "min_analysis_interval_hours": 24,
     "retry_on_fetch_failure": true,
     "retry_delay_seconds": 30
   },
-
-  "review": {
-    "_note": "月度复盘: 每月最后一天 20:00(UTC) 触发, min_cycles_before_review=最少分析次数才触发复盘",
-    "min_cycles_before_review": 20
-  },
-
   "ma_context": {
     "_note": "日线均线结构 (辅助 AI 判断价格区间/趋势, 不构成短期交易信号)。数据来自 DataFeed /klines (不回退本地归档; 不可用/stale 则该段缺省并报错)。interval/kline_limit 为请求参数; cache_ttl_seconds 为取数缓存秒数; history_file 按日去重保存快照 (跨轮连续性); periods 均线周期; slope_lookback/slope_flat_pct 斜率比较天数与走平阈值(%); events_lookback/max_events 事件检测窗口与上限; history_keep 历史保留条数; zone_thresholds 区间档位判定所用均线 (long_trend=200SMA, fair_value=250SMA, mid_term=100SMA)",
     "enabled": true,
@@ -207,7 +108,19 @@
     "interval": "1d",
     "kline_limit": 400,
     "cache_ttl_seconds": 300,
-    "periods": {"ema": [5, 10, 20], "sma": [50, 100, 200, 250]},
+    "periods": {
+      "ema": [
+        5,
+        10,
+        20
+      ],
+      "sma": [
+        50,
+        100,
+        200,
+        250
+      ]
+    },
     "slope_lookback": 5,
     "slope_flat_pct": 0.2,
     "events_lookback": 5,
@@ -219,7 +132,6 @@
       "mid_term": "sma100"
     }
   },
-
   "cycle_context": {
     "_note": "周期定位与历史类比 (辅助 AI 结合判断; 失败/数据不足则该段缺省并报 [Cycle] 日志)。数据来自 DataFeed /klines (日线, 需 ≥min_bars 根; kline_limit 建议 3000 覆盖全历史); cache_ttl_seconds 为取数缓存秒数。stats.windows 为前瞻收益窗口(交易日); lookback_days 为周期低点回看天数; merge_gap_days 为相邻信号去抖合并间隔; dd_window/dd_groups 为前瞻最大回撤窗口与输出组(B/D)。top_risk 为顶部风险(价格结构警示): 阶段③ 触发 = top_risk.active 或 regime=BULL_COOLING (原距200SMA>30% 独立触发已移除, 距离仅在 trend 展示); alpha 由引擎时间自推, 仅独立展示不参与判定; 近30日区间变更次数仅作参考不参与判定; analog 为四组类比条件阈值 (B: 距200SMA 10-30% 且距ATH>30%; D: 距200SMA 首入>20%); halving_date 最近一次减半日期。",
     "enabled": true,
@@ -228,17 +140,25 @@
     "min_bars": 300,
     "cache_ttl_seconds": 300,
     "stats": {
-      "windows": [30, 90, 180, 365],
+      "windows": [
+        30,
+        90,
+        180,
+        365
+      ],
       "lookback_days": 365,
       "merge_gap_days": 5,
       "dd_window": 180,
-      "dd_groups": ["B", "D"]
+      "dd_groups": [
+        "B",
+        "D"
+      ]
     },
     "top_risk": {
       "_note": "顶部风险 (价格结构警示, 带滞回 + since 锁存; 须与链上/宏观/新闻证据结合判断, 不单独构成结论)。进入 — 连续 enter_confirm_days 日满足基础条件 [距滚动 drawdown_window_days 日最高收盘回撤 ≥ enter_drawdown_pct 且 收盘跌破 structure_ma 且 收盘高于 200SMA (require_above_200sma)], 或当日回撤 ≥ enter_immediate_drawdown_pct 立即进入; 退出 — 收盘 > structure_ma (结构修复) 或 回撤收窄至 ≥ exit_drawdown_pct (exit_below_200sma=true 时收盘跌破 200SMA 也退出)。since 为当前风险簇最初激活日: 新激活距簇首 ≤ since_latch_days 交易日则沿用, 否则重置。阈值按幅度解释 (正负均可)。回放: 原距200SMA>30% 口径牛市误报 52.5%/25.5% 且漏 2025-10 浅顶; 滞回口径 W1 3 段/占比 27.1%, W2 14 段/22.8%, 2021-11-08/2025-10-06 命中 +10d/+5d, 2025 顶后 3 段且 since 恒为 2025-10-11。",
       "enabled": true,
       "drawdown_window_days": 90,
-      "enter_drawdown_pct": 0.10,
+      "enter_drawdown_pct": 0.1,
       "enter_confirm_days": 2,
       "enter_immediate_drawdown_pct": -0.11,
       "exit_drawdown_pct": -0.09,
@@ -248,35 +168,44 @@
       "since_latch_days": 30
     },
     "analog": {
-      "b_min_ratio": 0.10,
-      "b_max_ratio": 0.30,
-      "b_min_drawdown": 0.30,
-      "d_ratio": 0.20
+      "b_min_ratio": 0.1,
+      "b_max_ratio": 0.3,
+      "b_min_drawdown": 0.3,
+      "d_ratio": 0.2
     },
     "halving_date": "2024-04-20"
   },
-
   "dingtalk": {
     "enabled": true,
     "webhook_url": "",
     "secret": "",
     "_note": "钉钉机器人推送。凭证优先读环境变量 (webhook: ALPHAENGINE_DINGTALK_WEBHOOK 服务专属 > DINGTALK_WEBHOOK, 兼容 DINGTALK_WEBHOOK_URL; 加签密钥: ALPHAENGINE_DINGTALK_SECRET 服务专属 > DINGTALK_SECRET, 可选; 专属变量用于与其它服务 (如 Sentinel) 分离); 此处留空或填 ${DINGTALK_WEBHOOK} 占位即可, 明文 token 不得入库。环境变量与 config 均为空时通知禁用并告警 (不崩)。"
   },
-
   "promo": {
     "_note": "分析帖子推送给 Promo (HTTP POST, env PROMO_EVENTS_URL); 推送失败即丢弃。term_replacements 仅作用于发往 Promo 的载荷文本 (钉钉/记忆/知识库/AI 原始输出保持原文): 大小写不敏感、按序替换, 用于避让 Promo 屏蔽词 (交易平台品牌名); 配置缺失/非法/替换后为空 → 原文透传并日志。",
     "enabled": true,
     "term_replacements": [
-      {"pattern": "Coinbase Premium", "replacement": "美资现货溢价"},
-      {"pattern": "coinbase", "replacement": "美资平台"}
+      {
+        "pattern": "Coinbase Premium",
+        "replacement": "美资现货溢价"
+      },
+      {
+        "pattern": "coinbase",
+        "replacement": "美资平台"
+      }
     ]
   },
-
   "backfill": {
     "_note": "首次启动回溯历史数据。bulk_fetch_limit 控制 snscrape 抓取上限。max_analysis_samples 控制分析采样数。",
     "enabled": true,
     "batch_size": 5,
     "bulk_fetch_limit": 2000,
     "max_analysis_samples": 200
+  },
+  "valuation": {
+    "_note": "0–1 市场估值 (0=极度低估, 1=极度高估), 由 AI 每轮直接输出, 本地不做平滑/冷却/连续确认/状态机推进; 无新信息时估值保持不变。档位口径: 0-0.2 极度低估 / 0.2-0.5 轻度低估 / 0.5-0.8 轻度高估 / 0.8-1 极度高估 (左闭右开)。cross_check: 同一 prompt 采样 samples 次 (1=关闭); 样本跨档不一致 → valuation_confidence 降级 low; 档内数值离散仅留痕, 不改变置信。",
+    "cross_check": {
+      "samples": 2
+    }
   }
 }

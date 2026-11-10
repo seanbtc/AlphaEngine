@@ -92,7 +92,7 @@ class _FakeMemory:
     def load_memory_md(self):
         return "# memory\n- RECOVERY"
 
-    def load_alpha_history(self):
+    def load_valuation_history(self):
         return []
 
 

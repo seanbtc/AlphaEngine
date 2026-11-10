@@ -1,4 +1,4 @@
-"""长期记忆管理 — metrics.json + memory.md + alpha_history.json."""
+"""长期记忆管理 — metrics.json + memory.md + valuation_history.json."""
 import json
 import os
 from datetime import datetime, timezone
@@ -11,7 +11,7 @@ class Memory:
         self.data_dir = data_dir
         self.metrics_file = os.path.join(data_dir, "metrics.json")
         self.memory_file = os.path.join(data_dir, "memory.md")
-        self.alpha_history_file = os.path.join(data_dir, "alpha_history.json")
+        self.valuation_history_file = os.path.join(data_dir, "valuation_history.json")
 
     def _read_json(self, filepath, default=None):
         if default is None:
@@ -74,18 +74,18 @@ class Memory:
         })
         self.save_metrics(metrics)
 
-    def save_alpha_history(self, alpha_history: list[dict]):
-        self._write_json(self.alpha_history_file, alpha_history)
+    def save_valuation_history(self, valuation_history: list[dict]):
+        self._write_json(self.valuation_history_file, valuation_history)
 
-    def load_alpha_history(self) -> list[dict]:
-        return self._read_json(self.alpha_history_file, [])
+    def load_valuation_history(self) -> list[dict]:
+        return self._read_json(self.valuation_history_file, [])
 
-    def append_alpha(self, entry: dict):
-        history = self.load_alpha_history()
+    def append_valuation(self, entry: dict):
+        history = self.load_valuation_history()
         history.append(entry)
         if len(history) > 500:
             history = history[-500:]
-        self.save_alpha_history(history)
+        self.save_valuation_history(history)
 
     def get_context_for_ai(self, max_chars: int = 4000) -> str:
         parts = []
@@ -98,12 +98,12 @@ class Memory:
                 vals = ", ".join(f"{e['date'][:10]}={e['value']}" for e in recent)
                 parts.append(f"- {name}: {vals}")
 
-        alpha_hist = self.load_alpha_history()
-        if alpha_hist:
-            parts.append("\n## Alpha 历史趋势\n")
-            for h in alpha_hist[-10:]:
-                parts.append(f"- {h.get('date','?')}: alpha={h.get('alpha','?')}, "
-                             f"regime={h.get('regime','?')}")
+        valuation_hist = self.load_valuation_history()
+        if valuation_hist:
+            parts.append("\n## 估值历史趋势 (0=极度低估 1=极度高估)\n")
+            for h in valuation_hist[-10:]:
+                parts.append(f"- {h.get('date','?')}: 估值={h.get('valuation','?')}"
+                             f" ({h.get('label','?')})")
 
         narrative = self._read_tail(self.memory_file, max_chars)
         if narrative:
