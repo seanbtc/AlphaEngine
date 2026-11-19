@@ -245,6 +245,7 @@ def build_market_state(components: dict, price: float = None,
     state = {
         "valuation": sm.get_valuation(),
         "valuation_label": sm.get("valuation.label", ""),
+        "valuation_state": sm.get("valuation.state", "") or "",
         "valuation_updated_at": sm.get("valuation.updated_at", "") or "",
     }
     if price is not None:

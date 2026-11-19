@@ -28,6 +28,21 @@ BAND_TABLE = (
 BAND_LABELS = tuple(item[0] for item in BAND_TABLE)
 UNASSESSED_LABEL = "未评估"
 
+# 10 档细分状态（只做展示/解释，不改变 4 档估值口径，也不参与交易）
+STATE_TABLE = (
+    ("极端投降", 0.0, 0.1),
+    ("深度低估", 0.1, 0.2),
+    ("低估", 0.2, 0.3),
+    ("偏低估", 0.3, 0.4),
+    ("中性偏下", 0.4, 0.5),
+    ("中性偏上", 0.5, 0.6),
+    ("偏贵", 0.6, 0.7),
+    ("高估", 0.7, 0.8),
+    ("极度高估", 0.8, 0.9),
+    ("泡沫/狂热", 0.9, 1.0),
+)
+STATE_LABELS = tuple(item[0] for item in STATE_TABLE)
+
 
 def clampi(value):
     """把任意输入收敛为 [0, 1] 浮点; 非数值/NaN/inf → None (不做静默兜底)."""
@@ -64,6 +79,24 @@ def describe(value, digits: int = 2) -> str:
     if not is_valid(value):
         return UNASSESSED_LABEL
     return f"{float(value):.{digits}f} · {band_of(value)}"
+
+
+def state_of(value) -> str:
+    """估值 → 10 档细分状态; 非法值返回「未评估」."""
+    if not is_valid(value):
+        return UNASSESSED_LABEL
+    number = float(value)
+    for label, _, upper in STATE_TABLE[:-1]:
+        if number < upper:
+            return label
+    return STATE_TABLE[-1][0]
+
+
+def describe_state(value, digits: int = 2) -> str:
+    """渲染「0.35 · 轻度低估 · 偏低估」; 非法值 → 「未评估」."""
+    if not is_valid(value):
+        return UNASSESSED_LABEL
+    return f"{float(value):.{digits}f} · {band_of(value)} · {state_of(value)}"
 
 
 def parse(raw_value, confidence=None, evidence=None) -> dict | None:

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.atomic_io import atomic_copy, atomic_write_text
-from src.valuation import UNASSESSED_LABEL, band_of, is_valid
+from src.valuation import UNASSESSED_LABEL, band_of, is_valid, state_of
 
 STATE_VERSION = 2
 
@@ -43,6 +43,7 @@ class StateManager:
                 "current": None,
                 "previous": None,
                 "label": UNASSESSED_LABEL,
+                "state": UNASSESSED_LABEL,
                 "confidence": "low",
                 "evidence": "",
                 "updated_at": "",
@@ -115,6 +116,7 @@ class StateManager:
                 "current": None,
                 "previous": None,
                 "label": UNASSESSED_LABEL,
+                "state": UNASSESSED_LABEL,
                 "confidence": "low",
                 "evidence": "",
                 "updated_at": "",
@@ -265,6 +267,7 @@ class StateManager:
         block["previous"] = previous if is_valid(previous) else None
         block["current"] = round(float(value), 4)
         block["label"] = band_of(value)
+        block["state"] = state_of(value)
         block["confidence"] = conf
         block["evidence"] = str(evidence or "")[:300]
         block["updated_at"] = updated_at or _utc_iso()
@@ -292,6 +295,7 @@ class StateManager:
             state["valuation"].update({
                 "current": round(float(raw), 4),
                 "label": band_of(raw),
+                "state": state_of(raw),
                 "confidence": str(last.get("confidence") or "low"),
                 "evidence": str(last.get("note") or "")[:300],
                 "updated_at": str(last.get("date") or ""),
