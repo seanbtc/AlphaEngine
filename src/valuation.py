@@ -43,13 +43,6 @@ STATE_TABLE = (
 )
 STATE_LABELS = tuple(item[0] for item in STATE_TABLE)
 
-# 交叉验证用的粗粒度置信区间（只用于判断两次采样是否同区，不对外展示）
-CONFIDENCE_BAND_TABLE = (
-    ("低区", 0.0, 0.2),
-    ("中低区", 0.2, 0.5),
-    ("中高区", 0.5, 0.8),
-    ("高区", 0.8, 1.0),
-)
 
 
 def clampi(value):
@@ -98,17 +91,6 @@ def state_of(value) -> str:
         if number < upper:
             return label
     return STATE_TABLE[-1][0]
-
-
-def confidence_band_of(value) -> str:
-    """交叉验证用粗粒度区间：底部区/中部区/顶部区。"""
-    if not is_valid(value):
-        return UNASSESSED_LABEL
-    number = float(value)
-    for label, _, upper in CONFIDENCE_BAND_TABLE[:-1]:
-        if number < upper:
-            return label
-    return CONFIDENCE_BAND_TABLE[-1][0]
 
 
 def describe_state(value, digits: int = 2) -> str:

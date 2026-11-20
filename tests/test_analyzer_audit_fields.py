@@ -117,7 +117,6 @@ def test_cross_check_records_consistent_dispersion():
     assert result["valuation_confidence"] == "high"
     block = result["cross_check"]
     assert block["samples"] == 2
-    assert block["band_agreement"] == 1.0
     assert block["valuation_spread"] == 0.04
     assert block["forecast_direction_agreement"] == 1.0
     assert block["dispersed"] is False
@@ -129,11 +128,9 @@ def test_cross_check_in_band_spread_records():
         (_result(0.78), False),
     ])
     result = analyzer.analyze(list(_TWEETS), "")
-    # 档内离散只留痕，不改变 live 置信（只有跨档不一致才降级）
-    assert result["valuation_confidence"] == "high"
+    # spread >= 0.20 → 降级 low
+    assert result["valuation_confidence"] == "low"
     block = result["cross_check"]
-    assert block["bands"] == ["中高区", "中高区"]
-    assert block["band_agreement"] == 1.0
     assert block["valuation_spread"] == 0.26
     assert block["dispersed"] is True
 

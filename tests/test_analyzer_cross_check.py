@@ -76,8 +76,8 @@ def test_samples_two_same_band_consistent(capsys):
     assert result is not None
     assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
-    assert "交叉验证一致 (2 样本): 估值=0.62 (中高区)" in out
-    assert result["cross_check"]["band_agreement"] == 1.0
+    assert "交叉验证一致 (2 样本): 估值=0.62" in out
+    assert result["cross_check"]["valuation_spread"] == pytest.approx(0.06)
     assert result["cross_check"]["dispersed"] is False
 
 
@@ -88,8 +88,7 @@ def test_samples_two_cross_band_degrades(capsys):
     out = capsys.readouterr().out
 
     assert result["valuation_confidence"] == "low"
-    assert "交叉验证跨档不一致" in out
-    assert "中低区" in out and "中高区" in out
+    assert "交叉验证跨样本离散过大" in out
     assert analyzer.calls == 2
     # 归一后保留原字段，并新增审计字段
     assert set(_result()) <= set(result)
@@ -109,21 +108,21 @@ def test_samples_three_cross_band_degrades(capsys):
 
     assert result["valuation_confidence"] == "low"
     assert analyzer.calls == 3
-    assert "交叉验证跨档不一致" in out
-    assert result["cross_check"]["band_agreement"] == pytest.approx(2 / 3, abs=1e-4)
+    assert "交叉验证跨样本离散过大" in out
+    assert result["cross_check"]["valuation_spread"] == pytest.approx(0.43)
 
 
-def test_same_band_wide_spread_only_logged(capsys):
-    """档内数值离散 (spread > 0.15) 只留痕, 不改 live 置信。"""
+def test_wide_spread_degrades_confidence(capsys):
+    """spread >= 0.20 视为样本不一致，降级 low。"""
     analyzer = _StubAnalyzer([(_result(0.52), False), (_result(0.78), False)])
 
     result = analyzer.analyze(list(_TWEETS), "")
     out = capsys.readouterr().out
 
-    assert result["valuation_confidence"] == "high"
-    assert "交叉验证档内离散" in out
+    assert result["valuation_confidence"] == "low"
+    assert "交叉验证跨样本离散过大" in out
     assert result["cross_check"]["dispersed"] is True
-    assert result["cross_check"]["band_agreement"] == 1.0
+    assert result["cross_check"]["valuation_spread"] == pytest.approx(0.26)
 
 
 def test_same_band_direction_disagreement_only_logged(capsys):
@@ -139,6 +138,7 @@ def test_same_band_direction_disagreement_only_logged(capsys):
     assert result["valuation_confidence"] == "high"
     assert "交叉验证档内离散" in out
     assert result["cross_check"]["forecast_direction_agreement"] == 0.5
+    assert result["cross_check"]["valuation_spread"] == pytest.approx(0.02)
 
 
 def test_extra_sample_call_failure_logged(capsys):
@@ -227,4 +227,4 @@ def test_vision_path_uses_same_cross_check(capsys):
     assert analyzer.calls == 2
     assert result["valuation_confidence"] == "low"
     assert "使用视觉(多模态)评估" in out
-    assert "交叉验证跨档不一致" in out
+    assert "交叉验证跨样本离散过大" in out

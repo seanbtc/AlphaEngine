@@ -22,7 +22,7 @@ from AIService.client import DEFAULT_ENDPOINT, AIClient
 from src.link_reader import read_link_content
 from src.cycle_context import format_cycle_context
 from src.thesis import format_thesis_for_prompt, normalize_thesis
-from src.valuation import confidence_band_of, is_valid
+from src.valuation import is_valid
 
 # AI 输出白名单: evidence_scores 仅 5 个证据维度; 额外顶层字段容忍 (signal_board 等可选字段).
 _EVIDENCE_CATEGORY_WHITELIST = ("profitability", "institutional", "onchain",
@@ -59,7 +59,10 @@ _PROMPT_BASE = """你是一位资深的加密货币链上数据分析师。你�
 - **估值由证据决定, 不预设必须落在哪个区间**。0.35–0.55 是正常区间; 证据中性时停在该区间是正确结果, 不要为了"用满 0–1"而强行给极端值。
 - 0.20 是历史底部区域, 0.80 是历史顶部区域; 0.35 是普通周期低点, 0.50 是中性, 0.65 是明显高估。
 - 若证据确实达到历史级底部/顶部, 才输出 ≤0.05 / ≥0.95; 不要用 0.2/0.8 代替极值。
-- 单维度极值最多推到 0.25/0.75; 只有 ≥3 个维度极值共振, 才可给 <0.15 或 >0.85。
+- 单维度极值最多推到 0.25/0.75。
+- 极端值阶梯: ≥3 个维度有内容 → 可给 <0.20/>0.80; ≥3 个维度极值共振 → 可给 <0.15/>0.85; 历史级底部/顶部 (≤0.05/≥0.95) 需要 ≥4 个维度极值共振 + 历史类比。
+- 外部指标可用时, valuation_evidence 至少引用 F&G/AHR999/200MA 中的 1 个; 若认为它们与推文证据冲突, 说明为何不采纳。
+- 若 F&G ≤10 或 AHR999 ≤0.30, 而 valuation >0.50, 必须解释为何不给更低; 若 F&G ≥90 或 AHR999 ≥1.5, 而 valuation <0.50, 必须解释为何不给更高。
 - 10 档用于校准"每个区间大概对应什么市场状态", 不是必须命中的目标。证据只支持普通低估/普通高估时, 0.30–0.40 / 0.60–0.70 是自然结果; 证据中性时 0.45–0.55 同样正确。
 
 ## 估值方法
@@ -1005,49 +1008,43 @@ class Analyzer:
             print("[Analyzer] 交叉验证: 有效样本不足 2 个, 按首样本返回")
             return first
 
-        bands = [confidence_band_of(value) for value in values]
-        band_agreement = self._agreement(bands)
         spread = round(max(values) - min(values), 4)
         direction_values = [value for value in directions if value]
         direction_agreement = self._agreement(direction_values) if direction_values else None
-        band_mismatch = len(set(bands)) > 1
         dispersed = bool(
-            band_mismatch
-            or spread > 0.15
+            spread > 0.10
             or (direction_agreement is not None and direction_agreement < 1.0)
         )
         cross_check = {
             "samples": len(values),
             "valuations": [round(value, 4) for value in values],
             "valuation_spread": spread,
-            "bands": bands,
-            "band_agreement": band_agreement,
             "forecast_directions": directions,
             "forecast_direction_agreement": (
                 None if direction_agreement is None else round(direction_agreement, 4)
             ),
             "dispersed": dispersed,
+            "degrade_spread_threshold": 0.20,
         }
 
-        if not band_mismatch:
-            if dispersed:
-                print(f"[Analyzer] 交叉验证档内离散 ({len(values)} 样本): "
-                      f"spread={spread:.3f} | direction_agreement={direction_agreement} "
-                      f"→ 仅留痕，保留 confidence")
-            else:
-                print(f"[Analyzer] 交叉验证一致 ({len(values)} 样本): "
-                      f"估值={values[0]:.2f} ({bands[0]})")
-            result = dict(first)
-            result["cross_check"] = cross_check
-            return result
+        if spread >= 0.20:
+            print(f"[Analyzer] 交叉验证跨样本离散过大: 样本估值={cross_check['valuations']} "
+                  f"| spread={spread:.3f} >= 0.20 → 降级 valuation_confidence=low")
+            degraded = dict(first)
+            degraded["valuation_confidence"] = "low"
+            degraded["cross_check"] = cross_check
+            return degraded
 
-        print(f"[Analyzer] 交叉验证跨档不一致: 样本估值={cross_check['valuations']} "
-              f"| bands={bands} | agreement={band_agreement:.2f} "
-              f"→ 降级 valuation_confidence=low")
-        degraded = dict(first)
-        degraded["valuation_confidence"] = "low"
-        degraded["cross_check"] = cross_check
-        return degraded
+        if dispersed:
+            print(f"[Analyzer] 交叉验证档内离散 ({len(values)} 样本): "
+                  f"spread={spread:.3f} | direction_agreement={direction_agreement} "
+                  f"→ 仅留痕，保留 confidence")
+        else:
+            print(f"[Analyzer] 交叉验证一致 ({len(values)} 样本): "
+                  f"估值={values[0]:.2f}")
+        result = dict(first)
+        result["cross_check"] = cross_check
+        return result
 
     @staticmethod
     def _agreement(values: list) -> float:
