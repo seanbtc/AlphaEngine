@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.atomic_io import atomic_copy, atomic_write_text
-from src.valuation import UNASSESSED_LABEL, band_of, is_valid, state_of
+from src.valuation import UNASSESSED_LABEL, is_valid, state_of
 
 STATE_VERSION = 2
 
@@ -63,6 +63,25 @@ class StateManager:
             },
         }
 
+    @staticmethod
+    def _normalize_valuation_labels(state) -> bool:
+        """把旧 4 档 label/缺失 state 统一到 10 档状态；返回是否有改动."""
+        block = state.get("valuation") if isinstance(state, dict) else None
+        if not isinstance(block, dict):
+            return False
+        current = block.get("current")
+        if not is_valid(current):
+            return False
+        expected = state_of(current)
+        changed = False
+        if block.get("label") != expected:
+            block["label"] = expected
+            changed = True
+        if block.get("state") != expected:
+            block["state"] = expected
+            changed = True
+        return changed
+
     def load(self, on_recovered=None, memory=None) -> dict:
         """加载 state.json; 损坏 (JSON 非法/版本不符/结构非法) 时备份并从记忆重建.
 
@@ -88,6 +107,8 @@ class StateManager:
             if problem is None and isinstance(loaded, dict) and loaded.get("version") == 1:
                 migrated = self._migrate_v1(loaded)
                 self._state = migrated
+                if self._normalize_valuation_labels(self._state):
+                    self._dirty = True
                 self._dirty = True
                 self.save()
                 print("[StateManager] state v1 → v2 迁移完成: "
@@ -98,6 +119,8 @@ class StateManager:
                 problem = self._validate_state(loaded)
             if problem is None:
                 self._state = loaded
+                if self._normalize_valuation_labels(self._state):
+                    self._dirty = True
                 return self._state
             self._recover_from_corruption(problem, on_recovered, memory)
             return self._state
@@ -266,8 +289,9 @@ class StateManager:
         previous = block.get("current")
         block["previous"] = previous if is_valid(previous) else None
         block["current"] = round(float(value), 4)
-        block["label"] = band_of(value)
-        block["state"] = state_of(value)
+        state_label = state_of(value)
+        block["label"] = state_label
+        block["state"] = state_label
         block["confidence"] = conf
         block["evidence"] = str(evidence or "")[:300]
         block["updated_at"] = updated_at or _utc_iso()
@@ -294,7 +318,7 @@ class StateManager:
         if is_valid(raw):
             state["valuation"].update({
                 "current": round(float(raw), 4),
-                "label": band_of(raw),
+                "label": state_of(raw),
                 "state": state_of(raw),
                 "confidence": str(last.get("confidence") or "low"),
                 "evidence": str(last.get("note") or "")[:300],

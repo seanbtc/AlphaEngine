@@ -153,7 +153,7 @@ def test_fetch_error_freezes_valuation_and_sets_outage(tmp_path, capsys):
 
     sm = comp["state"]
     assert sm.get_valuation() == pytest.approx(0.42)          # 估值冻结
-    assert sm.get("valuation.label") == "轻度低估"
+    assert sm.get("valuation.label") == "中性偏下"
     assert sm.get("runtime.analysis_count") == 0              # 故障轮不计分析
     outage = sm.get("runtime.outage")
     assert outage["reason"] == "fetch_error"
@@ -214,7 +214,7 @@ def test_idle_does_not_drift_valuation(tmp_path, capsys):
     capsys.readouterr()
 
     assert sm.get_valuation() == pytest.approx(0.62)
-    assert sm.get("valuation.label") == "轻度高估"
+    assert sm.get("valuation.label") == "偏贵"
     assert sm.get("runtime.analysis_count") == 3
     assert sm.get("runtime.outage") in ({}, None)
 
@@ -231,7 +231,7 @@ def test_normal_idle_unchanged_without_outage(tmp_path, capsys):
     assert comp["dingtalk"].alerts == []
     assert sm.get_valuation() == pytest.approx(0.42)
     assert "Idle (no new tweets)" in out
-    assert "估值保持 0.42 · 轻度低估" in out
+    assert "估值保持 0.42 · 中性偏下" in out
 
 
 # ---- 2. 失败推文重放 ----
@@ -276,7 +276,7 @@ def test_replay_next_cycle_success_clears_pending_and_outage(tmp_path, capsys):
     # 重放轮与正常轮语义一致: 计数/发帖/预测照常
     assert comp["state"].get("runtime.analysis_count") == 2
     assert comp["state"].get("runtime.post_count") == 1
-    assert "valuation: 0.42 (轻度低估)" in out
+    assert "valuation: 0.42 (中性偏下)" in out
 
 
 def test_replay_failure_requeues_without_duplicate_or_alert(tmp_path, capsys):

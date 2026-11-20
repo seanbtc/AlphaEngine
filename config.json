@@ -202,6 +202,10 @@
     "bulk_fetch_limit": 2000,
     "max_analysis_samples": 200
   },
+  "market_reference": {
+    "_note": "外部估值参考：Alternative.me F&G + AHR999；只注入 prompt 作参考，不直接决定 valuation。",
+    "enabled": true
+  },
   "valuation": {
     "_note": "0–1 市场估值 (0=极度低估, 1=极度高估), 由 AI 每轮直接输出, 本地不做平滑/冷却/连续确认/状态机推进; 无新信息时估值保持不变。档位口径: 0-0.2 极度低估 / 0.2-0.5 轻度低估 / 0.5-0.8 轻度高估 / 0.8-1 极度高估 (左闭右开)。cross_check: 同一 prompt 采样 samples 次 (1=关闭); 样本跨档不一致 → valuation_confidence 降级 low; 档内数值离散仅留痕, 不改变置信。",
     "cross_check": {

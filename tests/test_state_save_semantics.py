@@ -114,9 +114,9 @@ def test_set_marks_dirty_and_save_writes(tmp_path):
 def test_regenerate_from_memory_forces_save(tmp_path):
     memory = Memory(str(tmp_path))
     memory.save_valuation_history([
-        {"date": "2026-09-10T00:00:00Z", "valuation": 0.18, "label": "极度低估",
+        {"date": "2026-09-10T00:00:00Z", "valuation": 0.18, "label": "深度低估",
          "confidence": "medium", "note": "投降"},
-        {"date": "2026-09-20T00:00:00Z", "valuation": 0.32, "label": "轻度低估",
+        {"date": "2026-09-20T00:00:00Z", "valuation": 0.32, "label": "偏低估",
          "confidence": "high", "note": "ETF 回流"},
     ])
     sm = StateManager(str(tmp_path), "state.json")
@@ -127,7 +127,7 @@ def test_regenerate_from_memory_forces_save(tmp_path):
     assert disk["analysis_count"] == 2
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert persisted["valuation"]["current"] == pytest.approx(0.32)
-    assert persisted["valuation"]["label"] == "轻度低估"
+    assert persisted["valuation"]["label"] == "偏低估"
     # force 落盘后恢复干净: 裸 save() 不再写盘
     before = (tmp_path / "state.json").stat().st_mtime_ns
     sm.save()

@@ -78,7 +78,7 @@ def test_promo_event_structure_unchanged(monkeypatch):
     assert record["source"] == "AlphaEngine"
     assert record["post_no"] == 18
     assert record["valuation"] == 0.62
-    assert record["valuation_label"] == "轻度高估"
+    assert record["valuation_label"] == "偏贵"
     assert isinstance(record["content"], str)
     assert record["ts"]
 

@@ -188,5 +188,5 @@ def test_run_first_analysis_accepts_valid_valuation(tmp_path):
 
     sm = components["state"]
     assert sm.get_valuation() == pytest.approx(0.62)
-    assert sm.get("valuation.label") == "轻度高估"
+    assert sm.get("valuation.label") == "偏贵"
     assert sm.get("runtime.analysis_count") == 1

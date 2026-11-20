@@ -6,7 +6,7 @@
 - 失效阈值: unmet >= max(2, ceil(n/2)); 数据缺失 (unknown) 不计入 unmet,
   避免数据源故障把命题误判为失效;
 - 生命周期: active → weakened → invalidated / expired / superseded.
-- label 为提出命题时所处的估值档位 (极度低估/轻度低估/轻度高估/极度高估),
+- label 为提出命题时所处的 10 档估值状态 (极端投降/深度低估/.../泡沫狂热),
   仅作追溯, 不参与任何执行逻辑。
 """
 import json
@@ -14,11 +14,11 @@ import math
 import os
 from datetime import datetime, timedelta, timezone
 
-from src.valuation import BAND_LABELS
+from src.valuation import STATE_LABELS
 
 THESIS_FILE = "theses.jsonl"
 
-REGIMES = set(BAND_LABELS)
+REGIMES = set(STATE_LABELS)
 
 NUMERIC_METRICS = {
     "close", "sma50", "sma100", "sma200", "sma250",
@@ -194,7 +194,10 @@ def normalize_thesis(raw, now: datetime = None) -> dict | None:
     if not any(cond["metric"] in PRICE_METRICS for cond in conditions):
         return None
     label = str(raw.get("label") or "").strip()
-    if label not in BAND_LABELS:
+    legacy = {"极度低估": "深度低估", "轻度低估": "偏低估",
+              "轻度高估": "偏贵", "极度高估": "极度高估"}
+    label = legacy.get(label, label)
+    if label not in STATE_LABELS:
         label = ""
     confidence = raw.get("confidence")
     try:

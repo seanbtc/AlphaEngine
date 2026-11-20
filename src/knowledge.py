@@ -561,9 +561,9 @@ class Knowledge:
             model = getattr(self.analyzer, "last_call_model", None)
         if temperature is None:
             temperature = getattr(self.analyzer, "last_call_temperature", None)
-        from src.valuation import band_of, is_valid
+        from src.valuation import is_valid, state_of
         value_text = f"{float(valuation):.4f}" if is_valid(valuation) else "na"
-        label = valuation_label or (band_of(valuation) if is_valid(valuation) else "")
+        label = valuation_label or (state_of(valuation) if is_valid(valuation) else "")
         ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         entry = {
             "ts": ts,

@@ -17,7 +17,7 @@ _HISTORY = [
      "confidence": "medium", "note": "ETF 流出放缓"},
     {"date": "2026-09-15T00:00:00Z", "valuation": 0.48, "label": "轻度低估",
      "confidence": "low", "note": "分歧"},
-    {"date": "2026-10-01T00:00:00Z", "valuation": 0.62, "label": "轻度高估",
+    {"date": "2026-10-01T00:00:00Z", "valuation": 0.62, "label": "偏贵",
      "confidence": "high", "note": "MVRV 偏高"},
 ]
 
@@ -55,7 +55,7 @@ def test_corrupt_json_backup_and_rebuild(tmp_path):
     assert backup.read_text(encoding="utf-8") == "{ this is not json"
     assert state["version"] == STATE_VERSION
     assert state["valuation"]["current"] == pytest.approx(0.62)
-    assert state["valuation"]["label"] == "轻度高估"
+    assert state["valuation"]["label"] == "偏贵"
     assert state["runtime"]["analysis_count"] == count
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert persisted["valuation"]["current"] == pytest.approx(0.62)
@@ -220,7 +220,7 @@ def test_normal_load_no_backup_no_rebuild(tmp_path):
         "version": STATE_VERSION,
         "created_at": "2026-11-01T00:00:00Z",
         "valuation": {
-            "current": 0.55, "previous": 0.5, "label": "轻度高估",
+            "current": 0.55, "previous": 0.5, "label": "偏贵",
             "confidence": "medium", "evidence": "x",
             "updated_at": "2026-11-01T00:00:00Z", "changes": 1,
         },
@@ -254,7 +254,7 @@ def test_default_state_when_file_missing(tmp_path):
 def test_rebuild_uses_passed_memory_object(tmp_path):
     memory = Memory(str(tmp_path))
     memory.save_valuation_history([{"date": "2026-09-10T00:00:00Z",
-                                    "valuation": 0.18, "label": "极度低估",
+                                    "valuation": 0.18, "label": "深度低估",
                                     "confidence": "high", "note": "投降"}])
     (tmp_path / "state.json").write_text("broken", encoding="utf-8")
     events = []
@@ -264,7 +264,7 @@ def test_rebuild_uses_passed_memory_object(tmp_path):
 
     assert events[0]["rebuilt"] is True
     assert state["valuation"]["current"] == pytest.approx(0.18)
-    assert state["valuation"]["label"] == "极度低估"
+    assert state["valuation"]["label"] == "深度低估"
     assert state["valuation"]["confidence"] == "high"
     assert state["valuation"]["evidence"] == "投降"
 
@@ -280,7 +280,7 @@ def test_set_valuation_tracks_previous_and_changes(tmp_path):
 
     assert block["previous"] == pytest.approx(0.42)
     assert block["current"] == pytest.approx(0.62)
-    assert block["label"] == "轻度高估"
+    assert block["label"] == "偏贵"
     # 首次评估 (None → 0.42) 不算变更, 0.42 → 0.62 记 1 次
     assert block["changes"] == 1
     assert sm.get_valuation() == pytest.approx(0.62)

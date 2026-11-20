@@ -29,12 +29,13 @@ from src.ma_context import build_ma_context, summarize_ma_context
 from src.pending_analysis import PendingAnalysis
 from src.cycle_context import build_cycle_context
 from src.datafeed import DataFeed
+from src.market_reference import collect_market_reference
 from src.notify import DingTalk
 from src.scorecard import build_scorecard
 from src.thesis import (adopt_thesis, append_event as append_thesis_event,
                         evaluate_thesis, load_current as load_current_thesis,
                         save_current as save_current_thesis)
-from src.valuation import band_of, change_text, describe, is_cross_band, is_valid
+from src.valuation import change_text, describe, is_cross_band, is_valid, state_of
 from src import manifest as run_manifest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -128,7 +129,7 @@ def _write_promo_post(cfg: dict, post_text: str, post_no: int, valuation):
             "post_no": post_no,
             "content": payload_text,
             "valuation": valuation if is_valid(valuation) else None,
-            "valuation_label": band_of(valuation),
+            "valuation_label": state_of(valuation),
         })
         if _push_promo_event(record):
             print(f"[Promo] 帖子 No.{post_no} 已推送到 Promo 事件服务")
@@ -199,7 +200,7 @@ def init_components(cfg: dict):
 
     datafeed = DataFeed(cfg.get("datafeed", {}))
 
-    return {
+    components = {
         "cfg": cfg, "data_dir": data_dir,
         "memory": memory, "state": state_mgr,
         "fetcher": fetcher, "analyzer": analyzer,
@@ -207,6 +208,9 @@ def init_components(cfg: dict):
         "datafeed": datafeed, "dingtalk": dingtalk,
         "pending": pending,
     }
+    if (cfg.get("market_reference") or {}).get("enabled", False):
+        components["market_reference"] = collect_market_reference
+    return components
 
 
 def print_status(components: dict):
@@ -274,6 +278,25 @@ def build_market_state(components: dict, price: float = None,
                 state["ma_context"] = ma_context
         except Exception as exc:
             print(f"[MA] 均线上下文构建失败 (不影响本轮): {exc}")
+    # 200MA 显式提取（MA 上下文中已有，但单独给 AI 一个明确锚点）
+    ma_context = state.get("ma_context") or {}
+    sma200 = ((ma_context.get("snapshot") or {}).get("mas") or {}).get("sma200")
+    if isinstance(sma200, dict) and sma200.get("value") is not None:
+        state["ma200"] = {
+            "value": sma200.get("value"),
+            "pos": sma200.get("pos"),
+            "dist_pct": sma200.get("dist_pct"),
+            "slope": sma200.get("slope"),
+        }
+    # 外部估值参考 (F&G / AHR999)：只读，失败不阻塞；在 init_components 按开关注入
+    ref_provider = components.get("market_reference")
+    if callable(ref_provider):
+        try:
+            ref = ref_provider(now=datetime.now(timezone.utc), price=state.get("price"))
+            if isinstance(ref, dict):
+                state["market_reference"] = ref
+        except Exception as exc:
+            print(f"[MarketRef] 外部指标获取失败 (不影响本轮): {exc}")
     # 周期定位与历史类比 (日线, 纯数据): 辅助 AI 校准估值; 失败不阻塞主流程
     cycle_cfg = (components.get("cfg") or {}).get("cycle_context") or {}
     if cycle_cfg.get("enabled", False):
@@ -521,12 +544,12 @@ def run_backfill(components: dict, force: bool = False) -> bool:
 
         scores = analysis.get("evidence_scores", {})
         meta = analysis.get("meta", {})
-        print(f"[Backfill]   valuation={float(valuation):.2f} ({band_of(valuation)}), "
+        print(f"[Backfill]   valuation={float(valuation):.2f} ({state_of(valuation)}), "
               f"scores={json.dumps(scores)}, quality={meta.get('analysis_quality','?')}")
 
         collected.append({
             "valuation": round(float(valuation), 4),
-            "label": band_of(valuation),
+            "label": state_of(valuation),
             "scores": scores,
             "summary": analysis.get("summary", ""),
             "conf": analysis.get("valuation_confidence", "low"),
@@ -572,7 +595,7 @@ def run_backfill(components: dict, force: bool = False) -> bool:
     memory.append_valuation({
         "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "valuation": final_valuation,
-        "label": band_of(final_valuation),
+        "label": state_of(final_valuation),
         "confidence": rc.get("conf", "low"),
         "note": rc.get("evidence", ""),
     })
@@ -710,7 +733,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
                 continue
             last_analysis = a
             print(f"[首次分析]   valuation={float(valuation):.2f} "
-                  f"({band_of(valuation)}), conf={a.get('valuation_confidence','?')}")
+                  f"({state_of(valuation)}), conf={a.get('valuation_confidence','?')}")
             sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
             _record_ai_call_meta(sm, analyzer)
             sm.update_runtime()
@@ -743,7 +766,7 @@ def run_first_analysis(components: dict, max_samples: int = 100) -> bool:
     memory.append_valuation({
         "date": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "valuation": valuation,
-        "label": band_of(valuation),
+        "label": state_of(valuation),
         "confidence": conf,
         "note": evidence_text,
     })
@@ -1067,7 +1090,7 @@ def run_cycle(components: dict) -> bool:
             # Phase 1: AI 命题并入当前命题 (非法则保留旧命题), 评估后落 theses.jsonl
             thesis_current = (_adopt_analysis_thesis(
                 c, analysis.get("thesis"), market_state,
-                label=band_of(analysis.get("valuation"))) or thesis_current)
+                label=state_of(analysis.get("valuation"))) or thesis_current)
             if thesis_current:
                 market_state["thesis"] = thesis_current
             sm.set("runtime.last_deepseek_at", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
@@ -1103,7 +1126,7 @@ def run_cycle(components: dict) -> bool:
             conf = analysis.get("valuation_confidence", "low")
             meta = analysis.get("meta", {})
             valuation_evidence = analysis.get("valuation_evidence", "")
-            label = band_of(valuation)
+            label = state_of(valuation)
 
             print(f"  valuation: {valuation:.2f} ({label}) confidence: {conf}")
             print(f"  evidence_scores: {json.dumps(analysis.get('evidence_scores', {}))}")

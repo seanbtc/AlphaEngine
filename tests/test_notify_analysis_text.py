@@ -30,7 +30,7 @@ def test_analysis_text_header_shows_valuation_band():
     text = _dt().analysis_text("摘要", 0.62, confidence="medium",
                                signal_board=SIGNALS, post_no=39)
 
-    assert text.startswith("No.39 | 估值 0.62 · 轻度高估")
+    assert text.startswith("No.39 | 估值 0.62 · 偏贵")
     assert "周期" not in text
     assert "置信: medium" not in text
     for label in ("[机构]", "[衍生品]", "[盈利]", "[链上]", "[宏观]"):
@@ -62,7 +62,7 @@ def test_analysis_text_without_forecast_omits_prediction():
 
     assert "评估总结" not in text
     assert "预测:" not in text
-    assert text.startswith("估值 0.18 · 极度低估")
+    assert text.startswith("估值 0.18 · 深度低估")
 
 
 def test_format_forecast_handles_invalid_payload():

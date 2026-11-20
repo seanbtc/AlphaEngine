@@ -18,7 +18,7 @@
 VALUATION_MIN = 0.0
 VALUATION_MAX = 1.0
 
-# (档位名, 下界含, 上界不含) — 顺序即从严到宽
+# 旧 4 档仅保留给内部交叉验证/旧数据兼容，不再作为对外标签。
 BAND_TABLE = (
     ("极度低估", 0.0, 0.2),
     ("轻度低估", 0.2, 0.5),
@@ -42,6 +42,14 @@ STATE_TABLE = (
     ("泡沫/狂热", 0.9, 1.0),
 )
 STATE_LABELS = tuple(item[0] for item in STATE_TABLE)
+
+# 交叉验证用的粗粒度置信区间（只用于判断两次采样是否同区，不对外展示）
+CONFIDENCE_BAND_TABLE = (
+    ("低区", 0.0, 0.2),
+    ("中低区", 0.2, 0.5),
+    ("中高区", 0.5, 0.8),
+    ("高区", 0.8, 1.0),
+)
 
 
 def clampi(value):
@@ -75,10 +83,10 @@ def band_of(value) -> str:
 
 
 def describe(value, digits: int = 2) -> str:
-    """渲染「0.62 · 轻度高估」; 非法值 → 「未评估」."""
+    """渲染「0.62 · 偏贵」; 非法值 → 「未评估」."""
     if not is_valid(value):
         return UNASSESSED_LABEL
-    return f"{float(value):.{digits}f} · {band_of(value)}"
+    return f"{float(value):.{digits}f} · {state_of(value)}"
 
 
 def state_of(value) -> str:
@@ -92,11 +100,20 @@ def state_of(value) -> str:
     return STATE_TABLE[-1][0]
 
 
-def describe_state(value, digits: int = 2) -> str:
-    """渲染「0.35 · 轻度低估 · 偏低估」; 非法值 → 「未评估」."""
+def confidence_band_of(value) -> str:
+    """交叉验证用粗粒度区间：底部区/中部区/顶部区。"""
     if not is_valid(value):
         return UNASSESSED_LABEL
-    return f"{float(value):.{digits}f} · {band_of(value)} · {state_of(value)}"
+    number = float(value)
+    for label, _, upper in CONFIDENCE_BAND_TABLE[:-1]:
+        if number < upper:
+            return label
+    return CONFIDENCE_BAND_TABLE[-1][0]
+
+
+def describe_state(value, digits: int = 2) -> str:
+    """兼容别名：现在与 describe 一致（只保留 10 档状态）。"""
+    return describe(value, digits=digits)
 
 
 def parse(raw_value, confidence=None, evidence=None) -> dict | None:
@@ -108,9 +125,11 @@ def parse(raw_value, confidence=None, evidence=None) -> dict | None:
     if conf not in ("high", "medium", "low"):
         conf = "low"
     text = str(evidence or "").strip()[:300]
+    state = state_of(value)
     return {
         "value": value,
-        "label": band_of(value),
+        "label": state,
+        "state": state,
         "confidence": conf,
         "evidence": text,
     }
@@ -129,4 +148,4 @@ def is_cross_band(previous, current) -> bool:
     """是否跨档 (换档才需要对外提示, 档内微调不打扰)."""
     if not (is_valid(previous) and is_valid(current)):
         return False
-    return band_of(previous) != band_of(current)
+    return state_of(previous) != state_of(current)

@@ -76,7 +76,7 @@ def test_samples_two_same_band_consistent(capsys):
     assert result is not None
     assert result["valuation_confidence"] == "high"
     assert analyzer.calls == 2
-    assert "交叉验证一致 (2 样本): 估值=0.62 (轻度高估)" in out
+    assert "交叉验证一致 (2 样本): 估值=0.62 (中高区)" in out
     assert result["cross_check"]["band_agreement"] == 1.0
     assert result["cross_check"]["dispersed"] is False
 
@@ -89,7 +89,7 @@ def test_samples_two_cross_band_degrades(capsys):
 
     assert result["valuation_confidence"] == "low"
     assert "交叉验证跨档不一致" in out
-    assert "轻度低估" in out and "轻度高估" in out
+    assert "中低区" in out and "中高区" in out
     assert analyzer.calls == 2
     # 归一后保留原字段，并新增审计字段
     assert set(_result()) <= set(result)
