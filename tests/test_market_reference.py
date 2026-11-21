@@ -28,9 +28,9 @@ class _FakeResponse:
 def test_fear_greed_parse_and_average(monkeypatch):
     market_reference.clear_cache()
     payload = {'data': [
-        {'value': '10', 'value_classification': 'Extreme Fear', 'timestamp': '1'},
-        {'value': '12', 'value_classification': 'Extreme Fear', 'timestamp': '2'},
-        {'value': '20', 'value_classification': 'Extreme Fear', 'timestamp': '3'},
+        {'value': '10', 'value_classification': 'Extreme Fear', 'timestamp': '1795219200'},
+        {'value': '12', 'value_classification': 'Extreme Fear', 'timestamp': '1795132800'},
+        {'value': '20', 'value_classification': 'Extreme Fear', 'timestamp': '1795046400'},
     ]}
     monkeypatch.setattr(market_reference.requests, 'get',
                         lambda *args, **kwargs: _FakeResponse(payload))
@@ -40,6 +40,8 @@ def test_fear_greed_parse_and_average(monkeypatch):
     assert result['classification'] == '极度恐惧'
     assert result['avg_7d'] == pytest.approx(14.0)
     assert result['avg_30d'] == pytest.approx(14.0)
+    assert result['as_of'] == '2026-11-21'
+    assert result['stale'] is False
 
 
 def test_fear_greed_failure_safe(monkeypatch):
@@ -83,7 +85,7 @@ def test_format_market_reference_section():
     lines = analyzer._format_market_reference({
         'market_reference': {
             'fear_greed': {'available': True, 'value': 10, 'classification': '极度恐惧',
-                           'avg_7d': 12.0, 'avg_30d': 15.0},
+                           'as_of': '2026-11-21', 'avg_7d': 12.0, 'avg_30d': 15.0, 'stale': False},
             'ahr999': {'available': True, 'value': 0.31, 'zone': '抄底区',
                         'as_of': '2026-11-18', 'price': 63500.0, 'stale': False},
         },
@@ -91,6 +93,7 @@ def test_format_market_reference_section():
     })
     text = '\n'.join(lines)
     assert '恐惧贪婪: 10' in text
+    assert 'as_of 2026-11-21' in text
     assert 'AHR999: 0.31' in text
     assert '200MA: 72,800' in text
     assert '斜率 down' in text

@@ -93,12 +93,23 @@ def fetch_fear_greed(*, limit: int = 30, timeout: float = HTTP_TIMEOUT_SECONDS) 
         current = parsed[0]
         avg7 = sum(item['value'] for item in parsed[:7]) / min(7, len(parsed))
         avg30 = sum(item['value'] for item in parsed[:30]) / min(30, len(parsed))
+        as_of = None
+        age_days = None
+        try:
+            latest_ts = int(float(current.get('timestamp')))
+            latest_date = datetime.fromtimestamp(latest_ts, tz=timezone.utc).date()
+            as_of = latest_date.isoformat()
+            age_days = (datetime.now(timezone.utc).date() - latest_date).days
+        except (TypeError, ValueError, OSError, OverflowError):
+            as_of = datetime.now(timezone.utc).date().isoformat()
         result = {
             'available': True,
             'value': current['value'],
             'classification': current['classification'],
             'raw_classification': current['raw_classification'],
-            'as_of': datetime.now(timezone.utc).date().isoformat(),
+            'as_of': as_of,
+            'age_days': age_days,
+            'stale': bool(age_days is not None and age_days > 1),
             'avg_7d': round(avg7, 1),
             'avg_30d': round(avg30, 1),
             'samples': len(parsed),

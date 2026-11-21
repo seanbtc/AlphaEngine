@@ -663,9 +663,12 @@ class Analyzer:
         ref = market_state.get("market_reference") or {}
         fng = ref.get("fear_greed") or {}
         if fng.get("available"):
+            stale_text = " | 数据可能过期" if fng.get("stale") else ""
             lines.append(
                 f"- 恐惧贪婪: {fng.get('value')}（{fng.get('classification') or '?'}）"
+                f" | as_of {fng.get('as_of') or '?'}"
                 f" | 7d均值 {fng.get('avg_7d')} | 30d均值 {fng.get('avg_30d')}"
+                f"{stale_text}"
             )
         ahr = ref.get("ahr999") or {}
         if ahr.get("available"):
